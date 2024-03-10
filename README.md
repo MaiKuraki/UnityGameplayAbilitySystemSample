@@ -14,14 +14,14 @@ The minimum Unity version required for this project is Unity 2022.3. It will not
 ## File Directory Structure
 -   Assets/CycloneGames
     -   This assembly provides a framework design akin to Unreal Engine's GameplayFramework, featuring types such as GameInstance, World, GameMode, PlayerController, and PlayerState. It offers a comfortable transition for users familiar with Unreal Engine.
-    -   [README](./UnityStartUp/Assets/CycloneGames/README.md)
+    -   [README](./GameplayAbilitySystemSample/Assets/CycloneGames/README.md)
 -   Assets/CycloneGames.Service
     -   This assembly delivers services such as resource management (Addressable) and display management (GraphicsSettings).
-    -   [README](./UnityStartUp/Assets/CycloneGames.Service/README.md)
+    -   [README](./GameplayAbilitySystemSample/Assets/CycloneGames.Service/README.md)
 -   Assets/CycloneGames.UIFramework
     -   This assembly provides a simple layered UI framework.
     -   It depends on Addressable from CycloneGames.Service for loading UI Prefabs, and currently, the dependency cannot be eliminated.
-    -   [README](./UnityStartUp/Assets/CycloneGames.UIFramework/README.md)
+    -   [README](./GameplayAbilitySystemSample/Assets/CycloneGames.UIFramework/README.md)
 -   Assets/ARPGSample
     -   This folder contains the directories of the Sample project, providing a launch scene, a starting scene, and gameplay scenes for testing the game flow.
 ## Launch Scene
