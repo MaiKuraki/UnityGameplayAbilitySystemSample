@@ -16,7 +16,19 @@ MonoBehaviour:
   m_Data:
     m_SerializedData: []
   m_GUID: 83c08505d507f3543b9cad4e6ba50b40
-  m_SerializeEntries: []
+  m_SerializeEntries:
+  - m_GUID: 88e2975b00b81454f84146c9dc583e61
+    m_Address: Assets/ARPGSample/Dialogue/WorldStory/Audio/WorldStory_GameplayStart
+      Shared Data.asset
+    m_ReadOnly: 1
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: 5d5cb39e3f4609042ac9a142e57b5604
+    m_Address: Assets/ARPGSample/Dialogue/WorldStory/Text/WorldStory_GameplayStart
+      Shared Data.asset
+    m_ReadOnly: 1
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
   m_ReadOnly: 1
   m_Settings: {fileID: 11400000, guid: 21ab00d68a84fc944bdd96a426a3f57c, type: 2}
   m_SchemaSet:

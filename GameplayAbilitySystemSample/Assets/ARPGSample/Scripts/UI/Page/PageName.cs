@@ -12,8 +12,9 @@ namespace ARPGSample.UI
         //  Loading
         public static readonly string SimpleLoadingPage = "SimpleLoadingPage";  // SceneLogic_LaunchScene require this Page, if you want to modify this value, please sync to SceneLogic_LaunchScene.cs file
         
-        //  Login
+        //  StartUp
         public static readonly string StartUpPage = "StartUpPage";
+        public static readonly string TutorialPage = "TutorialPage";
         
         //  Gameplay
         public static readonly string GameplayMenuPage = "GameplayMenuPage";

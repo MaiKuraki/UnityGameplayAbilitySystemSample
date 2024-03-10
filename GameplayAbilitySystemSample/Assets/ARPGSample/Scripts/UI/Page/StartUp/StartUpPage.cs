@@ -11,6 +11,7 @@ namespace ARPGSample.UI
     public class StartUpPage : UIPage
     {
         [Inject] private ILocalSave localSaveService;
+        [Inject] private IUIService uiService;
         
         [SerializeField] private TMP_Text Text_Version;
         [SerializeField] private Button Btn_NewGame;
@@ -60,6 +61,7 @@ namespace ARPGSample.UI
 
         void ClickTutorial()
         {
+            uiService.OpenUI(UI.PageName.TutorialPage);
             OnClickTutorial?.Invoke();
         }
 
