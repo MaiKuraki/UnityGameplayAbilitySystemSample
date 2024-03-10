@@ -1,0 +1,22 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5e6368131082a564a81378d1e7fb83c8, type: 3}
+  m_Name: AttributeSet_Player
+  m_EditorClassIdentifier: CMRPG.Gameplay:CMRPG.Gameplay:PawnAttributeSet
+  health: {fileID: 11400000, guid: 4f74f4fb6a781654b93b052713b2dd44, type: 2}
+  healthMax: {fileID: 11400000, guid: 568e283cdbe1c594f86507363b90ddd8, type: 2}
+  stamina: {fileID: 11400000, guid: 166f3a201bc36d348bbd1ddfcef7de11, type: 2}
+  staminaMax: {fileID: 11400000, guid: 63452757aa949ea488d5823a7f435c4b, type: 2}
+  movementSpeed: {fileID: 11400000, guid: 923f25aed2c31f64f9ad8504bb3eafaa, type: 2}
+  movementSpeedOrigin: {fileID: 11400000, guid: a8690d59f514902409a08bf2e5025cfd,
+    type: 2}
+  jumpForce: {fileID: 11400000, guid: 52b31c6477cbb8d40bbe66cab2063d9a, type: 2}

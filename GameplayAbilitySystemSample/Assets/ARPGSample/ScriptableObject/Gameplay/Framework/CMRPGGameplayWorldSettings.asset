@@ -1,0 +1,27 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ff7d9eb39fc4b5b4795dec5a8580c3c9, type: 3}
+  m_Name: CMRPGGameplayWorldSettings
+  m_EditorClassIdentifier: 
+  gameModeClass: {fileID: -7583811357856807243, guid: a03040fb8034c7c40945676bc4919e49,
+    type: 3}
+  playerControllerClass: {fileID: -5190276525316737091, guid: 1d716842c45579f42bd70a3433170f5a,
+    type: 3}
+  defaultPawnClass: {fileID: -4846956231807362425, guid: 6992c987bc15c20448ced730f5d7aa72,
+    type: 3}
+  playerStateClass: {fileID: -4203813465997154054, guid: 07582a549920764468281855ce65f5dd,
+    type: 3}
+  spectatorPawnClass: {fileID: 2862934448135924281, guid: fb771c81ce0079b4d84abe97119d6dd4,
+    type: 3}
+  cameraManagerClass: {fileID: -4138122573593715654, guid: 5fffb71e271d6bd4f9aaf50e33cd2624,
+    type: 3}
+  killZ: -100

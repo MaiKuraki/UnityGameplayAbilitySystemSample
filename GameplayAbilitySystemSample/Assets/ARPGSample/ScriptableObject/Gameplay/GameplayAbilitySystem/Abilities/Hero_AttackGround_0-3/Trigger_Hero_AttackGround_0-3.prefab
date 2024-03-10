@@ -1,0 +1,127 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &5411678366980659094
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 8266077092815178510}
+  - component: {fileID: 1844360286281449386}
+  - component: {fileID: -1490776581890544968}
+  m_Layer: 7
+  m_Name: Trigger_Hero_AttackGround_0-3
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &8266077092815178510
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 5411678366980659094}
+  serializedVersion: 2
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!60 &1844360286281449386
+PolygonCollider2D:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 5411678366980659094}
+  m_Enabled: 0
+  m_Density: 1
+  m_Material: {fileID: 0}
+  m_IncludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ExcludeLayers:
+    serializedVersion: 2
+    m_Bits: 128
+  m_LayerOverridePriority: 0
+  m_ForceSendLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ForceReceiveLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ContactCaptureLayers:
+    serializedVersion: 2
+    m_Bits: 256
+  m_CallbackLayers:
+    serializedVersion: 2
+    m_Bits: 256
+  m_IsTrigger: 0
+  m_UsedByEffector: 0
+  m_UsedByComposite: 0
+  m_Offset: {x: 0, y: 0}
+  m_SpriteTilingProperty:
+    border: {x: 0, y: 0, z: 0, w: 0}
+    pivot: {x: 0, y: 0}
+    oldSize: {x: 0, y: 0}
+    newSize: {x: 0, y: 0}
+    adaptiveTilingThreshold: 0
+    drawMode: 0
+    adaptiveTiling: 0
+  m_AutoTiling: 0
+  m_Points:
+    m_Paths:
+    - - {x: 0.619424, y: 1.3113236}
+      - {x: 0.05904621, y: 1.4311874}
+      - {x: -0.31302565, y: 1.4861404}
+      - {x: -0.3147732, y: 1.4283006}
+      - {x: -0.013424277, y: 1.3143362}
+      - {x: 0.5869882, y: 1.1355962}
+      - {x: 0.93814385, y: 1.0262308}
+      - {x: 1.0397978, y: 0.9111188}
+      - {x: 1.035743, y: 0.78294224}
+      - {x: 0.97974116, y: 0.71294284}
+      - {x: 0.5707843, y: 0.52331054}
+      - {x: 0.37151372, y: 0.47463492}
+      - {x: -0.21279466, y: 0.4560886}
+      - {x: -0.35016233, y: 0.50201607}
+      - {x: -0.5788995, y: 0.5030817}
+      - {x: -1.008702, y: 0.5642908}
+      - {x: -1.2473546, y: 0.6213621}
+      - {x: -1.4413832, y: 0.5037241}
+      - {x: -1.398197, y: 0.40993446}
+      - {x: -1.0285789, y: 0.29706812}
+      - {x: -0.7505284, y: 0.18150282}
+      - {x: -0.23574457, y: 0.18007219}
+      - {x: 0.16802925, y: 0.1813217}
+      - {x: 0.5969491, y: 0.17882124}
+      - {x: 1.021423, y: 0.29773468}
+      - {x: 1.2202717, y: 0.34810233}
+      - {x: 1.5642622, y: 0.5920425}
+      - {x: 1.559181, y: 0.8677945}
+      - {x: 1.4245005, y: 0.9768525}
+      - {x: 1.1784804, y: 1.0936825}
+      - {x: 0.96710134, y: 1.1782279}
+  m_UseDelaunayMesh: 0
+--- !u!114 &-1490776581890544968
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 5411678366980659094}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ac8e10db1c512db4cbdf2291f8586bdf, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  initialLifeSpanSec: 0
+  HitFXPrefab: {fileID: 7149668401534672461, guid: 1e35d9939d59bba44b4e6d54a3cf4344,
+    type: 3}
+  HitEffectScale: 1.7

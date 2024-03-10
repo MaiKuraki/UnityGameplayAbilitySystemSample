@@ -1,0 +1,75 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bbb281ee3bf0b054c82ac2347e9e782c, type: 3}
+  m_Name: CycloneGamesAssets
+  m_EditorClassIdentifier: 
+  m_GroupName: CycloneGamesAssets
+  m_Data:
+    m_SerializedData: []
+  m_GUID: b7077d4c07608ff44ad14c92fd4c55e7
+  m_SerializeEntries:
+  - m_GUID: cb2847c8ccfd743d7bb6682fb4f47d77
+    m_Address: Assets/CycloneGames/Prefabs
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: e6b679c82f511654284445e6a0f4b14d
+    m_Address: Assets/CycloneGames/ScriptableObject
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: 867b813062146d245b018203ff35f926
+    m_Address: Assets/ARPGSample/ScriptableObject
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: 6a0592a7c9cc80f42ad7d9f765dbd3ef
+    m_Address: Assets/ARPGSample/Dialogue
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: 69f201ece79c33f4fa74702cb5ec62c8
+    m_Address: Assets/ARPGSample/Prefabs/UI
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: 9c53962885c2c4f449125a979d6ad240
+    m_Address: Assets/ARPGSample/Scenes
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: 99f7da8cc64f4c94593f083bf0d9d2f9
+    m_Address: Assets/ARPGSample/Prefabs/Camera
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: af88df6955cfc3947952564bd8b86f2a
+    m_Address: Assets/ARPGSample/Prefabs/Gameplay
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: 9989c272a7dc16e4195462029877287f
+    m_Address: Assets/ARPGSample/Prefabs/InputManager
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: 1ef33b0ed6e53af4e8e019c264218438
+    m_Address: Assets/ARPGSample/Scripts/Gameplay/Player/InputSystem/PlayerInputControls.inputactions
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  m_ReadOnly: 0
+  m_Settings: {fileID: 11400000, guid: 21ab00d68a84fc944bdd96a426a3f57c, type: 2}
+  m_SchemaSet:
+    m_Schemas:
+    - {fileID: 11400000, guid: 8687fc4765058464b9499b0a325051b4, type: 2}
+    - {fileID: 11400000, guid: eb8452d50c2e3134fae728a34e6373a6, type: 2}

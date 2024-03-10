@@ -1,0 +1,44 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 84e27aeceb8293c479246aadc536d1c5, type: 3}
+  m_Name: Hero_AttackGround_0-2
+  m_EditorClassIdentifier: 
+  AbilityName: 
+  AbilityTags:
+    AssetTag: {fileID: 11400000, guid: db44634aee4d5204697479b495f4b37f, type: 2}
+    CancelAbilitiesWithTags: []
+    BlockAbilitiesWithTags: []
+    ActivationOwnedTags: []
+    OwnerTags:
+      RequireTags: []
+      IgnoreTags: []
+    SourceTags:
+      RequireTags: []
+      IgnoreTags: []
+    TargetTags:
+      RequireTags: []
+      IgnoreTags: []
+  Cost: {fileID: 11400000, guid: 9aa5a558e1baaf640ae001e02c278aad, type: 2}
+  Cooldown: {fileID: 0}
+  GameplayEffect: {fileID: 11400000, guid: f34e60843ab06d847b5b412ab7a6f37b, type: 2}
+  ACOverride: {fileID: 22100000, guid: bbc5286ac108d024e850fa04b3552179, type: 2}
+  ColliderPrefab: {fileID: -1490776581890544968, guid: 1479150555f76a94aabbc245797e80ff,
+    type: 3}
+  SourceAttackingEffect: {fileID: 11400000, guid: 82f0cdcf27153ac4caa258c9ef05ee44,
+    type: 2}
+  SourceAttackingHitEffect: {fileID: 11400000, guid: 3086a11c248cff94ebf67c9dbb472002,
+    type: 2}
+  SourceAttackingFinishedEffect: {fileID: 11400000, guid: d05c49f64ee9ccf4180598be5f7e1ba7,
+    type: 2}
+  hit_cameraShakeForce: 1.2
+  hit_cameraShakeDurationSecond: 0.12
+  NoHitAudio: {fileID: 8300000, guid: 57a2cc0eb66cd82408b754099c9b195e, type: 3}

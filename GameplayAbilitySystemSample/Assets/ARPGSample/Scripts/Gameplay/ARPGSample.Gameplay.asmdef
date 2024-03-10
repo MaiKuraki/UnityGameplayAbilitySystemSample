@@ -1,0 +1,30 @@
+{
+    "name": "ARPGSample.Gameplay",
+    "rootNamespace": "",
+    "references": [
+        "GUID:0d8beb7f090555447a6cf5ce9e54dbb4",
+        "GUID:f51ebe6a0ceec4240a699833d6309b23",
+        "GUID:08b38f39e2d9e594389b7a4cf4c2c338",
+        "GUID:b061a8094acaa444a90087c499c32e6e",
+        "GUID:6055be8ebefd69e48b49212b09b47b2f",
+        "GUID:a6dd9604de495304fa7e132cf0424c17",
+        "GUID:3f087ba3c3b924b28b34725a96788a67",
+        "GUID:d5c45e8e066850f45a7028a280c9a4a3",
+        "GUID:561a4c48ac06f6c4fba4898a3f43315a",
+        "GUID:90e03d45e920db64082f3ad8e0e73409",
+        "GUID:75469ad4d38634e559750d17036d5f7c",
+        "GUID:388bf928eb0a86c47b620eef239a25a3",
+        "GUID:8a2d60606350396418cb464978214ea2",
+        "GUID:621c7f2dc3c32ac4fbc7947672558ff7",
+        "GUID:4307f53044263cf4b835bd812fc161a4"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

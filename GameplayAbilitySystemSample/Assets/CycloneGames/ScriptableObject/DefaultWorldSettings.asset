@@ -1,0 +1,27 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ff7d9eb39fc4b5b4795dec5a8580c3c9, type: 3}
+  m_Name: DefaultWorldSettings
+  m_EditorClassIdentifier: 
+  gameModeClass: {fileID: 6763652022649804265, guid: 19979d0c846720d4b89cb2063287d167,
+    type: 3}
+  playerControllerClass: {fileID: 408187659677040126, guid: fbc2cc329e7d5474192afe37fda1f51e,
+    type: 3}
+  defaultPawnClass: {fileID: 7490531899110429117, guid: 0ce9507c4a52b0346a6997c0471d5f62,
+    type: 3}
+  playerStateClass: {fileID: -1867198172284350548, guid: 023e20e95c2bae04f84a8ad796c13a95,
+    type: 3}
+  spectatorPawnClass: {fileID: 2862934448135924281, guid: fb771c81ce0079b4d84abe97119d6dd4,
+    type: 3}
+  cameraManagerClass: {fileID: 5154599261014747449, guid: f7cf0950ed4a66946a564078672f313b,
+    type: 3}
+  killZ: -100

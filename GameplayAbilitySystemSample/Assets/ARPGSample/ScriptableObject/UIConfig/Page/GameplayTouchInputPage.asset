@@ -1,0 +1,17 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: e0ed2f4a7fe492f449faba41c737e4b7, type: 3}
+  m_Name: GameplayTouchInputPage
+  m_EditorClassIdentifier: 
+  pagePrefab: {fileID: 7445335893664896529, guid: 4be8a4d566f54724290978cd4a5dd952,
+    type: 3}
+  layer: {fileID: 11400000, guid: 06967cea118238c488c4c1067371dc07, type: 2}

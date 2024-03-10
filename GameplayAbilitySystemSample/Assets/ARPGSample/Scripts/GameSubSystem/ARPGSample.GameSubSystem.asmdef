@@ -1,0 +1,23 @@
+{
+    "name": "ARPGSample.GameSubSystem",
+    "rootNamespace": "",
+    "references": [
+        "GUID:0d8beb7f090555447a6cf5ce9e54dbb4",
+        "GUID:f51ebe6a0ceec4240a699833d6309b23",
+        "GUID:08b38f39e2d9e594389b7a4cf4c2c338",
+        "GUID:b061a8094acaa444a90087c499c32e6e",
+        "GUID:d5c45e8e066850f45a7028a280c9a4a3",
+        "GUID:3f087ba3c3b924b28b34725a96788a67",
+        "GUID:84651a3751eca9349aac36a66bba901b",
+        "GUID:388bf928eb0a86c47b620eef239a25a3"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

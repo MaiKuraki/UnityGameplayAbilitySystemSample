@@ -1,0 +1,15 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1045 &1
+EditorBuildSettings:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+  m_Scenes:
+  - enabled: 0
+    path: Assets/ARPGSample/Scenes/Scene_Launch.unity
+    guid: 99c9720ab356a0642a771bea13969a05
+  m_configObjects:
+    com.unity.addressableassets: {fileID: 11400000, guid: 97cbc9930eb05914c8fd9e01b2ed763f,
+      type: 2}
+    com.unity.localization.settings: {fileID: 11400000, guid: 3acdace79dcc97d4c9dbeaf4b16a71cc,
+      type: 2}

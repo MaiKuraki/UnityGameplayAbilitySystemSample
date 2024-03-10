@@ -1,0 +1,20 @@
+﻿title: Start
+tags:
+---
+Narrator: Welcome to mysterious world, where an epic adventure is about to unfold! Prepare to become a true hero in this challenging adventure game. Through your efforts and courage, you will grow stronger, overcome formidable opponents, and achieve ultimate victory.  #line:0235b40
+Narrator: You find yourself in a desolate land, surrounded by tension. This world is filled with difficulties and dangers, but it also offers endless opportunities. Explore mysterious caves, ancient ruins, and magical forests to discover legendary treasures and powerful artifacts. #line:00e22f3
+    -> Really? I can feel the tension in the air. #line:0cb72dc 
+        <<jump Detail>>
+    -> Yes! I will strive to overcome challenges and become a true hero!  #line:0c4e992 
+    <<jump GoodLuck>>
+===
+
+title: Detail
+---
+Narrator: As a hero, you must constantly improve your skills and equipment, understand the weaknesses of your enemies, devise strategic plans, and engage in fierce battles against powerful opponents. You will face various challenges, including dragon lairs, maze-like ancient temples, and dangerous forest creatures. Only through surpassing yourself, putting in brave efforts and determination, can you overcome all difficulties and achieve victory in this game. #line:0c1af96 
+===
+
+title: GoodLuck
+---
+O brave hero, let us embark on this marvelous adventure together! #line:0fd3413 
+===

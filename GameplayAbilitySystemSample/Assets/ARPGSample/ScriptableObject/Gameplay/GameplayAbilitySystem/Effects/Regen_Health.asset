@@ -1,0 +1,42 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 36fd283322353ff42b30cd679073251e, type: 3}
+  m_Name: Regen_Health
+  m_EditorClassIdentifier: 
+  gameplayEffect:
+    DurationPolicy: 1
+    DurationModifier: {fileID: 0}
+    DurationMultiplier: 0
+    Modifiers:
+    - Attribute: {fileID: 11400000, guid: 4f74f4fb6a781654b93b052713b2dd44, type: 2}
+      ModifierOperator: 0
+      ModifierMagnitude: {fileID: 11400000, guid: c6bfd9df8f350ad47b534c2bb167959b,
+        type: 2}
+      Multiplier: 1
+    ConditionalGameplayEffects: []
+  gameplayEffectTags:
+    AssetTag: {fileID: 11400000, guid: ebd45ff5472bf3f4db425c5d724fad94, type: 2}
+    GrantedTags: []
+    OngoingTagRequirements:
+      RequireTags: []
+      IgnoreTags: []
+    ApplicationTagRequirements:
+      RequireTags: []
+      IgnoreTags: []
+    RemovalTagRequirements:
+      RequireTags: []
+      IgnoreTags: []
+    RemoveGameplayEffectsWithTag:
+    - {fileID: 11400000, guid: 2a14260878aa7b644925b965a57bdcb6, type: 2}
+  Period:
+    Period: 1
+    ExecuteOnApplication: 0
