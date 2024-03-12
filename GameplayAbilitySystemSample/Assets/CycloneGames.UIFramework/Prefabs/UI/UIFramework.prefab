@@ -139,6 +139,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   uiRoot: {fileID: 6013759316418160856}
   uiCamera: {fileID: 1643993822404064166}
+  canvasScaler: {fileID: 4681971604556566979}
 --- !u!1 &4654844005782856057
 GameObject:
   m_ObjectHideFlags: 0

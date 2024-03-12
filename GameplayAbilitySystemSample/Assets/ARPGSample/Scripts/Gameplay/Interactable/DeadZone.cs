@@ -18,8 +18,8 @@ namespace ARPGSample.Gameplay
         private void OnTriggerEnter2D(Collider2D other)
         {
             Actor otherActor = other.GetComponent<Actor>();
-            RPGPawn pawn = (RPGPawn)otherActor;
-            pawn?.Die();
+            RPGPlayerCharacter playerCharacter = (RPGPlayerCharacter)otherActor;
+            playerCharacter?.Die();
         }
     }
 }

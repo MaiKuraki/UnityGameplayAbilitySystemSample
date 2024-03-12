@@ -9,21 +9,21 @@ namespace ARPGSample.Gameplay
     {
         private static readonly string STATE_NAME = "[Attacking]";
         private int handledAttackID;
-        private RPGPawn.EAttackType handledAttackType;
+        private RPGPlayerCharacter.EAttackType handledAttackType;
         public int HandledAttackID => handledAttackID;
         private CancellationTokenSource cts_ComboWindow = new CancellationTokenSource();
         private CancellationTokenSource cts_Attacking = new CancellationTokenSource();
-        private RPGPawn cachedRPGPawn;
+        private RPGPlayerCharacter _cachedRpgPlayerCharacter;
 
-        public AttackingState(int newAttackID, RPGPawn.EAttackType newAttackType)
+        public AttackingState(int newAttackID, RPGPlayerCharacter.EAttackType newAttackType)
         {
             handledAttackID = newAttackID;
             handledAttackType = newAttackType;
         }
         public void OnEnter(Pawn pawn)
         {
-            var rpgPawn = (RPGPawn)pawn;
-            cachedRPGPawn = (RPGPawn)pawn;
+            var rpgPawn = (RPGPlayerCharacter)pawn;
+            _cachedRpgPlayerCharacter = (RPGPlayerCharacter)pawn;
             //rpgPawn.attack
 
             rpgPawn.ActivateComboAbility(handledAttackID);
@@ -50,13 +50,13 @@ namespace ARPGSample.Gameplay
 
         public void Break(Pawn pawn)
         {
-            var rpgPawn = (RPGPawn)pawn;
+            var rpgPawn = (RPGPlayerCharacter)pawn;
             rpgPawn.ChangeAttackingState(new BreakAttackState());
         }
 
         public void ComboWindow(Pawn pawn)
         {
-            var rpgPawn = (RPGPawn)pawn;
+            var rpgPawn = (RPGPlayerCharacter)pawn;
             int nextAttackID = rpgPawn.GetNextAttackID(handledAttackID, handledAttackType);
             
             if (nextAttackID == rpgPawn.invalidAttackID)
@@ -84,7 +84,7 @@ namespace ARPGSample.Gameplay
         {
             await UniTask.DelayFrame(1); // NOTE: Here Must Wait One Frame to return the correct State Info, The Animation is start playing no delay, dont worry
             if (ct.IsCancellationRequested) return;
-            var rpgPawn = (RPGPawn)handledPawn;
+            var rpgPawn = (RPGPlayerCharacter)handledPawn;
             var animator = rpgPawn.GetComponent<Animator>();
             int layerIdx = animator.GetLayerIndex("BattleLayer");
             var stateInfo = animator.GetCurrentAnimatorStateInfo(layerIdx);
@@ -106,7 +106,7 @@ namespace ARPGSample.Gameplay
         
         async UniTask AutoFinishedAttackTask(Pawn pawn, CancellationTokenSource ct = default)
         {
-            var rpgPawn = (RPGPawn)pawn;
+            var rpgPawn = (RPGPlayerCharacter)pawn;
             // UnityEngine.Debug.Log($"AutoFinishedAfter: {rpgPawn.ComboWindowMilliSecond}ms");
             await UniTask.Delay(rpgPawn.ComboWindowMilliSecond, DelayType.Realtime, PlayerLoopTiming.Update, ct.Token);
             if (ct.IsCancellationRequested)

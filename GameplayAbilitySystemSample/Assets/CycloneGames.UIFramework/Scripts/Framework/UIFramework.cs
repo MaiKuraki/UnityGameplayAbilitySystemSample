@@ -1,5 +1,6 @@
 using CycloneGames.Service;
 using UnityEngine;
+using UnityEngine.UI;
 using Zenject;
 
 namespace CycloneGames.UIFramework
@@ -9,7 +10,9 @@ namespace CycloneGames.UIFramework
         [Inject] private MainCamera gameMainCamera;
         [SerializeField] private UIRoot uiRoot;
         [SerializeField] private Camera uiCamera;
-
+        [SerializeField] private CanvasScaler canvasScaler;
+        
+        public CanvasScaler UICanvasScaler => canvasScaler;
         private Transform uiRootTF;
         private Transform uiCameraTF;
 

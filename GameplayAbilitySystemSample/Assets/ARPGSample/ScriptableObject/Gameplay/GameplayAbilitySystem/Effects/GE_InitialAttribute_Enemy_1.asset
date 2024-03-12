@@ -1,0 +1,56 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 36fd283322353ff42b30cd679073251e, type: 3}
+  m_Name: GE_InitialAttribute_Enemy_1
+  m_EditorClassIdentifier: 
+  gameplayEffect:
+    DurationPolicy: 0
+    DurationModifier: {fileID: 0}
+    DurationMultiplier: 0
+    Modifiers:
+    - Attribute: {fileID: 11400000, guid: 4f74f4fb6a781654b93b052713b2dd44, type: 2}
+      ModifierOperator: 2
+      ModifierMagnitude: {fileID: 11400000, guid: 99deb6121646ddd4184864ded57a15df,
+        type: 2}
+      Multiplier: 1
+    - Attribute: {fileID: 11400000, guid: 166f3a201bc36d348bbd1ddfcef7de11, type: 2}
+      ModifierOperator: 2
+      ModifierMagnitude: {fileID: 11400000, guid: b201e6a300a820c49aab2b259a321a0d,
+        type: 2}
+      Multiplier: 1
+    - Attribute: {fileID: 11400000, guid: 923f25aed2c31f64f9ad8504bb3eafaa, type: 2}
+      ModifierOperator: 2
+      ModifierMagnitude: {fileID: 11400000, guid: 97196ead05518cd4985572e3efec8247,
+        type: 2}
+      Multiplier: 1
+    - Attribute: {fileID: 11400000, guid: 52b31c6477cbb8d40bbe66cab2063d9a, type: 2}
+      ModifierOperator: 2
+      ModifierMagnitude: {fileID: 11400000, guid: 41797fbce151c6d4da3e2292c1efdc05,
+        type: 2}
+      Multiplier: 16
+    ConditionalGameplayEffects: []
+  gameplayEffectTags:
+    AssetTag: {fileID: 11400000, guid: ebd45ff5472bf3f4db425c5d724fad94, type: 2}
+    GrantedTags: []
+    OngoingTagRequirements:
+      RequireTags: []
+      IgnoreTags: []
+    ApplicationTagRequirements:
+      RequireTags: []
+      IgnoreTags: []
+    RemovalTagRequirements:
+      RequireTags: []
+      IgnoreTags: []
+    RemoveGameplayEffectsWithTag: []
+  Period:
+    Period: 0
+    ExecuteOnApplication: 0

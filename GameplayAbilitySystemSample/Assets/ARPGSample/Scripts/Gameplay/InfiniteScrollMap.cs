@@ -15,7 +15,7 @@ namespace ARPGSample.Gameplay
         private float halfWidth;
 
         private Vector3 originPos;
-        private RPGPawn playerPawn;
+        private RPGPlayerCharacter _playerPlayerCharacter;
         
         private void Start()
         {
@@ -33,7 +33,7 @@ namespace ARPGSample.Gameplay
             {
                 GameMode GM = world.GetGameMode();
                 PlayerController PC = GM?.GetPlayerController();
-                RPGPawn newPlayerPawn = (RPGPawn)PC?.GetPawn();
+                RPGPlayerCharacter newPlayerPlayerCharacter = (RPGPlayerCharacter)PC?.GetPawn();
                 PlayerState PS = PC?.GetPlayerState();
 
                 if (PS != null)
@@ -42,18 +42,18 @@ namespace ARPGSample.Gameplay
                     PS.OnPawnSetEvent += ResetNewPawn;
                 }
 
-                if (newPlayerPawn && newPlayerPawn != playerPawn)
+                if (newPlayerPlayerCharacter && newPlayerPlayerCharacter != _playerPlayerCharacter)
                 {
-                    playerPawn = newPlayerPawn;
+                    _playerPlayerCharacter = newPlayerPlayerCharacter;
                     isPlayerValid = true;
                 }
 
                 return;
             }
 
-            if (playerPawn)
+            if (_playerPlayerCharacter)
             {
-                float delta = playerPawn.GetActorLocation().x - transform.position.x;
+                float delta = _playerPlayerCharacter.GetActorLocation().x - transform.position.x;
                 if (Mathf.Abs(delta) > halfWidth)
                 {
                     Vector3 tempPos = transform.position + new Vector3(Mathf.Sign(delta) * totalWidth, 0, 0);

@@ -5,12 +5,12 @@ namespace ARPGSample.Gameplay
     public class ResetAttackBreak : StateMachineBehaviour
     {
         // OnStateEnter is called when a transition starts and the state machine starts to evaluate this state
-        private RPGPawn cachedPlayerPawn;
+        private RPGPlayerCharacter _cachedPlayerPlayerCharacter;
         private bool isChangeToComboWindow = false;
         override public void OnStateEnter(Animator animator, AnimatorStateInfo stateInfo, int layerIndex)
         {
-            cachedPlayerPawn = animator.GetComponent<RPGPawn>();
-            cachedPlayerPawn.AnimationFsm.ResetBreakAttacking();
+            _cachedPlayerPlayerCharacter = animator.GetComponent<RPGPlayerCharacter>();
+            _cachedPlayerPlayerCharacter.AnimationFsm.ResetBreakAttacking();
         }
     
         // OnStateUpdate is called on each Update frame between OnStateEnter and OnStateExit callbacks

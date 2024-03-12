@@ -13,6 +13,8 @@ namespace CycloneGames.UIFramework
         void PublishUIMessage(UIMessage uiMsg);
         void OpenUI(string PageName, System.Action<UIPage> OnPageCreated = null);
         void CloseUI(string PageName);
+        bool IsUIPageValid(string PageName);
+        UIPage GetUIPage(string PageName);
     }
     public class UIService : IUIService, IInitializable
     {
@@ -52,6 +54,16 @@ namespace CycloneGames.UIFramework
             }
             
             uiManager.CloseUI(PageName);
+        }
+
+        public bool IsUIPageValid(string PageName)
+        {
+            return uiManager.IsUIPageValid(PageName);
+        }
+
+        public UIPage GetUIPage(string PageName)
+        {
+            return uiManager.GetUIPage(PageName);
         }
     }
 }

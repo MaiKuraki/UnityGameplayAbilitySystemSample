@@ -45,7 +45,7 @@ namespace ARPGSample.Gameplay
         
         async UniTask AutoFinishedComboWindowTask(Pawn pawn, CancellationTokenSource ct = default)
         { 
-            var rpgPawn = (RPGPawn)pawn; 
+            var rpgPawn = (RPGPlayerCharacter)pawn; 
             // UnityEngine.Debug.Log($"ComboWindowState, WindowMilliSecond: {rpgPawn.ComboWindowMilliSecond}ms");
             await UniTask.Delay(rpgPawn.ComboWindowMilliSecond, DelayType.Realtime, PlayerLoopTiming.Update, ct.Token);
             if (ct.IsCancellationRequested)

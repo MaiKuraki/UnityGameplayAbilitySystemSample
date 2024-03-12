@@ -21,6 +21,7 @@ namespace ARPGSample.Gameplay
             
             uiService.OpenUI(PageName.GameplayMenuPage);
             uiService.OpenUI(PageName.HUDPage);
+            uiService.OpenUI(UI.PageName.BattleInfoPage);
             
             dialogueService.StartDialogue(DialogueTarget.WorldStory, "GameplayStart", OnDialogueStartEvent: () =>
                 {
@@ -39,7 +40,7 @@ namespace ARPGSample.Gameplay
         }
         private void RefreshHUD()
         {
-            var rpgPawn = (RPGPawn)world.GetPlayerPawn();
+            var rpgPawn = (RPGPlayerCharacter)world.GetPlayerPawn();
             if (rpgPawn)
             {
                 rpgPawn.RefreshAttributesUI();
@@ -51,6 +52,7 @@ namespace ARPGSample.Gameplay
             
             uiService?.CloseUI(PageName.DialoguePage);
             uiService?.CloseUI(PageName.HUDPage);
+            uiService?.CloseUI(UI.PageName.BattleInfoPage);
         }
     }
 }

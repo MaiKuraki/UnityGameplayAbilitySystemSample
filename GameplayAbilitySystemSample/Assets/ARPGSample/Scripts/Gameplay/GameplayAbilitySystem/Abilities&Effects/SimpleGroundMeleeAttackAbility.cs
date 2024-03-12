@@ -61,10 +61,10 @@ namespace ARPGSample.Gameplay
 
                 if (!result)
                 {
-                    CMRPGPlayerState rpgPS = CachedOwner.GetComponent<CMRPGPlayerState>();
+                    RPGPlayerState rpgPS = CachedOwner.GetComponent<RPGPlayerState>();
                     if (rpgPS)
                     {
-                        var rpgPawn = (RPGPawn)rpgPS.GetPawn();
+                        var rpgPawn = (RPGPlayerCharacter)rpgPS.GetPawn();
                         if (rpgPawn.CurrentAttackingState is AttackingState state) state.Break(rpgPawn);
                     }
                 }
@@ -74,10 +74,10 @@ namespace ARPGSample.Gameplay
 
             public override void CancelAbility()
             {
-                CMRPGPlayerState rpgPS = CachedOwner.GetComponent<CMRPGPlayerState>();
+                RPGPlayerState rpgPS = CachedOwner.GetComponent<RPGPlayerState>();
                 if (rpgPS)
                 {
-                    var rpgPawn = (RPGPawn)rpgPS.GetPawn();
+                    var rpgPawn = (RPGPlayerCharacter)rpgPS.GetPawn();
                     if (rpgPawn.CurrentAttackingState is AttackingState state) state.Break(rpgPawn);
                 }
             }
@@ -92,14 +92,14 @@ namespace ARPGSample.Gameplay
 
             protected override IEnumerator PreActivate()
             {
-                CMRPGPlayerState rpgPS = CachedOwner.GetComponent<CMRPGPlayerState>();
+                RPGPlayerState rpgPS = CachedOwner.GetComponent<RPGPlayerState>();
                 
                 yield return null; 
             }
 
             protected override IEnumerator ActivateAbility()
             {
-                CMRPGPlayerState rpgPS = CachedOwner.GetComponent<CMRPGPlayerState>();
+                RPGPlayerState rpgPS = CachedOwner.GetComponent<RPGPlayerState>();
                 GameplayEffectSpec cdSpec = null;
                 if (this.Ability.Cooldown)
                 {
@@ -113,7 +113,7 @@ namespace ARPGSample.Gameplay
                 
                 if (rpgPS)
                 {
-                    var rpgPawn = (RPGPawn)rpgPS.GetPawn();
+                    var rpgPawn = (RPGPlayerCharacter)rpgPS.GetPawn();
                     Animator animator = rpgPawn.GetComponent<Animator>();
                     var oldAttackTrigger = rpgPawn.transform.Find("AttackingTrigger");
                     if(oldAttackTrigger)
@@ -167,15 +167,20 @@ namespace ARPGSample.Gameplay
                 //  maybe camera shake
                 //  other take damage
                 
+                OnCollisionEnterAsync(other).Forget();
+            }
+
+            async UniTask OnCollisionEnterAsync(GameObject other)
+            {
                 var sourceHitEffect = this.Owner.MakeOutgoingSpec((this.Ability as SimpleGroundMeleeAttackAbility)?.SourceAttackingHitEffect);
                 CachedOwner.ApplyGameplayEffectSpecToSelf(sourceHitEffect);
-                CMRPGPlayerState rpgPS = CachedOwner.GetComponent<CMRPGPlayerState>();
+                RPGPlayerState rpgPS = CachedOwner.GetComponent<RPGPlayerState>();
                 if (rpgPS)
                 {
-                    var rpgPawn = (RPGPawn)rpgPS.GetPawn();
+                    var rpgPawn = (RPGPlayerCharacter)rpgPS.GetPawn();
                     if (rpgPawn)
                     {
-                        CMRPGPlayerController PC = (CMRPGPlayerController)rpgPawn.Controller;
+                        RPGPlayerController PC = (RPGPlayerController)rpgPawn.Controller;
                         if (PC)
                         {
                             CMRPGCameraManager cameraManager = (CMRPGCameraManager)PC.GetCameraManager();
@@ -194,6 +199,14 @@ namespace ARPGSample.Gameplay
                 if (target)
                 {
                     target.ApplyGameplayEffectSpecToSelf(targetHitEffect);
+                    
+                    await UniTask.DelayFrame(1);    //  Wait for Effect Result
+                    
+                    var enemyAnimationFSM = other.GetComponent<EnemyAnimationFSM>();
+                    enemyAnimationFSM?.TriggerHit();
+                    var enemyPawn = other.GetComponent<EnemyCharacter>();
+                    enemyPawn.TakeDamage();
+                    
                     Debug.Log($"Success Hit target: {other.name}");
                 }
                 else

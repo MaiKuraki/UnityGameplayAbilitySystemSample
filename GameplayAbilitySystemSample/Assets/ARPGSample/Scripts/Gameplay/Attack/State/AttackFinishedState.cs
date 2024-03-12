@@ -9,7 +9,7 @@ namespace ARPGSample.Gameplay
         public void OnEnter(Pawn pawn)
         {
             UnityEngine.Debug.Log($"{STATE_NAME} Enter");
-            var rpgPawn = (RPGPawn)pawn;
+            var rpgPawn = (RPGPlayerCharacter)pawn;
             if (rpgPawn)
             {
                 rpgPawn.AnimationFsm.BreakAttacking();

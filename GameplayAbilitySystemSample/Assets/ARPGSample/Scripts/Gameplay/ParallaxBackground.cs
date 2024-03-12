@@ -18,7 +18,7 @@ namespace ARPGSample.Gameplay
         private Vector3 originPosLayer3;
         private Vector3 originPosLayer4;
 
-        private RPGPawn playerPawn;
+        private RPGPlayerCharacter _playerPlayerCharacter;
 
         private Vector3 camLastPos;
         private bool isPlayerValid = false;
@@ -39,7 +39,7 @@ namespace ARPGSample.Gameplay
             {
                 GameMode GM = world.GetGameMode();
                 PlayerController PC = GM?.GetPlayerController();
-                RPGPawn newPlayerPawn = (RPGPawn)PC?.GetPawn();
+                RPGPlayerCharacter newPlayerPlayerCharacter = (RPGPlayerCharacter)PC?.GetPawn();
                 PlayerState PS = PC?.GetPlayerState();
 
                 if (PS != null)
@@ -48,26 +48,26 @@ namespace ARPGSample.Gameplay
                     PS.OnPawnSetEvent += ResetNewPawn;
                 }
 
-                if (newPlayerPawn && newPlayerPawn != playerPawn)
+                if (newPlayerPlayerCharacter && newPlayerPlayerCharacter != _playerPlayerCharacter)
                 {
-                    playerPawn = newPlayerPawn;
+                    _playerPlayerCharacter = newPlayerPlayerCharacter;
                     isPlayerValid = true;
-                    camLastPos = playerPawn.GetActorLocation();
+                    camLastPos = _playerPlayerCharacter.GetActorLocation();
                 }
 
                 return;
             }
 
-            if (playerPawn)
+            if (_playerPlayerCharacter)
             {
-                Vector3 moveDelta = playerPawn.GetActorLocation() - camLastPos;
+                Vector3 moveDelta = _playerPlayerCharacter.GetActorLocation() - camLastPos;
 
                 Layer_1.position += new Vector3(moveDelta.x * parallaxFactorLayer1, moveDelta.y * 0.05f);
                 Layer_2.position += new Vector3(moveDelta.x * parallaxFactorLayer2, 0);
                 Layer_3.position += new Vector3(moveDelta.x * parallaxFactorLayer3, 0);
                 Layer_4.position += new Vector3(moveDelta.x * parallaxFactorLayer4, 0);
 
-                camLastPos = playerPawn.GetActorLocation();
+                camLastPos = _playerPlayerCharacter.GetActorLocation();
             }
         }
 

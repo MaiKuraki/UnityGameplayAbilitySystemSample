@@ -55,7 +55,21 @@ namespace CycloneGames.UIFramework
             bFinishedLayerInit = true;
             Debug.Log($"{DEBUG_FLAG} Finished init Layer: {LayerName}");
         }
+        public UIPage GetUIPage(string InPageName)
+        {
+            // Iterate through the list of pages to find the one with the matching name.
+            foreach (UIPage page in uiPagesList)
+            {
+                if (page.PageName.Equals(InPageName, System.StringComparison.OrdinalIgnoreCase))
+                {
+                    // If a page with the matching name is found, return it.
+                    return page;
+                }
+            }
 
+            // If no matching page is found, return null.
+            return null;
+        }
         public bool HasPage(string InPageName)
         {
             return uiPagesList.Any(page => page.PageName.Equals(InPageName, System.StringComparison.OrdinalIgnoreCase));

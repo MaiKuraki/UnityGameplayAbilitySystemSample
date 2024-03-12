@@ -153,5 +153,35 @@ namespace CycloneGames.UIFramework
             
             addressablesService.ReleaseAssetHandle(UIPathBuilder.GetConfigPath(PageName));
         }
+        
+        internal bool IsUIPageValid(string PageName)
+        {
+            // Check if the UI Root has a layer containing the page with the given name.
+            UILayer layer = uiRoot.TryGetUILayerFromPageName(PageName);
+            if (!layer)
+            {
+                // If the layer doesn't exist, the page is not valid.
+                Debug.LogError($"{DEBUG_FLAG} Can not find layer from PageName: {PageName}");
+                return false;
+            }
+
+            // If the page doesn't exist or isn't active, it's not valid.
+            return layer.HasPage(PageName);
+        }
+        
+        internal UIPage GetUIPage(string PageName)
+        {
+            // Check if the UI Root has a layer containing the page with the given name.
+            UILayer layer = uiRoot.TryGetUILayerFromPageName(PageName);
+            if (!layer)
+            {
+                // If the layer doesn't exist, the page is not valid.
+                Debug.LogError($"{DEBUG_FLAG} Can not find layer from PageName: {PageName}");
+                return null;
+            }
+
+            // If the page doesn't exist or isn't active, it's not valid.
+            return layer.GetUIPage(PageName);
+        }
     }
 }

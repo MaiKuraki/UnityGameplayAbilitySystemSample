@@ -8,7 +8,7 @@ namespace CycloneGames.Service
         private const string DEBUG_FLAG = "[Main Camera]";
         private Camera _camera;
         private UniversalAdditionalCameraData _urpCameraData;
-
+        public Camera GameCamera => _camera;
         private void Awake()
         {
             _camera = GetComponent<Camera>();
