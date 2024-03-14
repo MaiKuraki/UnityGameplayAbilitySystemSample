@@ -6,7 +6,7 @@ namespace ARPGSample.Gameplay
 {
     public interface IBattleInfoService
     {
-        void AddEnemyHealthBar(Pawn ownerPawn, float InitialVal, Vector2 newPrivateUIOffset);
+        void AddEnemyHealthBar(Pawn ownerPawn, float InitialVal);
         void RefreshHealthBar(Pawn ownerPawn, float newHealthVal);
         void RemoveEnemyHealthBar(Pawn ownerPawn);
         void ClearAllEnemyHealthBar();
@@ -23,9 +23,9 @@ namespace ARPGSample.Gameplay
             battleInfoSystem = diContainer.InstantiateComponentOnNewGameObject<BattleInfoSystem>("BattleInfoService");
         }
 
-        public void AddEnemyHealthBar(Pawn ownerPawn, float InitialVal, Vector2 newPrivateUIOffset)
+        public void AddEnemyHealthBar(Pawn ownerPawn, float InitialVal)
         {
-            battleInfoSystem?.AddEnemyHealthBar(ownerPawn, InitialVal, newPrivateUIOffset);
+            battleInfoSystem?.AddEnemyHealthBar(ownerPawn, InitialVal);
         }
 
         public void RefreshHealthBar(Pawn ownerPawn, float newHealthVal)

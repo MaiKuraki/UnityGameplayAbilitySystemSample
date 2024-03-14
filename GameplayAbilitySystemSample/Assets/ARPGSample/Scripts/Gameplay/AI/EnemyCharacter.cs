@@ -12,7 +12,6 @@ namespace ARPGSample.Gameplay
         [Inject] private IWorld world;
         [Inject] private IUIService uiService;
 
-        [SerializeField] private Vector2 healthBarUIOffset = new Vector2(0, 150);
         public EnemyAnimationFSM AnimationFSM => (EnemyAnimationFSM)animationFSM;
         private bool isHealthBarInit = false;
 
@@ -54,7 +53,7 @@ namespace ARPGSample.Gameplay
 
             await UniTask.WaitUntil(() => rpgGameMode.IsGameplayStart);
             await UniTask.WaitUntil(() => uiService.IsUIPageValid(UI.PageName.BattleInfoPage));
-            battleInfoService.AddEnemyHealthBar(this,  GetHealthMax() > 0 ? GetHealth() / GetHealthMax() : 0, healthBarUIOffset);
+            battleInfoService.AddEnemyHealthBar(this,  GetHealthMax() > 0 ? GetHealth() / GetHealthMax() : 0);
             isHealthBarInit = true;
         }
 

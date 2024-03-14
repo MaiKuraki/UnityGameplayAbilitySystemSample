@@ -7,9 +7,6 @@ namespace ARPGSample.UI
     {
         [SerializeField] private Slider slider;
 
-        public Vector2 PrivateOffset => privateOffset;
-        private Vector2 privateOffset;
-        
         private void Awake()
         {
             
@@ -23,11 +20,6 @@ namespace ARPGSample.UI
                 return;
             }
             slider.value = newHealthVal;
-        }
-
-        public void SetPrivateOffset(Vector2 newOffset)
-        {
-            privateOffset = newOffset;
         }
     }
 }

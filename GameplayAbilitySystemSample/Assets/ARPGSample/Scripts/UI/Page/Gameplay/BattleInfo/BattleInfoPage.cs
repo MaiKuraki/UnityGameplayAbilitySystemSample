@@ -44,7 +44,7 @@ namespace ARPGSample.UI
             disposableSubscribe = DisposableBag.Create(subscribeHandler);
         }
 
-        public void AddEnemyHealthBar(Pawn ownerPawn, float newInitialHealthVal, Vector2 newPrivateOffset)
+        public void AddEnemyHealthBar(Pawn ownerPawn, float newInitialHealthVal)
         {
             if (ownerPawn == null)
             {
@@ -59,7 +59,6 @@ namespace ARPGSample.UI
             }
 
             var healthBar = Instantiate(simpleEnemyHealthBarPrefab);
-            healthBar.SetPrivateOffset(newPrivateOffset);
             healthBar.transform.SetParent(transform, false); // Set the parent of the health bar for UI organization.
             healthBarDic.Add(ownerPawn, healthBar);
             RefreshHealthBar(ownerPawn, newInitialHealthVal);

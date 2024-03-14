@@ -14,7 +14,7 @@ namespace ARPGSample.Gameplay
         private BattleInfoPage battleInfoPage;
         private bool IsBattleInfoPageOpening = false;
         
-        public void AddEnemyHealthBar(Pawn ownerPawn, float newHealthVal, Vector2 newPrivateUIOffset)
+        public void AddEnemyHealthBar(Pawn ownerPawn, float newHealthVal)
         {
             battleInfoPage = uiService.GetUIPage(UI.PageName.BattleInfoPage) as BattleInfoPage;
             if (!battleInfoPage)
@@ -26,13 +26,13 @@ namespace ARPGSample.Gameplay
                 }
             }
             
-            AddEnemyHealthBarAsync( ownerPawn, newHealthVal, newPrivateUIOffset).Forget();
+            AddEnemyHealthBarAsync( ownerPawn, newHealthVal).Forget();
         }
         
-        async UniTask AddEnemyHealthBarAsync(Pawn ownerPawn, float newHealthVal, Vector2 newPrivateUIOffset)
+        async UniTask AddEnemyHealthBarAsync(Pawn ownerPawn, float newHealthVal)
         {
             await UniTask.WaitUntil(() => battleInfoPage != null);
-            battleInfoPage.AddEnemyHealthBar(ownerPawn, newHealthVal, newPrivateUIOffset);
+            battleInfoPage.AddEnemyHealthBar(ownerPawn, newHealthVal);
         }
 
         public void RefreshHealthBar(Pawn ownerPawn, float newHealthVal)
