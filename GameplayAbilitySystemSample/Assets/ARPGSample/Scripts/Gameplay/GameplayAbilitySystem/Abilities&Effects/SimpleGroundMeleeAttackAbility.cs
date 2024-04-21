@@ -65,7 +65,7 @@ namespace ARPGSample.Gameplay
                     if (rpgPS)
                     {
                         var rpgPawn = (RPGPlayerCharacter)rpgPS.GetPawn();
-                        if (rpgPawn.CurrentAttackingState is AttackingState state) state.Break(rpgPawn);
+                        if (rpgPawn.CurrentAttackingState is AttackingState state) rpgPawn.ChangeAttackingState(new BreakAttackState());
                     }
                 }
 
@@ -78,7 +78,7 @@ namespace ARPGSample.Gameplay
                 if (rpgPS)
                 {
                     var rpgPawn = (RPGPlayerCharacter)rpgPS.GetPawn();
-                    if (rpgPawn.CurrentAttackingState is AttackingState state) state.Break(rpgPawn);
+                    if (rpgPawn.CurrentAttackingState is AttackingState state) rpgPawn.ChangeAttackingState(new BreakAttackState());
                 }
             }
 

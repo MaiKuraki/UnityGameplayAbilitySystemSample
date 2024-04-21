@@ -136,7 +136,7 @@ namespace ARPGSample.UI
             OnClickBtn_3 -= evt;
         }
 
-        protected virtual void OnDestroy()
+        protected override void OnDestroy()
         {
             if(Btn_0) Btn_0.OnPointerDownEvent -= PointerDownBtn_0;
             if(Btn_1) Btn_1.OnPointerDownEvent -= PointerDownBtn_1;
@@ -148,6 +148,8 @@ namespace ARPGSample.UI
             OnClickBtn_1 = null;
             OnClickBtn_2 = null;
             OnClickBtn_3 = null;
+            
+            base.OnDestroy();
         }
     }
 }

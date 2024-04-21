@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace ARPGSample.Gameplay
 {
-    public class AttackingState : IAttackState
+    public class AttackingState : AttackState
     {
         private static readonly string STATE_NAME = "[Attacking]";
         private int handledAttackID;
@@ -20,7 +20,7 @@ namespace ARPGSample.Gameplay
             handledAttackID = newAttackID;
             handledAttackType = newAttackType;
         }
-        public void OnEnter(Pawn pawn)
+        public override void OnEnter(Pawn pawn)
         {
             var rpgPawn = (RPGPlayerCharacter)pawn;
             _cachedRpgPlayerCharacter = (RPGPlayerCharacter)pawn;
@@ -30,7 +30,7 @@ namespace ARPGSample.Gameplay
             UnityEngine.Debug.Log($"{STATE_NAME} Enter");
         }
 
-        public void OnExit(Pawn pawn)
+        public override void OnExit(Pawn pawn)
         {
             UnityEngine.Debug.Log($"{STATE_NAME} Exit");
             
@@ -43,18 +43,7 @@ namespace ARPGSample.Gameplay
             // if(!rpgPawn.IsInComboWindow) rpgPawn.ChangeAttackingState(new AttackFinishedState());
         }
 
-        public void OnUpdate(Pawn pawn)
-        {
-            
-        }
-
-        public void Break(Pawn pawn)
-        {
-            var rpgPawn = (RPGPlayerCharacter)pawn;
-            rpgPawn.ChangeAttackingState(new BreakAttackState());
-        }
-
-        public void ComboWindow(Pawn pawn)
+        private void ComboWindow(Pawn pawn)
         {
             var rpgPawn = (RPGPlayerCharacter)pawn;
             int nextAttackID = rpgPawn.GetNextAttackID(handledAttackID, handledAttackType);
