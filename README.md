@@ -11,6 +11,8 @@ This project is suitable for developers familiar with the Unreal Engine and the 
 The minimum Unity version required for this project is Unity 2022.3. It will not run correctly on Unity 2021 or earlier versions.
 ## Preview
 ![Preview](./README/preview.gif)
+## WebGL Demo
+[Redirect_To_WebGL_Demo](https://maikuraki.github.io/2024/10/07/Unity_WebGL_Demo/)
 ## File Directory Structure
 -   Assets/CycloneGames
     -   This assembly provides a framework design akin to Unreal Engine's GameplayFramework, featuring types such as GameInstance, World, GameMode, PlayerController, and PlayerState. It offers a comfortable transition for users familiar with Unreal Engine.

@@ -11,6 +11,8 @@
 本项目依赖 Unity 最低版本为 Unity 2022.3， 在 Unity 2021 以及更早的版本无法正常运行。
 ## Preview
 ![Preview](./README/preview.gif)
+## WebGL Demo
+[Redirect_To_WebGL_Demo](https://maikuraki.github.io/2024/10/07/Unity_WebGL_Demo/)
 ## 文件目录结构
 -   Assets/CycloneGames
     -   该程序集提供了类似于虚幻引擎 GameplayFramework 的框架设计，包含 GameInstance、World、GameMode、PlayerController 和 PlayerState 等类型。对于熟悉虚幻引擎的用户，提供了舒适的过渡。
