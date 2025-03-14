@@ -3,6 +3,9 @@ Unity Gameplay Ability Sample (2D Platformer)
     <br> English | <a href="README_CHN.md">中文</a>
 </p>
 
+# [Architecture Upgrade Notice]
+**Technical review indicates the current codebase faces maintainability challenges with partially outdated implementations. To establish sustainable technical foundations, I will initiate architectural refactoring when preparation matures. The modernized version will be reconstructed on [[UnityStarter]](https://github.com/MaiKuraki/UnityStarter) with enhanced code quality and extensibility. The existing repository will receive essential maintenance during transition, with migration plan to be announced upon new version readiness. Thank you for your continued support.**
+
 ## Overview
 This project, originally structured after [UnityStartUp_NoHotUpdate](https://github.com/MaiKuraki/UnityStartUp_NoHotUpdate), is based on the Gameplay Ability System and provides a demo of an ARPG. It can serve as a starting template for side-scrolling 2D action games, and the code can be refactored relatively easily to production-level quality.
 

@@ -3,6 +3,9 @@
     <br> <a href="README.md">English</a> | 中文
 </p>
 
+# 【架构升级预告】
+**经技术评审，当前代码库存在可维护性瓶颈且部分技术实现已滞后于行业。为构建可持续的模板项目，我计划在适当的时候重构此项目。新版本将基于 [[UnityStarter]](https://github.com/MaiKuraki/UnityStarter) 进行现代化改造，重点提升代码质量和架构扩展性。待新版本准备就绪时将另行公告迁移方案。感谢各位开发者长期以来的支持。**
+
 ## 关于
 本项目原始框架 [UnityStartUp_NoHotUpdate](https://github.com/MaiKuraki/UnityStartUp_NoHotUpdate) 基于 Gameplay Ability System 提供了一个 ARPG 的 Demo。可以作为横板 2D 动作游戏的起始模板，代码可以比较容易的重构为 Production 级别的质量。
 
