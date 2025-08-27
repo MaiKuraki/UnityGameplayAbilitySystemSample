@@ -31,6 +31,11 @@
 -   旧版 WebGL Demo
     -   [➡️ 点击这里查看 WebGL Demo](https://maikuraki.github.io/2024/10/07/Unity_WebGL_Demo/)
 
+## 当前进度
+- [x] 基于[UnityStarter](https://github.com/MaiKuraki/UnityStarter)重新创建项目
+- [x] 场景加载流程
+- [ ] 以[新 GAS 系统](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities)实现 Gameplay 场景
+
 ## 启动场景
 
 请于项目内搜索 `Scene_Launch` 场景以启动游戏。

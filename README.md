@@ -30,6 +30,11 @@ The minimum Unity version required for this project is `Unity 2022.3`. It will n
 -   Old Version WebGL Demo
     -   [➡️ Click here for the WebGL Demo](https://maikuraki.github.io/2024/10/07/Unity_WebGL_Demo/)
 
+## Progress
+- [x] Recreated the project based on [UnityStarter](https://github.com/MaiKuraki/UnityStarter)
+- [x] Scene loading pipeline
+- [ ] Implement the Gameplay logic with the [new GAS system](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities)
+
 ## Launch Scene
 
 Please search for the `Scene_Launch` scene within the project to start the game.
