@@ -1,26 +1,26 @@
 using CycloneGames.AssetManagement;
 
-namespace CycloneGames.UIFramework.Samples
+namespace GASSample.AssetManagement
 {
-    public class UIAssetFactory : IAssetPathBuilderFactory
+    public class GASSampleAssetPathBuilderFactory : IAssetPathBuilderFactory
     {
         public IAssetPathBuilder Create(string type)
         {
             switch (type)
             {
                 case "UI":
-                    return new UIAssetPathBuilder();
+                    return new GASSampleUIAssetPathBuilder();
                 default:
                     return null;
             }
         }
     }
     
-    public class UIAssetPathBuilder : IAssetPathBuilder
+    public class GASSampleUIAssetPathBuilder : IAssetPathBuilder
     {
         public string GetAssetPath(string key)
         {
-            return $"Assets/ThirdParty/CycloneGames/CycloneGames.UIFramework/Samples/{key}.asset";
+            return $"Assets/GASSample/LiveContent/ScriptableObject/UI/Window/{key}.asset";
         }
     }
 }

@@ -219,6 +219,60 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: abd1a25f218a6ff4bba47cd8a1145771, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+--- !u!1 &1252911753
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1252911755}
+  - component: {fileID: 1252911754}
+  m_Layer: 0
+  m_Name: AssetResolverForDontDestroy
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &1252911754
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1252911753}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5d2ae65a0e0eda9409f367d2565893b3, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  dontDestroyAddressablePaths:
+  - DisplayName: DebugGroup
+    AddressablePath: Assets/GASSample/_CHEAT/DebugSystem.prefab
+  - DisplayName: EventSystem
+    AddressablePath: Assets/GASSample/LiveContent/Prefabs/Core/EventSystem.prefab
+  - DisplayName: UI
+    AddressablePath: Assets/GASSample/LiveContent/Prefabs/UI/UIFramework.prefab
+  - DisplayName: MainCamera
+    AddressablePath: Assets/GASSample/LiveContent/Prefabs/Core/MainCamera.prefab
+  isSingleton: 1
+--- !u!4 &1252911755
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1252911753}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1524694781
 GameObject:
   m_ObjectHideFlags: 0
@@ -343,3 +397,4 @@ SceneRoots:
   - {fileID: 1524694783}
   - {fileID: 5788755967963681715}
   - {fileID: 452277830}
+  - {fileID: 1252911755}

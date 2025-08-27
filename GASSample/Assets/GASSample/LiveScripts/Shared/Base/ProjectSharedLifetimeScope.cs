@@ -16,12 +16,12 @@ namespace GASSample
             builder.Register<ISceneManagementAPIGateway, SceneManagementAPIGateway>(Lifetime.Singleton);
             builder.Register<IGraphicsSettingService, GraphicsSettingService>(Lifetime.Singleton);
 
-            builder.RegisterEntryPoint<MapListGlobalInitializer>();
+            builder.RegisterEntryPoint<ProjectGlobalInitializer>();
         }
 
-        public class MapListGlobalInitializer : IStartable
+        public class ProjectGlobalInitializer : IStartable
         {
-            public MapListGlobalInitializer()
+            public ProjectGlobalInitializer()
             {
 
             }

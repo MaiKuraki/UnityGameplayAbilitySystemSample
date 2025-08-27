@@ -1,3 +1,7 @@
+using CycloneGames.AssetManagement;
+using CycloneGames.Factory.Runtime;
+using CycloneGames.UIFramework;
+using GASSample.AssetManagement;
 using VContainer;
 using VContainer.Unity;
 
@@ -18,9 +22,14 @@ namespace GASSample.Scene
             /// <param name="builder">The container builder used to register services.</param> 
             public static void RegisterSharedServices(IContainerBuilder builder)
             {
+                builder.Register<IAssetPathBuilderFactory, GASSampleAssetPathBuilderFactory>(Lifetime.Singleton);
+                builder.Register<IAssetPackage, AddressablesPackage>(Lifetime.Singleton);
 
+                builder.Register<IUnityObjectSpawner, GASSampleObjectSpawner>(Lifetime.Singleton);
+                builder.Register<IUIService, UIService>(Lifetime.Singleton);
             }
         }
+        
         protected override void Configure(IContainerBuilder builder)
         {
             base.Configure(builder);

@@ -5,6 +5,7 @@
     "com.coffee.softmask-for-ugui": "https://github.com/mob-sakai/SoftMaskForUGUI.git?path=Packages/src",
     "com.coffee.ui-effect": "https://github.com/mob-sakai/UIEffect.git?path=Packages/src",
     "com.cyclone-games.assetmanagement": "file:../../UnityPackages/CycloneGames/CycloneGames.AssetManagement",
+    "com.cyclone-games.cheat": "file:../../UnityPackages/CycloneGames/CycloneGames.Cheat",
     "com.cyclone-games.factory": "file:../../UnityPackages/CycloneGames/CycloneGames.Factory",
     "com.cyclone-games.gameplay-abilities": "file:../../UnityPackages/CycloneGames/CycloneGames.GameplayAbilities",
     "com.cyclone-games.gameplay-framework": "file:../../UnityPackages/CycloneGames/CycloneGames.GameplayFramework",

@@ -177,7 +177,7 @@ MonoBehaviour:
   m_ProgressText: {fileID: 0}
   m_MessageText: {fileID: 0}
   m_ProgressSlider: {fileID: 0}
-  m_Spinner: {fileID: 0}
+  m_Spinner: {fileID: 1263956706}
 --- !u!225 &99874128
 CanvasGroup:
   m_ObjectHideFlags: 0

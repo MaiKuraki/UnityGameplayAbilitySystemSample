@@ -15,6 +15,16 @@ MonoBehaviour:
   m_GroupName: GASSample
   m_GUID: bac307361f7737d4fa81b723095fdbf2
   m_SerializeEntries:
+  - m_GUID: 1a54cfcc5e8363a44875c7d0571fb138
+    m_Address: Assets/GASSample/LiveContent/Prefabs/UI
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: 2497edaa9c405ed4687026bcf543065a
+    m_Address: Assets/GASSample/_CHEAT/DebugSystem.prefab
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
   - m_GUID: 40aead737e271f74daf8089ebb8747ab
     m_Address: Assets/GASSample/LiveContent/Scenes
     m_ReadOnly: 0

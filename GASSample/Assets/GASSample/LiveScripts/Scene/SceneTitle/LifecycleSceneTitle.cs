@@ -12,7 +12,7 @@ namespace GASSample.Scene
 {
     public class LifecycleSceneTitle : ISceneLifecycle
     {
-        // [Inject] private readonly IUIService uiService;
+        [Inject] private readonly IUIService uiService;
         public UniTask OnEditorFirstPreInitialize(ISceneDataWriter writer, CancellationToken cancellationToken)
         {
             return UniTask.CompletedTask;
@@ -30,14 +30,14 @@ namespace GASSample.Scene
 
         public UniTask OnFinalize(ISceneDataWriter writer, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
         {
+            uiService.CloseUI(UIWindowName.Title);
             return UniTask.CompletedTask;
         }
 
         public async UniTask OnInitialize(ISceneDataReader reader, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
-        {
-            
-            // uiService.OpenUI(UIWindowName.Title);
-            // await UpdateProgress(progress, cancellationToken);
+        { 
+            uiService.OpenUI(UIWindowName.Title);
+            await UpdateProgress(progress, cancellationToken);
         }
 
         private async UniTask UpdateProgress(IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)

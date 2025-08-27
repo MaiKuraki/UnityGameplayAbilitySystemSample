@@ -22,7 +22,7 @@ namespace CycloneGames.Editor.Build
         private const string DEBUG_FLAG = "<color=cyan>[Game Builder]</color>";
         private const string INVALID_FLAG = "INVALID";
 
-        private const string CompanyName = "CycloneGames";
+        private const string CompanyName = "DefaultCompany";
         private const string ApplicationName = "GASSample";
         private const string ApplicationVersion = "v0.1";
         private const string OutputBasePath = "Build";

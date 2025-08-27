@@ -33,6 +33,7 @@ MonoBehaviour:
   m_UniqueBundleIds: 0
   m_EnableJsonCatalog: 0
   m_NonRecursiveBuilding: 1
+  m_AllowNestedBundleFolders: 0
   m_CCDEnabled: 0
   m_maxConcurrentWebRequests: 3
   m_UseUWRForLocalBundles: 0
@@ -71,13 +72,13 @@ MonoBehaviour:
       m_ProfileName: Default
       m_Values:
       - m_Id: 23c0309152da019458052d5b64b921de
-        m_Value: 'http://[PrivateIpAddress]:[HostingServicePort]'
+        m_Value: http://[PrivateIpAddress]:[HostingServicePort]
       - m_Id: 768a41c03c6463c4fa6f1e2ef998dcdf
         m_Value: '[UnityEditor.EditorUserBuildSettings.activeBuildTarget]'
       - m_Id: 802203f29233ffb46a4ec1447640b47d
         m_Value: '[UnityEngine.AddressableAssets.Addressables.BuildPath]/[BuildTarget]'
       - m_Id: fba3415028d4749479232cff4836b7b1
-        m_Value: 'ServerData/[BuildTarget]'
+        m_Value: ServerData/[BuildTarget]
       - m_Id: fbe673189a2913d409716051d7ea29ae
         m_Value: '{UnityEngine.AddressableAssets.Addressables.RuntimePath}/[BuildTarget]'
     m_ProfileEntryNames:

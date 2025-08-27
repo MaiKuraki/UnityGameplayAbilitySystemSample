@@ -33,7 +33,10 @@ namespace GASSample.Scene
             if (ProgressSlider?.gameObject.activeInHierarchy != bNewVisible) ProgressSlider?.gameObject.SetActive(bNewVisible);
         }
 
-        public void SetSpinnerVisibility(bool bNewVisible) => m_Spinner.gameObject.SetActive(bNewVisible);
+        public void SetSpinnerVisibility(bool bNewVisible)
+        {
+            m_Spinner?.gameObject?.SetActive(bNewVisible);
+        }
 
         public async UniTask StartTransition(CancellationToken cancellationToken)
         {

@@ -73,16 +73,16 @@ namespace GASSample.Scene
             {
                 if (m_Director && progressDataStore.TryGetData(out LoadingProgressData myProgressData))
                 {
-                    if(myProgressData.Progress > 0.001f)
+                    if (myProgressData.Progress > 0.001f)
                     {
                         m_Director.SetPorgressGroupVisibility(true);
                     }
 
-                    m_Director.ProgressText.text = myProgressData.Progress.ToString("P1");
-                    m_Director.MessageText.text = myProgressData.Message;
-                    m_Director.ProgressSlider.value = myProgressData.Progress;
+                    if (m_Director.ProgressText) m_Director.ProgressText.text = myProgressData.Progress.ToString("P1");
+                    if (m_Director.MessageText) m_Director.MessageText.text = myProgressData.Message;
+                    if (m_Director.ProgressSlider) m_Director.ProgressSlider.value = myProgressData.Progress;
 
-                    if(myProgressData.State == ELoadingState.Loaded)
+                    if (myProgressData.State == ELoadingState.Loaded)
                     {
                         m_Director.SetPorgressGroupVisibility(false);
                         m_Director.SetSpinnerVisibility(false);
