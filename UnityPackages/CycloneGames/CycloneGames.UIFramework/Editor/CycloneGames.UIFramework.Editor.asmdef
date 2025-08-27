@@ -1,0 +1,19 @@
+{
+    "name": "CycloneGames.UIFramework.Editor",
+    "rootNamespace": "",
+    "references": [
+        "CycloneGames.UIFramework",
+        "CycloneGames.AssetManagement"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

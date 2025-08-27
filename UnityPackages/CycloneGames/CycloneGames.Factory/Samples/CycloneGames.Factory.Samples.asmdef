@@ -1,0 +1,17 @@
+{
+    "name": "CycloneGames.Factory.Samples",
+    "rootNamespace": "",
+    "references": [
+        "UniTask",
+        "CycloneGames.Factory.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

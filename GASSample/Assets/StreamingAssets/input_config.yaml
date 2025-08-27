@@ -1,0 +1,48 @@
+playerSlots:
+- playerId: 0
+  contexts:
+  - name: Gameplay
+    actionMap: PlayerActions
+    bindings:
+    - type: vector2
+      action: Move
+      deviceBindings:
+      - "<Gamepad>/leftStick"
+      - "2DVector(mode=2,up=<Keyboard>/w,down=<Keyboard>/s,left=<Keyboard>/a,right=<Keyboard>/d)"
+      - "<Mouse>/delta"
+      longPressMs: 0
+      longPressValueThreshold: 0
+    - type: button
+      action: Confirm
+      deviceBindings:
+      - "<Gamepad>/buttonSouth"
+      - "<Keyboard>/space"
+      longPressMs: 500
+      longPressValueThreshold: 0
+- playerId: 1
+  contexts:
+  - name: Gameplay
+    actionMap: PlayerActions
+    bindings:
+    - type: vector2
+      action: Move
+      deviceBindings:
+      - "<Gamepad>/leftStick"
+      - "2DVector(mode=2,up=<Keyboard>/w,down=<Keyboard>/s,left=<Keyboard>/a,right=<Keyboard>/d)"
+      longPressMs: 0
+      longPressValueThreshold: 0
+    - type: button
+      action: Confirm
+      deviceBindings:
+      - "<Gamepad>/buttonSouth"
+      - "<Keyboard>/space"
+      longPressMs: 500
+      longPressValueThreshold: 0
+joinAction:
+  type: button
+  action: JoinGame
+  deviceBindings:
+  - "<Keyboard>/enter"
+  - "<Gamepad>/start"
+  longPressMs: 0
+  longPressValueThreshold: 0

@@ -1,9 +1,0 @@
-{
-  "projectFileVersion": 2,
-  "sourceFiles": [
-    "./TestYarnScript.yarn"
-  ],
-  "localisation": {},
-  "baseLanguage": "en",
-  "compilerOptions": {}
-}

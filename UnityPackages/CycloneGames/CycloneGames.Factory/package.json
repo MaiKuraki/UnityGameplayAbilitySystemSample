@@ -1,0 +1,41 @@
+{
+  "name": "com.cyclone-games.factory",
+  "version": "1.0.0",
+  "displayName": "CycloneGames.Factory",
+  "description": "This package implements a factory module with built-in object pooling capabilities, designed for seamless integration with popular Dependency Injection (DI) frameworks.",
+  "unity": "2022.3",
+  "unityRelease": "0f1",
+  "keywords": [
+    "CycloneGames",
+    "Factory",
+    "ObjectPool",
+    "Pooling"
+  ],
+  "author": {
+    "name": "CycloneGames",
+    "email": "",
+    "url": ""
+  },
+  "samples": [
+    {
+      "displayName": "Pure C# Benchmarks",
+      "description": "Performance benchmarks for pure C# factory and object pooling scenarios",
+      "path": "Samples/Benchmarks/PureCSharp"
+    },
+    {
+      "displayName": "Unity GameObject Benchmarks",
+      "description": "Performance benchmarks for Unity-specific GameObject pooling and factory patterns",
+      "path": "Samples/Benchmarks/Unity"
+    },
+    {
+      "displayName": "Basic Pure C# Example",
+      "description": "Simple data-only particle system using ObjectPool",
+      "path": "Samples/PureCSharp"
+    },
+    {
+      "displayName": "Basic Unity Example",
+      "description": "MonoBehaviour prefab spawning via IUnityObjectSpawner",
+      "path": "Samples/PureUnity"
+    }
+  ]
+}

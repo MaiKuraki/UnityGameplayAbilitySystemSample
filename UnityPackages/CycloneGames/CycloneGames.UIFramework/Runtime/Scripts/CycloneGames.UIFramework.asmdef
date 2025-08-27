@@ -1,0 +1,28 @@
+{
+    "name": "CycloneGames.UIFramework",
+    "rootNamespace": "",
+    "references": [
+        "Unity.ResourceManager",
+        "UniTask",
+        "CycloneGames.Logger",
+        "CycloneGames.Service",
+        "CycloneGames.Factory.Runtime",
+        "CycloneGames.AssetManagement",
+        "LitMotion"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.annulusgames.lit-motion",
+            "expression": "",
+            "define": "LITMOTION_PRESENT"
+        }
+    ],
+    "noEngineReferences": false
+}
