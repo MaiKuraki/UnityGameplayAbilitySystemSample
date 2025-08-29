@@ -31,6 +31,7 @@ namespace GASSample.Scene
 
         public UniTask OnInitialize(ISceneDataReader reader, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
         {
+
             return UniTask.CompletedTask;
         }
     }

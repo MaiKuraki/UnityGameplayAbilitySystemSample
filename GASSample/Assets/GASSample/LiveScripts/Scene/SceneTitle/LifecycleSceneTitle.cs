@@ -7,35 +7,49 @@ using MackySoft.Navigathena.SceneManagement;
 using MackySoft.Navigathena.SceneManagement.VContainer;
 using VContainer;
 using GASSample.UI;
+using CycloneGames.Logger;
 
 namespace GASSample.Scene
 {
     public class LifecycleSceneTitle : ISceneLifecycle
     {
+        private const string DEBUG_FLAG = "[LifecycleSceneTitle]";
+
         [Inject] private readonly IUIService uiService;
+
         public UniTask OnEditorFirstPreInitialize(ISceneDataWriter writer, CancellationToken cancellationToken)
         {
+            CLogger.LogWarning($"{DEBUG_FLAG} OnEditorFirstPreInitialize");
+
             return UniTask.CompletedTask;
         }
 
         public UniTask OnEnter(ISceneDataReader reader, CancellationToken cancellationToken)
         {
+            CLogger.LogWarning($"{DEBUG_FLAG} OnEnter");
+
             return UniTask.CompletedTask;
         }
 
         public UniTask OnExit(ISceneDataWriter writer, CancellationToken cancellationToken)
         {
+            CLogger.LogWarning($"{DEBUG_FLAG} OnExit");
+
             return UniTask.CompletedTask;
         }
 
         public UniTask OnFinalize(ISceneDataWriter writer, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
         {
+            CLogger.LogWarning($"{DEBUG_FLAG} OnFinalize");
+
             uiService.CloseUI(UIWindowName.Title);
             return UniTask.CompletedTask;
         }
 
         public async UniTask OnInitialize(ISceneDataReader reader, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
-        { 
+        {
+            CLogger.LogWarning($"{DEBUG_FLAG} OnInitialize");
+
             uiService.OpenUI(UIWindowName.Title);
             await UpdateProgress(progress, cancellationToken);
         }

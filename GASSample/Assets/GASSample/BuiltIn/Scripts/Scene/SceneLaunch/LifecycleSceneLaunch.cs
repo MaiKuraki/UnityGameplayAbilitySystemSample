@@ -5,6 +5,8 @@ using MackySoft.Navigathena;
 using MackySoft.Navigathena.SceneManagement;
 using MackySoft.Navigathena.SceneManagement.VContainer;
 
+// Pipeline: OnInitialize -> OnEnter -> OnExit -> OnFinalize
+
 namespace GASSample.AOT
 {
     public class LifecycleSceneLaunch : ISceneLifecycle
