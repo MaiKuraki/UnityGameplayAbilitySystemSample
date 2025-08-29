@@ -23,6 +23,8 @@ namespace GASSample.Gameplay
 
             var cameraManager = pc.GetCameraManager();
             cameraManager.SetViewTarget(CameraFocusTF);
+
+            movementVelocity = transform.forward;
         }
     }
 }
