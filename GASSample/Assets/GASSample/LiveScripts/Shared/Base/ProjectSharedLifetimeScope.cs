@@ -1,6 +1,5 @@
 using VContainer;
 using VContainer.Unity;
-using CycloneGames.Logger;
 using CycloneGames.Service;
 using GASSample.APIGateway;
 
@@ -29,7 +28,7 @@ namespace GASSample
             public void Start()
             {
 
-                CLogger.LogInfo("[ProjectSharedLifetimeScope] Initiated");
+                // CLogger.LogInfo("[ProjectSharedLifetimeScope] Initiated");
             }
         }
     }
