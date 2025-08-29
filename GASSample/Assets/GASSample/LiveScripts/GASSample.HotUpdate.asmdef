@@ -23,7 +23,8 @@
         "CycloneGames.UIFramework",
         "GASSample.AOT",
         "CycloneGames.GameplayTags.Runtime",
-        "CycloneGames.GameplayFramework"
+        "CycloneGames.GameplayFramework",
+        "CycloneGames.RPGFoundation"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

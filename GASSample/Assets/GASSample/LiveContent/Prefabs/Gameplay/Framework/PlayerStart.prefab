@@ -28,7 +28,7 @@ Transform:
   m_GameObject: {fileID: 479495753324628061}
   serializedVersion: 2
   m_LocalRotation: {x: 0.7071068, y: 0, z: 0, w: 0.7071068}
-  m_LocalPosition: {x: 0, y: 0, z: 0.7}
+  m_LocalPosition: {x: 0, y: 0.9, z: 0.7}
   m_LocalScale: {x: 0.1, y: 0.7, z: 0.1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -117,7 +117,6 @@ GameObject:
   m_Component:
   - component: {fileID: 3873644151040307464}
   - component: {fileID: 4116803947668352167}
-  - component: {fileID: 6115805792389009877}
   m_Layer: 0
   m_Name: PlayerStart
   m_TagString: Untagged
@@ -139,6 +138,7 @@ Transform:
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 2201715167454027871}
+  - {fileID: 8729231026331493968}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!114 &4116803947668352167
@@ -155,13 +155,45 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   initialLifeSpanSec: 0
   Arrow: {fileID: 2201715167454027871}
---- !u!136 &6115805792389009877
+--- !u!1 &7758212580143609389
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 8729231026331493968}
+  - component: {fileID: 2387161184349968681}
+  m_Layer: 0
+  m_Name: Capsule
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &8729231026331493968
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7758212580143609389}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 3873644151040307464}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!136 &2387161184349968681
 CapsuleCollider:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 6535649478414877919}
+  m_GameObject: {fileID: 7758212580143609389}
   m_Material: {fileID: 0}
   m_IncludeLayers:
     serializedVersion: 2
@@ -177,4 +209,4 @@ CapsuleCollider:
   m_Radius: 0.3
   m_Height: 1.8
   m_Direction: 1
-  m_Center: {x: 0, y: 0, z: 0}
+  m_Center: {x: 0, y: 0.9, z: 0}

@@ -1,12 +1,14 @@
+using System.Threading;
 using CycloneGames.Logger;
 using CycloneGames.Factory.Runtime;
+using Cysharp.Threading.Tasks;
 using UnityEngine;
 
 namespace CycloneGames.GameplayFramework
 {
     public interface IGameMode
     {
-        void LaunchGameMode();
+        UniTask LaunchGameModeAsync(CancellationToken cancellationToken = default);
     }
     public class GameMode : Actor, IGameMode
     {
@@ -237,9 +239,24 @@ namespace CycloneGames.GameplayFramework
                 CLogger.LogError($"{DEBUG_FLAG} Failed to spawn Pawn, please check your spawn pipeline");
                 return null;
             }
+
+            //  To teleport a CharacterController, we should disable it first, move the transform, and then re-enable it.
+            //  This forces the controller to re-synchronize its internal state with the new transform data.
+            var characterController = p.GetComponent<CharacterController>();
+            if (characterController)
+            {
+                characterController.enabled = false;
+            }
+            
             p.transform.position = SpawnTransform.position;
             p.transform.localScale = Vector3.one;
             p.transform.rotation = SpawnTransform.rotation;
+
+            if (characterController)
+            {
+                characterController.enabled = true;
+            }
+            
             return p;
         }
 
@@ -279,11 +296,20 @@ namespace CycloneGames.GameplayFramework
             return InController.GetDefaultPawnPrefab();
         }
 
-        public virtual void LaunchGameMode()
+        public virtual async UniTask LaunchGameModeAsync(CancellationToken cancellationToken = default)
         {
             CLogger.LogInfo($"{DEBUG_FLAG} Launch GameMode");
 
             PlayerController PC = SpawnPlayerController();
+            if (!PC)
+            {
+                return;
+            }
+            
+            await PC.InitializationTask.AttachExternalCancellation(cancellationToken);
+            if (cancellationToken.IsCancellationRequested) return;
+            
+            //  Now PlayerController is fully initialized, we can restart player(spawn pawn and possess it)
             RestartPlayer(PC);
         }
     }

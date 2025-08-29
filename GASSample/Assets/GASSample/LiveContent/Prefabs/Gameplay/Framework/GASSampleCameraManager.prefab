@@ -10,6 +10,7 @@ GameObject:
   m_Component:
   - component: {fileID: 7094289168631456052}
   - component: {fileID: 4889576264116274839}
+  - component: {fileID: 3208028559941567673}
   - component: {fileID: 5044011934468441067}
   m_Layer: 0
   m_Name: GASSampleCameraManager
@@ -76,6 +77,32 @@ MonoBehaviour:
       BarrelClipping: 0.25
       Anamorphism: 0
   BlendHint: 0
+--- !u!114 &3208028559941567673
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8366307557638833791}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 625c14eee3ad46c99df7c7c891ef668a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  Damping: {x: 0.3, y: 0.65, z: 0.5}
+  ShoulderOffset: {x: 0.5, y: -0.4, z: 0}
+  VerticalArmLength: 0.4
+  CameraSide: 0.5
+  CameraDistance: 3.5
+  AvoidObstacles:
+    Enabled: 1
+    CollisionFilter:
+      serializedVersion: 2
+      m_Bits: 1
+    IgnoreTag: Player
+    CameraRadius: 0.2
+    DampingIntoCollision: 0.1
+    DampingFromCollision: 0.5
 --- !u!114 &5044011934468441067
 MonoBehaviour:
   m_ObjectHideFlags: 0

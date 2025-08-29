@@ -1,5 +1,7 @@
+using System.Threading;
 using CycloneGames.Factory.Runtime;
 using CycloneGames.GameplayFramework;
+using Cysharp.Threading.Tasks;
 using VContainer;
 
 namespace GASSample.Gameplay
@@ -15,10 +17,9 @@ namespace GASSample.Gameplay
 
         }
 
-        public override void LaunchGameMode()
+        public override UniTask LaunchGameModeAsync(CancellationToken cancellationToken = default)
         {
-            base.LaunchGameMode();
-
+            return base.LaunchGameModeAsync(cancellationToken);
         }
     }
 }

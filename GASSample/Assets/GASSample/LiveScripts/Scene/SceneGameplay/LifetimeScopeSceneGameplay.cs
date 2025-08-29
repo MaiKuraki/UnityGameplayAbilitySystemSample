@@ -15,7 +15,8 @@ namespace GASSample.Scene
         {
             base.Configure(builder);
 
-            builder.RegisterInstance<IWorldSettings>(worldSettings); //  Register the instance as interface, don't register as class
+            builder.RegisterInstance<IWorldSettings>(worldSettings);        //  Register the instance as interface, don't register as class
+            builder.Register<IWorld, GASSampleWorld>(Lifetime.Singleton);
             builder.RegisterComponentInNewPrefab<IGameMode, GASSampleGameMode>(prefab => (GASSampleGameMode)worldSettings.GameModeClass, Lifetime.Singleton);
 
             builder.RegisterSceneLifecycle<LifecycleSceneGameplay>();

@@ -1,16 +1,31 @@
+using System;
+using System.Threading;
 using CycloneGames.GameplayFramework;
-using VContainer;
+using Cysharp.Threading.Tasks;
 using VContainer.Unity;
 
 namespace GASSample.Gameplay
 {
-    public class GASSampleGameplayEntryPoint : IStartable
+    public class GASSampleGameplayEntryPoint : IAsyncStartable, IDisposable
     {
-        [Inject] private IGameMode gameMode;
+        private readonly IWorld world;
+        private readonly IGameMode gameMode;
 
-        public void Start()
+        public GASSampleGameplayEntryPoint(IWorld world, IGameMode gameMode)
         {
-            gameMode.LaunchGameMode();
+            this.world = world;
+            this.gameMode = gameMode;
+        }
+
+        public async UniTask StartAsync(CancellationToken cancellation)
+        {
+            await gameMode.LaunchGameModeAsync(cancellation);
+            world.SetGameMode(gameMode);
+        }
+
+        public void Dispose()
+        {
+            world.SetGameMode(null);
         }
     }
 }
