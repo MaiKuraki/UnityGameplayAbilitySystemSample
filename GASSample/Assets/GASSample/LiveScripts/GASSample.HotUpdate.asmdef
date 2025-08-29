@@ -21,7 +21,8 @@
         "CycloneGames.Factory.Runtime",
         "CycloneGames.Service",
         "CycloneGames.UIFramework",
-        "GASSample.AOT"
+        "GASSample.AOT",
+        "CycloneGames.GameplayTags.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
