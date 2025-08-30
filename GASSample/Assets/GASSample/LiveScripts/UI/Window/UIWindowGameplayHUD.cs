@@ -12,6 +12,9 @@ namespace GASSample.UI
     {
         [Inject] ISceneManagementAPIGateway sceneManagementAPI;
         [SerializeField] Button Btn_Back;
+        [SerializeField] StatusBar Bar_Health;
+        [SerializeField] StatusBar Bar_Stamina;
+        [SerializeField] StatusBar Bar_Exp;
 
         protected override void Awake()
         {

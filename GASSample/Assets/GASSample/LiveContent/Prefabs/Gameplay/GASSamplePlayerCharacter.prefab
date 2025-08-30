@@ -44,6 +44,7 @@ GameObject:
   - component: {fileID: 8674566816488383285}
   - component: {fileID: 6150655244417511848}
   - component: {fileID: 2719966002444439546}
+  - component: {fileID: 3702571985692504467}
   m_Layer: 3
   m_Name: GASSamplePlayerCharacter
   m_TagString: Player
@@ -81,6 +82,10 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   initialLifeSpanSec: 0
+  InitialAttributes: {fileID: 11400000, guid: 4859eb649f451e145b39509482c05076, type: 2}
+  InitialAbilities: []
+  InitialPassiveEffects: []
+  LevelUpData: {fileID: 11400000, guid: f3fc0c4f14604eb4892179fe0ead72c8, type: 2}
   CameraFocusTF: {fileID: 4159062362017834748}
 --- !u!95 &8674566816488383285
 Animator:
@@ -148,6 +153,18 @@ MonoBehaviour:
   useRootMotion: 0
   ignoreTimeScale: 0
   WorldUpSource: {fileID: 0}
+--- !u!114 &3702571985692504467
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6576029754868620640}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f87db3a1e5fd08e48a9842c5ee6b54d0, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
 --- !u!1001 &3120870873973243609
 PrefabInstance:
   m_ObjectHideFlags: 0

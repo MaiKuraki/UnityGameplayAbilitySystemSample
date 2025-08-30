@@ -21,10 +21,11 @@
         "CycloneGames.Factory.Runtime",
         "CycloneGames.Service",
         "CycloneGames.UIFramework",
-        "GASSample.AOT",
         "CycloneGames.GameplayTags.Runtime",
         "CycloneGames.GameplayFramework",
-        "CycloneGames.RPGFoundation"
+        "CycloneGames.RPGFoundation",
+        "CycloneGames.GameplayAbilities.Runtime",
+        "GASSample.AOT"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
