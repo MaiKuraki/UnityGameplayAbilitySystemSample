@@ -5,7 +5,7 @@ using CycloneGames.Logger;
 namespace GASSample.Gameplay
 {
     public class CharacterAttributeSet : AttributeSet
-    {        
+    {
         public GameplayAttribute Level { get; } = new GameplayAttribute(GASSampleTags.Attribute_Primary_Level);
 
         public GameplayAttribute Experience { get; } = new GameplayAttribute(GASSampleTags.Attribute_Meta_Experience);
@@ -90,6 +90,23 @@ namespace GASSample.Gameplay
                 {
                     // character.CheckForLevelUp();
                 }
+            }
+        }
+
+        public override void PostGameplayEffectExecute(GameplayEffectModCallbackData data)
+        {
+            base.PostGameplayEffectExecute(data);
+
+            var attribute = GetAttribute(data.Modifier.AttributeName);
+            if (attribute == null) return;
+
+            if (attribute == Health)
+            {
+                SetBaseValue(Health, System.Math.Clamp(GetBaseValue(Health), 0, GetCurrentValue(MaxHealth)));
+            }
+            else if (attribute == Stamina)
+            {
+                SetBaseValue(Stamina, System.Math.Clamp(GetBaseValue(Stamina), 0, GetCurrentValue(MaxStamina)));
             }
         }
     }

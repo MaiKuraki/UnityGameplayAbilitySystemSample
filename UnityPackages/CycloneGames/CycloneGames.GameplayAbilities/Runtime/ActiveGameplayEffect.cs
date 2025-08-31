@@ -99,7 +99,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
                 }
             }
 
-            // --- Periodic Effect Handling ---
+                        // --- Periodic Effect Handling ---
             if (!IsExpired && periodTimer >= 0)
             {
                 periodTimer -= deltaTime;
@@ -109,8 +109,9 @@ namespace CycloneGames.GameplayAbilities.Runtime
                     // Note: Periodic effect executions are not predicted in this model.
                     asc.ExecuteInstantEffect(this.Spec);
 
-                    // Reset the timer for the next period.
-                    periodTimer = Spec.Def.Period;
+                    // Reset the timer for the next period, carrying over any leftover time.
+                    // This prevents timer drift due to frame rate fluctuations.
+                    periodTimer += Spec.Def.Period;
                 }
             }
 

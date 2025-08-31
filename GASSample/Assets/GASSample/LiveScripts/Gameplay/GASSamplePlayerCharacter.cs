@@ -27,6 +27,14 @@ namespace GASSample.Gameplay
         override protected void Update()
         {
             GetMovementComponent?.MoveWithVelocity(movementVelocity);
+            AbilitySystemComponent?.Tick(Time.deltaTime, true);
+
+            if (Input.GetMouseButtonDown(0))
+            {
+                int idx = 0;
+                var abilities = AbilitySystemComponent.GetActivatableAbilities();
+                AbilitySystemComponent.TryActivateAbility(abilities[idx]);
+            }
         }
 
         public override void PossessedBy(Controller NewController)
