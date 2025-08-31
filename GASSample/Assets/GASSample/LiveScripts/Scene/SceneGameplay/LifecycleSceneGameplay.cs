@@ -37,7 +37,7 @@ namespace GASSample.Scene
 
         public UniTask OnInitialize(ISceneDataReader reader, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
         {
-            uiService.OpenUI(UIWindowName.GameplayHUD);
+            // uiService.OpenUI(UIWindowName.GameplayHUD);  //  this already opened in GameplaySceneEntryPoint
             return UniTask.CompletedTask;
         }
     }

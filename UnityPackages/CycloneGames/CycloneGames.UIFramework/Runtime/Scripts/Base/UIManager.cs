@@ -362,12 +362,12 @@ namespace CycloneGames.UIFramework
             return uiWindowInstance;
         }
 
-        public UniTask<UIWindow> OpenUIAndWait(string windowName)
+        internal UniTask<UIWindow> OpenUIAndWait(string windowName)
         {
             return OpenUIAsync(windowName, null);
         }
 
-        private async UniTask CloseUIAsync(string windowName)
+        internal async UniTask CloseUIAsync(string windowName)
         {
             if (string.IsNullOrEmpty(windowName))
             {

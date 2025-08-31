@@ -1,4 +1,5 @@
 using System;
+using Cysharp.Threading.Tasks;
 using CycloneGames.Factory.Runtime; // For IUnityObjectSpawner
 using CycloneGames.Service; // For IMainCameraService
 using CycloneGames.AssetManagement; // For IAssetPathBuilderFactory
@@ -8,6 +9,9 @@ namespace CycloneGames.UIFramework
 {
     public interface IUIService
     {
+        UniTask<UIWindow> OpenUIAsync(string windowName);
+        UniTask CloseUIAsync(string windowName);
+        
         /// <summary>
         /// Opens a UI by its registered name.
         /// </summary>
@@ -228,6 +232,18 @@ namespace CycloneGames.UIFramework
                 return (0, 0);
             }
             return uiManagerInstance.GetRootCanvasSize();
+        }
+        
+        public UniTask<UIWindow> OpenUIAsync(string windowName)
+        {
+            if (!CheckInitialization()) return UniTask.FromResult<UIWindow>(null);
+            return uiManagerInstance.OpenUIAndWait(windowName);
+        }
+
+        public async UniTask CloseUIAsync(string windowName)
+        {
+            if (!CheckInitialization()) return;
+            await uiManagerInstance.CloseUIAsync(windowName);
         }
     }
 }

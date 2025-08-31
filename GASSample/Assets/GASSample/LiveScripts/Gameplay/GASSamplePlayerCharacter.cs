@@ -1,6 +1,8 @@
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayFramework;
-using CycloneGames.Logger;
+using GASSample.Message;
+using GASSample.UI;
+using RPGSample.Message;
 using UnityEngine;
 using VContainer;
 
@@ -25,8 +27,6 @@ namespace GASSample.Gameplay
         override protected void Update()
         {
             GetMovementComponent?.MoveWithVelocity(movementVelocity);
-
-            CLogger.LogInfo($"HealthVal: {AttributeSet.GetCurrentValue(AttributeSet.Health)}");
         }
 
         public override void PossessedBy(Controller NewController)
@@ -34,12 +34,34 @@ namespace GASSample.Gameplay
             base.PossessedBy(NewController);
 
             PlayerController pc = NewController as PlayerController;
+            if (AttributeSet != null)
+            {
+                AttributeSet.Health.OnCurrentValueChanged += OnHealthChanged;
+                AttributeSet.MaxHealth.OnCurrentValueChanged += OnHealthChanged;
+                AttributeSet.Stamina.OnCurrentValueChanged += OnStaminaChanged;
+                AttributeSet.MaxStamina.OnCurrentValueChanged += OnStaminaChanged;
+                AttributeSet.Experience.OnCurrentValueChanged += OnExperienceChanged;
+            }
 
             ApplyInitialEffects();
             GrandInitialAbilities();
 
             var cameraManager = pc.GetCameraManager();
             cameraManager.SetViewTarget(CameraFocusTF);
+        }
+
+        public override void UnPossessed()
+        {
+            if (AttributeSet != null)
+            {
+                AttributeSet.Health.OnCurrentValueChanged -= OnHealthChanged;
+                AttributeSet.MaxHealth.OnCurrentValueChanged -= OnHealthChanged;
+                AttributeSet.Stamina.OnCurrentValueChanged -= OnStaminaChanged;
+                AttributeSet.MaxStamina.OnCurrentValueChanged -= OnStaminaChanged;
+                AttributeSet.Experience.OnCurrentValueChanged -= OnExperienceChanged;
+            }
+
+            base.UnPossessed();
         }
 
         private void ApplyInitialEffects()
@@ -63,6 +85,7 @@ namespace GASSample.Gameplay
                     }
                 }
             }
+
         }
 
         private void GrandInitialAbilities()
@@ -75,6 +98,55 @@ namespace GASSample.Gameplay
                     AbilitySystemComponent.GrantAbility(abilitySO.CreateAbility());
                 }
             }
+        }
+
+        protected override void OnDestroy()
+        {
+
+            base.OnDestroy();
+        }
+
+        private void OnHealthChanged(float oldValue, float newValue)
+        {
+            StatusData data = new StatusData(
+                AttributeSet.GetBaseValue(AttributeSet.Health),
+                AttributeSet.GetCurrentValue(AttributeSet.Health),
+                AttributeSet.GetBaseValue(AttributeSet.MaxHealth),
+                AttributeSet.GetCurrentValue(AttributeSet.MaxHealth)
+            );
+            UIMessage<StatusData> msg = new UIMessage<StatusData>(MessageConstant.UpdateHealth, data);
+            MessageContext.UIRouter.PublishAsync(msg);
+        }
+
+        private void OnStaminaChanged(float oldValue, float newValue)
+        {
+            StatusData data = new StatusData(
+                AttributeSet.GetBaseValue(AttributeSet.Stamina),
+                AttributeSet.GetCurrentValue(AttributeSet.Stamina),
+                AttributeSet.GetBaseValue(AttributeSet.MaxStamina),
+                AttributeSet.GetCurrentValue(AttributeSet.MaxStamina)
+            );
+            UIMessage<StatusData> msg = new UIMessage<StatusData>(MessageConstant.UpdateStamina, data);
+            MessageContext.UIRouter.PublishAsync(msg);
+        }
+
+        private void OnExperienceChanged(float oldValue, float newValue)
+        {
+            StatusData data = new StatusData(
+                AttributeSet.GetBaseValue(AttributeSet.Experience),
+                AttributeSet.GetCurrentValue(AttributeSet.Experience),
+                GetNextLevelExp(),
+                GetNextLevelExp()
+            );
+            UIMessage<StatusData> msg = new UIMessage<StatusData>(MessageConstant.UpdateExperience, data);
+        }
+
+        private float GetNextLevelExp()
+        {
+            if (AttributeSet == null) return 0;
+            int currentLevel = (int)AttributeSet.GetCurrentValue(AttributeSet.Level);
+            int nextLevel = currentLevel + 1;
+            return LevelUpData.Levels[nextLevel].XpToNextLevel;
         }
     }
 }

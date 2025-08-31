@@ -5,8 +5,8 @@ using CycloneGames.Logger;
 namespace GASSample.Gameplay
 {
     public class CharacterAttributeSet : AttributeSet
-    {
-        public GameplayAttribute Levle { get; } = new GameplayAttribute(GASSampleTags.Attribute_Primary_Level);
+    {        
+        public GameplayAttribute Level { get; } = new GameplayAttribute(GASSampleTags.Attribute_Primary_Level);
 
         public GameplayAttribute Experience { get; } = new GameplayAttribute(GASSampleTags.Attribute_Meta_Experience);
         public GameplayAttribute AttackPower { get; } = new GameplayAttribute(GASSampleTags.Attribute_Primary_Attack);

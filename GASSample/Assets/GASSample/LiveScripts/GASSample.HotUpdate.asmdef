@@ -11,6 +11,7 @@
         "CycloneGames.Utility.Runtime",
         "CycloneGames.AssetManagement",
         "VContainer",
+        "VitalRouter",
         "R3.Unity",
         "LitMotion",
         "LitMotion.Extensions",
