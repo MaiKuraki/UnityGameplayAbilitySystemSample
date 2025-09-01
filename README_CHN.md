@@ -18,7 +18,7 @@
 
 ## 关于
 
-本项目原始框架 [[UnityStarter]](https://github.com/MaiKuraki/UnityStarter) 中的 [VContainer](https://github.com/MaiKuraki/UnityStarter/tree/VContainerPublic) 分支，展示其中 [Gameplay Ability System](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities) 以及 [Gameplay Tags](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayTags) 特性，提供了一个 ARPG 的 Demo。
+本项目原始框架 [[UnityStarter]](https://github.com/MaiKuraki/UnityStarter) 中的 [VContainer](https://github.com/MaiKuraki/UnityStarter/tree/VContainerPublic) 分支，展示其中 [Gameplay Ability System](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities) 以及 [Gameplay Tags](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayTags) 特性，提供了一个 ARPG 的 Demo。仅需简单配置SO即可创建大量技能，无需复杂的代码以及蜘蛛网似的动画状态！
 
 ## 分支
 -   旧版本将保存在 `Legacy(Zenject)` 分支作为存档备份，并且不再更新。

@@ -15,6 +15,7 @@
 > I will continue to develop non-open-source projects based on the [new GAS system](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities), which also means the new GAS will continue to optimize the user experience.
 
 ## About
+Easily create a large number of skills by simply configuring Scriptable Objects, without complex code or tangled animation state machines! 
 
 This project is originally based on the [UnityStarter](https://github.com/MaiKuraki/UnityStarter) framework's [VContainer](https://github.com/MaiKuraki/UnityStarter/tree/VContainerPublic) branch, showcasing the [Gameplay Ability System](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities) and [Gameplay Tags](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayTags) features, providing an ARPG demo.
 
