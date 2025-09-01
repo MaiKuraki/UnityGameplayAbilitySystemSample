@@ -8,7 +8,7 @@ namespace GASSample.Gameplay
     {
         public int XpToNextLevel;
         public float HealthGain;
-        public float ManaGain;
+        public float StaminaGain;
         public float AttackGain;
         public float DefenseGain;
     }

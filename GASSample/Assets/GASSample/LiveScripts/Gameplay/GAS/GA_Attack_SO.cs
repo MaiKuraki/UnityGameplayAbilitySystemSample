@@ -1,15 +1,20 @@
 using CycloneGames.GameplayAbilities.Runtime;
+using CycloneGames.Utility.Runtime;
 using UnityEngine;
 
 namespace GASSample.Gameplay
 {
     public class GA_Attack : GameplayAbility
     {
-        private readonly GameplayEffect attackDmgEffect;
+        private readonly GameplayEffect effect_dmg;
+        private readonly AnimationClip anim_character;
+        private readonly AnimationClip anim_camera;
 
-        public GA_Attack(GameplayEffect attackDmgEffect)
+        public GA_Attack(AnimationClip anim_character, AnimationClip anim_camera, GameplayEffect effect_dmg)
         {
-            this.attackDmgEffect = attackDmgEffect;
+            this.anim_character = anim_character;
+            this.anim_camera = anim_camera;
+            this.effect_dmg = effect_dmg;
         }
 
         public override bool CanActivate(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec)
@@ -22,12 +27,15 @@ namespace GASSample.Gameplay
             // base.ActivateAbility(actorInfo, spec, activationInfo);
             CommitAbility(actorInfo, spec);
 
+            GASSampleCharacter character = actorInfo.OwnerActor as GASSampleCharacter;
+            character.Animator.CrossFade(anim_character.name, 0.1f);
+            
             EndAbility();
         }
 
         public override GameplayAbility CreatePoolableInstance()
         {
-            var ability = new GA_Attack(attackDmgEffect);
+            var ability = new GA_Attack(anim_character, anim_camera, effect_dmg);
 
             ability.Initialize(
                 this.Name,
@@ -49,11 +57,15 @@ namespace GASSample.Gameplay
     [CreateAssetMenu(fileName = "GA_Attack", menuName = "GASSample/Gameplay/GAS/GA/Attack")]
     public class GA_Attack_SO : GameplayAbilitySO
     {
-        public GameplayEffectSO DmgEffect;
+        [PropertyGroup("Additional Config", true)]
+        [SerializeField] private GameplayEffectSO DmgEffect;
+        [SerializeField] private AnimationClip Anim_Character;
+        [SerializeField] private AnimationClip Anim_Camera;
+
         public override GameplayAbility CreateAbility()
         {
             var effect_dmg = DmgEffect ? DmgEffect.CreateGameplayEffect() : null;
-            var ability = new GA_Attack(effect_dmg);
+            var ability = new GA_Attack(Anim_Character, Anim_Camera, effect_dmg);
 
             ability.Initialize(
                 AbilityName,

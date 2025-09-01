@@ -108,6 +108,28 @@ namespace GASSample.Gameplay
             {
                 SetBaseValue(Stamina, System.Math.Clamp(GetBaseValue(Stamina), 0, GetCurrentValue(MaxStamina)));
             }
+
+            if (attribute == Experience)
+            {
+                if (data.Target.OwnerActor is GASSampleCharacter character)
+                {
+                    bool hasExpGainTag = data.EffectSpec.Def.AssetTags.HasTag(GameplayTagManager.RequestTag(GASSampleTags.Event_Experience_Gain));
+                    if (hasExpGainTag)
+                    {
+                        character.CheckForLevelUp();
+                    }
+                    if (character.GetLevelUpData != null)
+                    {
+                        int maxLevel = character.GetLevelUpData.Levels.Count;
+                        int currentLevel = (int)GetBaseValue(Level);
+
+                        if (currentLevel >= maxLevel)
+                        {
+                            SetBaseValue(Experience, 0);
+                        }
+                    }
+                }
+            }
         }
     }
 }

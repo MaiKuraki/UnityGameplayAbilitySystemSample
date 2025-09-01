@@ -15,12 +15,12 @@ MonoBehaviour:
   EffectName: GE_StaminaRegen
   DurationPolicy: 2
   Duration: 0
-  Period: 20
+  Period: 0.1
   SerializableModifiers:
   - AttributeName: Attribute.Secondary.Stamina
     Operation: 0
     Magnitude:
-      BaseValue: 5
+      BaseValue: 2
       ScalingFactorPerLevel: 0
   ExecutionDefinition: {fileID: 0}
   Stacking:

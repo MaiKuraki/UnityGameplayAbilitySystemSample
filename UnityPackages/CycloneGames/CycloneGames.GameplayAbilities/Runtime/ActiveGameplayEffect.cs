@@ -99,7 +99,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
                 }
             }
 
-                        // --- Periodic Effect Handling ---
+            // --- Periodic Effect Handling ---
             if (!IsExpired && periodTimer >= 0)
             {
                 periodTimer -= deltaTime;

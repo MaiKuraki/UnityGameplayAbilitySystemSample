@@ -81,6 +81,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   initialLifeSpanSec: 0
+  <Animator>k__BackingField: {fileID: 8674566816488383285}
   InitialAttributes: {fileID: 11400000, guid: 4859eb649f451e145b39509482c05076, type: 2}
   InitialAbilities:
   - {fileID: 11400000, guid: ead067e9fc8b9bb4e9678aa1583963b8, type: 2}
