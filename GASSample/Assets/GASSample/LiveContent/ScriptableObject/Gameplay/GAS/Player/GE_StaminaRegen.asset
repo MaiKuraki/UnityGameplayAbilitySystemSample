@@ -20,7 +20,7 @@ MonoBehaviour:
   - AttributeName: Attribute.Secondary.Stamina
     Operation: 0
     Magnitude:
-      BaseValue: 2
+      BaseValue: 1
       ScalingFactorPerLevel: 0
   ExecutionDefinition: {fileID: 0}
   Stacking:

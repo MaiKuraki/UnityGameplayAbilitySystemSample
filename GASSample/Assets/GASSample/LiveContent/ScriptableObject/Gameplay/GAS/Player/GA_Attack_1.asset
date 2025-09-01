@@ -18,7 +18,8 @@ MonoBehaviour:
   CostEffect: {fileID: 11400000, guid: b5e19a80b04752e488ef8b81fa7ac8b4, type: 2}
   CooldownEffect: {fileID: 11400000, guid: cef206d602bb88241a2ff01689a68741, type: 2}
   AbilityTags:
-    m_SerializedExplicitTags: []
+    m_SerializedExplicitTags:
+    - Skill.Definition.Attack_1
   ActivationBlockedTags:
     m_SerializedExplicitTags: []
   ActivationRequiredTags:
@@ -28,3 +29,8 @@ MonoBehaviour:
   BlockAbilitiesWithTag:
     m_SerializedExplicitTags: []
   DmgEffect: {fileID: 11400000, guid: 52e6f2ba5e6906c4e9f930a447ba76ba, type: 2}
+  Anim_Character: {fileID: -203655887218126122, guid: 8ec7625eb1f7b2a439690467e71781c8,
+    type: 3}
+  Anim_Camera: {fileID: 0}
+  NextComboAbility: {fileID: 0}
+  ComboWindowDuration: 0.5

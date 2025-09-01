@@ -1,5 +1,7 @@
+using System.Linq;
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayFramework;
+using CycloneGames.GameplayTags.Runtime;
 using GASSample.Message;
 using GASSample.UI;
 using RPGSample.Message;
@@ -31,9 +33,29 @@ namespace GASSample.Gameplay
 
             if (Input.GetMouseButtonDown(0))
             {
-                int idx = 0;
-                var abilities = AbilitySystemComponent.GetActivatableAbilities();
-                AbilitySystemComponent.TryActivateAbility(abilities[idx]);
+                if (AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_State_ComboWindow))
+                {
+                    if (AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_Definition_Attack_2))
+                    {
+                        TryActiveAbilityByTag(GASSampleTags.Skill_Definition_Attack_3);
+                    }
+                    else if (AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_Definition_Attack_1))
+                    {
+                        TryActiveAbilityByTag(GASSampleTags.Skill_Definition_Attack_2);
+                    }
+                }
+                else
+                {
+                    bool isAnyAttackActive = 
+                        AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_Definition_Attack_1) ||
+                        AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_Definition_Attack_2) ||
+                        AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_Definition_Attack_3);
+
+                    if (!isAnyAttackActive)
+                    {
+                        TryActiveAbilityByTag(GASSampleTags.Skill_Definition_Attack_1);
+                    }
+                }
             }
         }
 
@@ -108,10 +130,18 @@ namespace GASSample.Gameplay
             }
         }
 
-        protected override void OnDestroy()
+        private void TryActiveAbilityByTag(GameplayTag tag)
         {
-
-            base.OnDestroy();
+            var abilities = AbilitySystemComponent.GetActivatableAbilities();
+            foreach (var abilitySpec in abilities)
+            {
+                if (abilitySpec.Ability != null && abilitySpec.Ability.AbilityTags.HasTag(tag))
+                {
+                    AbilitySystemComponent.CombinedTags.RemoveTag(GASSampleTags.Skill_Cooldown_Attack);
+                    AbilitySystemComponent.TryActivateAbility(abilitySpec);
+                    return;
+                }
+            }
         }
 
         private void OnHealthChanged(float oldValue, float newValue)
