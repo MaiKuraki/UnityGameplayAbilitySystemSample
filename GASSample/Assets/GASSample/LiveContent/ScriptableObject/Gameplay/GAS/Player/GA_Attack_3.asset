@@ -31,5 +31,5 @@ MonoBehaviour:
   DmgEffect: {fileID: 11400000, guid: 625a363448402704ea6be4a050858996, type: 2}
   Anim_Character: {fileID: -203655887218126122, guid: 92b587413948f9c4da210abd2287da8a,
     type: 3}
-  Anim_Camera: {fileID: 0}
+  Anim_Camera: {fileID: 7400000, guid: d74174405fd56d14d8a47214afcebe1e, type: 2}
   ComboWindowDuration: 0.5

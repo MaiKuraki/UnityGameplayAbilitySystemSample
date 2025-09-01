@@ -1,5 +1,6 @@
 using System.Linq;
 using CycloneGames.GameplayAbilities.Runtime;
+using CycloneGames.GameplayFramework;
 using CycloneGames.GameplayTags.Runtime;
 using CycloneGames.Logger;
 using CycloneGames.Utility.Runtime;
@@ -35,6 +36,10 @@ namespace GASSample.Gameplay
             GASSampleCharacter character = actorInfo.OwnerActor as GASSampleCharacter;
             AbilitySystemComponent asc = character?.AbilitySystemComponent;
 
+            GASSamplePlayerController pc = (GASSamplePlayerController)character.Controller;
+            GASSampleCameraManager cm = pc?.GetCameraManager() as GASSampleCameraManager;
+            Animator cameraAnimator = cm.GetAnimator;
+
             // Immediately clean up any orphaned combo window tag to ensure a clean state.
             asc?.RemoveLooseGameplayTag(GameplayTagManager.RequestTag(GASSampleTags.Skill_State_ComboWindow));
 
@@ -42,8 +47,14 @@ namespace GASSample.Gameplay
             {
                 EndAbility();
                 return;
+
             }
             character.Animator.CrossFade(anim_character.name, 0.1f);
+            if (cameraAnimator != null && anim_camera != null)
+            {
+                cameraAnimator.CrossFade(anim_camera.name, 0.1f);
+            }
+
             foreach (var tag in spec.Ability.AbilityTags)
             {
                 asc?.AddLooseGameplayTag(tag);

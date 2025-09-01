@@ -11,7 +11,9 @@ GameObject:
   - component: {fileID: 7094289168631456052}
   - component: {fileID: 4889576264116274839}
   - component: {fileID: 3208028559941567673}
+  - component: {fileID: 2128789966102452128}
   - component: {fileID: 5044011934468441067}
+  - component: {fileID: 994772434179423405}
   m_Layer: 0
   m_Name: GASSampleCameraManager
   m_TagString: Untagged
@@ -90,7 +92,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   Damping: {x: 0.3, y: 0.65, z: 0.5}
-  ShoulderOffset: {x: 0.5, y: -0.4, z: 0}
+  ShoulderOffset: {x: 0.5, y: 0, z: 0}
   VerticalArmLength: 0.4
   CameraSide: 0.5
   CameraDistance: 3.5
@@ -103,6 +105,25 @@ MonoBehaviour:
     CameraRadius: 0.2
     DampingIntoCollision: 0.1
     DampingFromCollision: 0.5
+--- !u!114 &2128789966102452128
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8366307557638833791}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0544e7b14d134a1449e61175446cfb95, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  ApplyAfter: 3
+  Tilt: 0
+  Pan: 0
+  Dutch: 0
+  ZoomScale: 1
+  FollowAttachment: 1
+  LookAtAttachment: 1
 --- !u!114 &5044011934468441067
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -117,3 +138,25 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   initialLifeSpanSec: 0
   DefaultFOV: 60
+  animator: {fileID: 994772434179423405}
+--- !u!95 &994772434179423405
+Animator:
+  serializedVersion: 5
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8366307557638833791}
+  m_Enabled: 1
+  m_Avatar: {fileID: 0}
+  m_Controller: {fileID: 9100000, guid: d4bd59925c4229941b91fdcc19f0228f, type: 2}
+  m_CullingMode: 0
+  m_UpdateMode: 0
+  m_ApplyRootMotion: 0
+  m_LinearVelocityBlending: 0
+  m_StabilizeFeet: 0
+  m_WarningMessage: 
+  m_HasTransformHierarchy: 1
+  m_AllowConstantClipSamplingOptimization: 1
+  m_KeepAnimatorStateOnDisable: 0
+  m_WriteDefaultValuesOnDisable: 0
