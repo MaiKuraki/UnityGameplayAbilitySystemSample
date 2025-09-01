@@ -10,7 +10,7 @@
 > [!NOTE]
 > Welcome to use the [new GAS system](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities) and the [original framework](https://github.com/MaiKuraki/UnityStarter) of this project.
 > 
-> The basic functions of this project are complete. Currently, only the basic functions of GAS are displayed, including a basic three-hit combo for ARPG. Although the demo code supports RootMotion, the animation resources do not include IK or RootMotion. If you have more new features，such as the application of GameplayCue to sound and examples, or an exp-add module, or a complete combat with AI, etc., don't hesitate to contact me in Github issues, and I will consider adding the prototype to the codebase when time permits.
+> The basic functions of this project are complete. Currently, only the basic functions of GAS are displayed, including a basic three-hit combo for ARPG. Although the demo code supports RootMotion, the animation resources do not include IK or RootMotion. If you have more new features，such as the application of GameplayCue to sound and paritcle, or an exp-add module, or a complete combat with AI, etc., don't hesitate to contact me in Github issues, and I will consider adding the prototype to the codebase when time permits.
 >
 > I will continue to develop non-open-source projects based on the [new GAS system](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities), which also means the new GAS will continue to optimize the user experience.
 

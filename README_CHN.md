@@ -8,11 +8,11 @@
 > **当前项目已经完成重构升级，新版本基于 [新的 GAS 系统](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities)，旧版分支不再维护。**
 
 > [!NOTE]
-> 本项目默认你已经完全了解虚幻引擎 GameplayAbilitySystem 系统或你已经不是初学者，项目的目的是为创建一套灵活且结构清晰的技能系统，项目基本功能已经开发完成，当前只展示 GAS 的基本功能，包含了一个 ARPG 的基本的三连击，虽然 Demo 代码已支持 RootMotion，但动画资源不包含 IK 以及 RootMotion。如果你有更多希望我加入的新功能，比如 GameplayCue 对声音以及例子的应用，或经验值模块，或者包含 AI 的完整战斗等等，请在 issule 中提出，我会酌情抽时间将原型加入代码库。
+> 本项目默认你已经完全了解虚幻引擎 GameplayAbilitySystem 或你已经不是初学者。项目的目的是为 Unity 创建一套灵活且结构清晰的技能系统，基本功能已经开发完成，包含了一个 ARPG 的基本的三连击。虽然 Demo 代码已支持 RootMotion，但动画资源不包含 IK 以及 RootMotion。如果你有更多希望我加入的新功能，比如 GameplayCue 对声音以及粒子效果的应用，或经验值模块，或者包含 AI 的完整战斗等等，请在 issule 中提出，我会酌情抽时间将原型加入代码库。
 >
 > 我会继续基于[新的 GAS 系统](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities)开发非开源的项目，也意味着新 GAS 将会继续优化使用体验。
 > 
-> 欢迎使用[新的 GAS 系统](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities)，以及本项目的[原始框架](https://github.com/MaiKuraki/UnityStarter)。
+> 欢迎使用[Unity GameplayAbilitySystem](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities)，以及本项目的[原始框架](https://github.com/MaiKuraki/UnityStarter)。
 
 ---
 

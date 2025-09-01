@@ -13,12 +13,15 @@ namespace GASSample.Gameplay
         private const string DEBUG_FLAG = "[GameplayAbility]";
         private readonly GameplayEffect effect_dmg;
         private readonly AnimationClip anim_character;
+        private readonly bool useRootMotion;
         private readonly AnimationClip anim_camera;
         private readonly float comboWindowDuration;
+        private bool cachedRootMotionState;
 
-        public GA_Attack(AnimationClip anim_character, AnimationClip anim_camera, GameplayEffect effect_dmg, float comboWindowDuration)
+        public GA_Attack(AnimationClip anim_character, bool useRootMotion, AnimationClip anim_camera, GameplayEffect effect_dmg, float comboWindowDuration)
         {
             this.anim_character = anim_character;
+            this.useRootMotion = useRootMotion;
             this.anim_camera = anim_camera;
             this.effect_dmg = effect_dmg;
             this.comboWindowDuration = comboWindowDuration;
@@ -49,7 +52,10 @@ namespace GASSample.Gameplay
                 return;
 
             }
+            cachedRootMotionState = character.Animator.applyRootMotion;
+            character.Animator.applyRootMotion = useRootMotion;
             character.Animator.CrossFade(anim_character.name, 0.1f);
+
             if (cameraAnimator != null && anim_camera != null)
             {
                 cameraAnimator.CrossFade(anim_camera.name, 0.1f);
@@ -63,6 +69,7 @@ namespace GASSample.Gameplay
             if (this.CooldownEffectDefinition == null || this.CooldownEffectDefinition.Duration <= 0)
             {
                 CLogger.LogDebug($"{DEBUG_FLAG} not have Cooldown effect.");
+                character.Animator.applyRootMotion = cachedRootMotionState;
                 EndAbility();
                 return;
             }
@@ -90,6 +97,7 @@ namespace GASSample.Gameplay
                 {
                     asc?.RemoveLooseGameplayTag(tag);
                 }
+                character.Animator.applyRootMotion = cachedRootMotionState;
                 EndAbility();
             };
             comboWindowEndTask.Activate();
@@ -107,6 +115,8 @@ namespace GASSample.Gameplay
                     asc.RemoveLooseGameplayTag(definitionTag);
                 }
             }
+            GASSampleCharacter character = Spec?.Ability?.ActorInfo.OwnerActor as GASSampleCharacter;
+            if (character) character.Animator.applyRootMotion = cachedRootMotionState;
             base.CancelAbility();
         }
 
@@ -124,7 +134,7 @@ namespace GASSample.Gameplay
 
         public override GameplayAbility CreatePoolableInstance()
         {
-            var ability = new GA_Attack(anim_character, anim_camera, effect_dmg, comboWindowDuration);
+            var ability = new GA_Attack(anim_character, useRootMotion, anim_camera, effect_dmg, comboWindowDuration);
 
             ability.Initialize(
                 this.Name,
@@ -149,13 +159,14 @@ namespace GASSample.Gameplay
         [PropertyGroup("Additional Config", true)]
         [SerializeField] private GameplayEffectSO DmgEffect;
         [SerializeField] private AnimationClip Anim_Character;
+        [SerializeField] private bool bUseRootMotion = true;
         [SerializeField] private AnimationClip Anim_Camera;
         [SerializeField] private float ComboWindowDuration = 0.2f;
 
         public override GameplayAbility CreateAbility()
         {
             var effect_dmg = DmgEffect ? DmgEffect.CreateGameplayEffect() : null;
-            var ability = new GA_Attack(Anim_Character, Anim_Camera, effect_dmg, ComboWindowDuration);
+            var ability = new GA_Attack(Anim_Character, bUseRootMotion, Anim_Camera, effect_dmg, ComboWindowDuration);
 
             ability.Initialize(
                 AbilityName,
