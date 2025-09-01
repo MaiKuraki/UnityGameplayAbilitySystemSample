@@ -4,6 +4,8 @@
 
 ---
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/MaiKuraki/UnityGameplayAbilitySystemSample)
+
 > [!NOTE]
 > **当前项目已经完成重构升级，新版本基于 [新的 GAS 系统](https://github.com/MaiKuraki/UnityStarter/tree/main/UnityStarter/Assets/ThirdParty/CycloneGames/CycloneGames.GameplayAbilities)，旧版分支不再维护。**
 
