@@ -9,7 +9,9 @@ using CycloneGames.Logger;
 ///         -> VContainer   OnEnable
 ///         -> VContainer   Configure
 ///         -> VContainer   Presenter Construct     //  May not triggered correct on Navigathena switch scene directly in OnEnter
+///         -> Navigathena  ITransitionHandle.Start (Last Scene)   Navigathena.Exit(LastScene) -> Navigathena.ITransitionHandle.Start(LastScene) -> Navigathena.Finialize(LastScene)
 ///         -> Navigathena  OnInitialize
+///         -> Navigathena  ITransitionHandle.End   (Current Scene)
 ///         -> Navigathena  OnEnter
 ///         -> VContainer   Startable Start         //  May not triggered correct on Navigathena switch scene directly in OnEnter
 ///         -> Unity        Start                   //  May not triggered correct on Navigathena switch scene directly in OnEnter
