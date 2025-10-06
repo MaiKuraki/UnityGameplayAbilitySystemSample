@@ -215,11 +215,11 @@ namespace CycloneGames.AssetManagement
 			return null;
 		}
 
-		public ISceneHandle LoadSceneAsync(string sceneLocation, LoadSceneMode loadMode = LoadSceneMode.Single, bool activateOnLoad = true, int priority = 100)
+		public async ISceneHandle LoadSceneAsync(string sceneLocation, LoadSceneMode loadMode = LoadSceneMode.Single, bool activateOnLoad = true, int priority = 100)
 		{
 			// Map to YooAsset signature: (location, sceneMode, physicsMode, suspendLoad, priority)
 			bool suspendLoad = !activateOnLoad;
-			var op = _raw.LoadSceneAsync(sceneLocation, loadMode, LocalPhysicsMode.None, suspendLoad, (uint)Mathf.Max(0, priority));
+			var op = await _raw.LoadSceneAsync(sceneLocation, loadMode, LocalPhysicsMode.None, suspendLoad, (uint)Mathf.Max(0, priority));
 			var h = new YooSceneHandle(RegisterHandle(out int id), id, op);
 			HandleTracker.Register(id, _raw.PackageName, $"SceneAsync : {sceneLocation}");
 			return h;
