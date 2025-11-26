@@ -21,6 +21,9 @@ namespace GASSample.Scene
         public TMP_Text MessageText => m_MessageText;
         public Slider ProgressSlider => m_ProgressSlider;
 
+        private float EnterTransitionDuration;
+        private float ExitTransitionDuration;
+        
         void Awake()
         {
             SetPorgressGroupVisibility(false);
@@ -36,6 +39,12 @@ namespace GASSample.Scene
         public void SetSpinnerVisibility(bool bNewVisible)
         {
             m_Spinner?.gameObject?.SetActive(bNewVisible);
+        }
+
+        public void InitTransitionData(float EnterTransitionDuration, float ExitTransitionDuration)
+        {
+            this.EnterTransitionDuration = EnterTransitionDuration;
+            this.ExitTransitionDuration = ExitTransitionDuration;
         }
 
         public async UniTask StartTransition(CancellationToken cancellationToken)

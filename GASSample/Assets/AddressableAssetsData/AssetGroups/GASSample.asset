@@ -40,11 +40,6 @@ MonoBehaviour:
     m_ReadOnly: 0
     m_SerializedLabels: []
     FlaggedDuringContentUpdateRestriction: 0
-  - m_GUID: e6340bf2c561a9a449228bfecb13b8c6
-    m_Address: Assets/ThirdParty/CycloneGames/CycloneGames.UIFramework/Samples/UIWindow_SampleUI.asset
-    m_ReadOnly: 0
-    m_SerializedLabels: []
-    FlaggedDuringContentUpdateRestriction: 0
   m_ReadOnly: 0
   m_Settings: {fileID: 11400000, guid: e46ec740f6aaed642935f5362ca33705, type: 2}
   m_SchemaSet:

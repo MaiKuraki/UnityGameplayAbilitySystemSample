@@ -1,6 +1,6 @@
 using System.Linq;
 using CycloneGames.GameplayAbilities.Runtime;
-using CycloneGames.GameplayFramework;
+using CycloneGames.GameplayFramework.Runtime;
 using CycloneGames.GameplayTags.Runtime;
 using GASSample.Message;
 using GASSample.UI;
@@ -98,7 +98,7 @@ namespace GASSample.Gameplay
         {
             if (InitialAttributes != null && AbilitySystemComponent != null)
             {
-                var ge = InitialAttributes.CreateGameplayEffect();
+                var ge = InitialAttributes.GetGameplayEffect();
                 var spec = GameplayEffectSpec.Create(ge, AbilitySystemComponent);
                 AbilitySystemComponent.ApplyGameplayEffectSpecToSelf(spec);
             }
@@ -109,7 +109,7 @@ namespace GASSample.Gameplay
                 {
                     if (passiveEffectSO != null)
                     {
-                        var ge = passiveEffectSO.CreateGameplayEffect();
+                        var ge = passiveEffectSO.GetGameplayEffect();
                         var spec = GameplayEffectSpec.Create(ge, AbilitySystemComponent);
                         AbilitySystemComponent.ApplyGameplayEffectSpecToSelf(spec);
                     }

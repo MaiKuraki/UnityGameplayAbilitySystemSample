@@ -1,0 +1,21 @@
+{
+    "name": "CycloneGames.GameplayAbilities.Sample",
+    "rootNamespace": "",
+    "references": [
+        "UniTask",
+        "CycloneGames.Logger",
+        "CycloneGames.Utility.Runtime",
+        "CycloneGames.Factory.Runtime",
+        "CycloneGames.GameplayTags.Runtime",
+        "CycloneGames.GameplayAbilities.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

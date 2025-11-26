@@ -1,10 +1,16 @@
-using CycloneGames.UIFramework;
+using CycloneGames.AssetManagement.Runtime;
+using CycloneGames.AssetManagement.Runtime.Integrations.Navigathena;
+using CycloneGames.UIFramework.Runtime;
+using Cysharp.Threading.Tasks;
 using GASSample.APIGateway;
+using GASSample.AssetManagement;
 using GASSample.Message;
 using GASSample.Scene;
+using MackySoft.Navigathena.SceneManagement;
 using R3;
 using RPGSample.Message;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using VContainer;
 
@@ -27,6 +33,7 @@ namespace GASSample.UI
     [VitalRouter.Routes]
     public partial class UIWindowGameplayHUD : UIWindow
     {
+        [Inject] IAssetModule assetModule;
         [Inject] ISceneManagementAPIGateway sceneManagementAPI;
         [SerializeField] Button Btn_Back;
         [SerializeField] StatusBar Bar_Health;
@@ -42,7 +49,7 @@ namespace GASSample.UI
             Bar_Exp?.Reset();
 
             MapTo(MessageContext.UIRouter);
-            Btn_Back.OnClickAsObservable().Subscribe(_ => BackToTitle());
+            Btn_Back.OnClickAsObservable().Subscribe(async _ => await BackToTitle());
         }
 
         protected override void OnDestroy()
@@ -52,9 +59,12 @@ namespace GASSample.UI
             base.OnDestroy();
         }
 
-        void BackToTitle()
+        async UniTask BackToTitle()
         {
-            sceneManagementAPI.Push(SceneDefinitions.Title);
+            var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
+            AssetManagementSceneIdentifier sceneTitle = new AssetManagementSceneIdentifier(pkg, ScenePath.Title, LoadSceneMode.Additive, true);
+            AssetManagementSceneIdentifier sceneTransition = new AssetManagementSceneIdentifier(pkg, ScenePath.Transition, LoadSceneMode.Additive, true);
+            await GlobalSceneNavigator.Instance.Push(sceneTitle, interruptOperation: new UnloadPackageAssetsOperation(pkg), transitionDirector: new SimpleTransitionDirector(assetModule, sceneTransition, new TransitionDisplayData(0.25f, 0.25f)));
         }
 
         [VitalRouter.Route]

@@ -1,6 +1,6 @@
-using CycloneGames.AssetManagement;
+using CycloneGames.AssetManagement.Runtime;
 
-namespace CycloneGames.UIFramework.Samples
+namespace CycloneGames.UIFramework.Runtime.Samples
 {
     public class UIAssetFactory : IAssetPathBuilderFactory
     {
@@ -20,7 +20,7 @@ namespace CycloneGames.UIFramework.Samples
     {
         public string GetAssetPath(string key)
         {
-            return $"Assets/ThirdParty/CycloneGames/CycloneGames.UIFramework/Samples/{key}.asset";
+            return key;
         }
     }
 }

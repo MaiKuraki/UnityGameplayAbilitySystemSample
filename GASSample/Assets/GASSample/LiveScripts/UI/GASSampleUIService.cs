@@ -1,4 +1,4 @@
-using CycloneGames.UIFramework;
+using CycloneGames.UIFramework.Runtime;
 
 namespace GASSample.UI
 {

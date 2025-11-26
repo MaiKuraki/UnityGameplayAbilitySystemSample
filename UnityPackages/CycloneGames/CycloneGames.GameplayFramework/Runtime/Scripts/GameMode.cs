@@ -4,7 +4,7 @@ using CycloneGames.Factory.Runtime;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
 
-namespace CycloneGames.GameplayFramework
+namespace CycloneGames.GameplayFramework.Runtime
 {
     public interface IGameMode
     {
@@ -247,7 +247,7 @@ namespace CycloneGames.GameplayFramework
             {
                 characterController.enabled = false;
             }
-            
+
             p.transform.position = SpawnTransform.position;
             p.transform.localScale = Vector3.one;
             p.transform.rotation = SpawnTransform.rotation;
@@ -305,10 +305,10 @@ namespace CycloneGames.GameplayFramework
             {
                 return;
             }
-            
+
             await PC.InitializationTask.AttachExternalCancellation(cancellationToken);
             if (cancellationToken.IsCancellationRequested) return;
-            
+
             //  Now PlayerController is fully initialized, we can restart player(spawn pawn and possess it)
             RestartPlayer(PC);
         }

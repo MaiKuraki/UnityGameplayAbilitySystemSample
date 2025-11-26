@@ -1,7 +1,7 @@
 using System;
 using System.Threading;
-using CycloneGames.GameplayFramework;
-using CycloneGames.UIFramework;
+using CycloneGames.GameplayFramework.Runtime;
+using CycloneGames.UIFramework.Runtime;
 using Cysharp.Threading.Tasks;
 using GASSample.UI;
 using VContainer.Unity;

@@ -1,16 +1,20 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
+using UnityEngine;
 
 namespace CycloneGames.GameplayTags.Runtime
 {
     public static class GameplayTagManager
     {
-        private static Dictionary<string, GameplayTagDefinition> s_TagDefinitionsByName = new Dictionary<string, GameplayTagDefinition>();
-        // Use a list internally for easier modification, and an array for the public-facing, immutable data.
-        private static List<GameplayTagDefinition> s_TagsDefinitionsList = new List<GameplayTagDefinition>();
+        public static bool HasBeenReloaded => s_HasBeenReloaded;
+
+        private static Dictionary<string, GameplayTagDefinition> s_TagDefinitionsByName = new();
+        private static List<GameplayTagDefinition> s_TagsDefinitionsList = new();
         private static GameplayTag[] s_Tags;
         private static bool s_IsInitialized;
+        private static bool s_HasBeenReloaded;
 
         public static ReadOnlySpan<GameplayTag> GetAllTags()
         {
@@ -21,32 +25,31 @@ namespace CycloneGames.GameplayTags.Runtime
         internal static GameplayTagDefinition GetDefinitionFromRuntimeIndex(int runtimeIndex)
         {
             InitializeIfNeeded();
-            // PERF: Direct array access is extremely fast.
-            // Add bounds check for stability, though valid indices should always be passed.
             if (runtimeIndex < 0 || runtimeIndex >= s_TagsDefinitionsList.Count)
             {
-                // UnityEngine.Debug.LogError($"Invalid runtimeIndex {runtimeIndex} requested. Max index is {s_TagsDefinitionsList.Count - 1}.");
                 return s_TagsDefinitionsList[0]; // Return "None" tag definition.
             }
             return s_TagsDefinitionsList[runtimeIndex];
         }
 
-        public static GameplayTag RequestTag(string name)
+        public static GameplayTag RequestTag(string name, bool logWarningIfNotFound = true)
         {
             if (string.IsNullOrEmpty(name))
             {
                 return GameplayTag.None;
             }
 
-            InitializeIfNeeded();
-            if (s_TagDefinitionsByName.TryGetValue(name, out GameplayTagDefinition definition))
+            if (TryRequestTag(name, out GameplayTag tag))
             {
-                return definition.Tag;
+                return tag;
             }
 
-            // Do not warn here anymore, as this is a common case.
-            // Let calling code decide if a warning is needed.
-            return GameplayTag.None;
+            if (logWarningIfNotFound)
+            {
+                GameplayTagLogger.LogWarning($"No tag registered with name \"{name}\".");
+            }
+
+            return GameplayTagDefinition.CreateInvalidDefinition(name).Tag;
         }
 
         public static bool TryRequestTag(string name, out GameplayTag tag)
@@ -74,78 +77,66 @@ namespace CycloneGames.GameplayTags.Runtime
             {
                 return;
             }
+            
+            s_IsInitialized = true;
 
-            // This whole block runs only once.
-            s_IsInitialized = true; // Set early to prevent re-entrancy.
+            var context = new GameplayTagRegistrationContext();
 
-            GameplayTagRegistrationContext context = new GameplayTagRegistrationContext();
-
-            // Discover tags from attributes in all loaded assemblies.
+#if UNITY_EDITOR
+            // Register tags from all assemblies with the GameplayTagAttribute attribute.
             foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
-                try
+                new AssemblyGameplayTagSource(assembly).RegisterTags(context);
+                
+                // Scans the assembly for attributes pointing to static classes with tag definitions.
+                foreach (RegisterGameplayTagsFromAttribute fromAttribute in assembly.GetCustomAttributes<RegisterGameplayTagsFromAttribute>())
                 {
-                    foreach (GameplayTagAttribute attribute in assembly.GetCustomAttributes<GameplayTagAttribute>())
-                    {
-                        try
-                        {
-                            context.RegisterTag(attribute.TagName, attribute.Description, attribute.Flags);
-                        }
-                        catch (Exception e)
-                        {
-#if UNITY_2017_1_OR_NEWER
-                            UnityEngine.Debug.LogError($"Failed to register tag '{attribute.TagName}' from assembly '{assembly.FullName}'. Reason: {e.Message}");
-#endif
-                        }
-                    }
+                    Type targetType = fromAttribute.TargetType;
+                    if (targetType == null) continue;
 
-                    // Scans the assembly for attributes pointing to static classes with tag definitions.
-                    foreach (RegisterGameplayTagsFromAttribute fromAttribute in assembly.GetCustomAttributes<RegisterGameplayTagsFromAttribute>())
+                    var fields = targetType.GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
+                    foreach (var field in fields)
                     {
-                        Type targetType = fromAttribute.TargetType;
-                        if (targetType == null) continue;
-
-                        var fields = targetType.GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
-                        foreach (var field in fields)
+                        if (field.IsLiteral && !field.IsInitOnly && field.FieldType == typeof(string))
                         {
-                            // We are looking for public static literal strings (const).
-                            if (field.IsLiteral && !field.IsInitOnly && field.FieldType == typeof(string))
+                            string tagName = (string)field.GetValue(null);
+                            if (!string.IsNullOrEmpty(tagName))
                             {
-                                string tagName = (string)field.GetValue(null);
-                                if (!string.IsNullOrEmpty(tagName))
-                                {
-                                    // Register the tag found in the static class.
-                                    // The description will default to the tag name itself.
-                                    context.RegisterTag(tagName, description: tagName, flags: GameplayTagFlags.None);
-                                }
+                                context.RegisterTag(tagName, description: tagName, flags: GameplayTagFlags.None);
                             }
                         }
                     }
                 }
-                catch (Exception e)
-                {
-                    // Some dynamic assemblies can't be introspected. This is fine, just ignore them.
-#if UNITY_2017_1_OR_NEWER
-                    UnityEngine.Debug.LogWarning($"Could not load attributes from assembly '{assembly.FullName}'. This may be expected for some system assemblies. Error: {e.Message}");
+            }
+
+            // Register tags from all JSON files in the ProjectSettings/GameplayTags directory.
+            foreach (IGameplayTagSource source in FileGameplayTagSource.GetAllFileSources())
+            {
+                source.RegisterTags(context);
+            }
+#else
+            // Register tags from the GameplayTags file in StreamingAssets.   
+            new BuildGameplayTagSource().RegisterTags(context);
 #endif
-                }
+
+            foreach (GameplayTagRegistrationError error in context.GetRegistrationErrors())
+            {
+                Debug.LogError($"Failed to register gameplay tag \"{error.TagName}\": {error.Message} (Source: {error.Source?.Name ?? "Unknown"})");
             }
 
             s_TagsDefinitionsList = context.GenerateDefinitions(true);
+            
             s_TagDefinitionsByName.Clear();
             foreach (GameplayTagDefinition definition in s_TagsDefinitionsList)
             {
-                // Also add the "None" tag to the dictionary for completeness, even though it has an empty name.
                 s_TagDefinitionsByName[definition.TagName] = definition;
             }
-
+            
             RebuildTagArray();
         }
-
+        
         private static void RebuildTagArray()
         {
-            // OPTIMIZATION: Avoid LINQ to prevent GC allocation.
-            // Create the public-facing array of tags, skipping the 'None' tag at index 0.
             int tagCount = s_TagsDefinitionsList.Count - 1;
             if (tagCount < 0) tagCount = 0;
 
@@ -159,49 +150,103 @@ namespace CycloneGames.GameplayTags.Runtime
         public static void RegisterDynamicTags(IEnumerable<string> tags)
         {
             if (tags == null) return;
-
             InitializeIfNeeded();
-            var context = new GameplayTagRegistrationContext(s_TagsDefinitionsList);
 
             foreach (string tag in tags)
             {
                 if (string.IsNullOrEmpty(tag)) continue;
-                context.RegisterTag(tag, string.Empty, GameplayTagFlags.None);
+                RegisterDynamicTag(tag, string.Empty, GameplayTagFlags.None, false);
             }
-
-            // Finalize registration
-            s_TagsDefinitionsList = context.GenerateDefinitions(false); // Do not add another "None" tag.
-            // Re-map all definitions by name
-            s_TagDefinitionsByName.Clear();
-            foreach (var definition in s_TagsDefinitionsList)
-            {
-                s_TagDefinitionsByName[definition.TagName] = definition;
-            }
-            RebuildTagArray();
+            
+            RebuildTagHierarchyAndArray();
         }
 
         public static void RegisterDynamicTag(string name, string description = null, GameplayTagFlags flags = GameplayTagFlags.None)
         {
-            if (string.IsNullOrEmpty(name)) return;
+            RegisterDynamicTag(name, description, flags, true);
+        }
 
+        private static void RegisterDynamicTag(string name, string description, GameplayTagFlags flags, bool rebuildHierarchy)
+        {
+            if (string.IsNullOrEmpty(name)) return;
             InitializeIfNeeded();
 
-            // If tag already exists, do nothing.
             if (s_TagDefinitionsByName.ContainsKey(name))
             {
                 return;
             }
 
-            var context = new GameplayTagRegistrationContext(s_TagsDefinitionsList);
-            context.RegisterTag(name, description, flags);
+            var newDefinition = new GameplayTagDefinition(name, description, flags);
+            s_TagDefinitionsByName.Add(name, newDefinition);
+            s_TagsDefinitionsList.Add(newDefinition);
+            
+            if (rebuildHierarchy)
+            {
+                RebuildTagHierarchyAndArray();
+            }
+        }
 
-            s_TagsDefinitionsList = context.GenerateDefinitions(false);
-            s_TagDefinitionsByName.Clear();
+        private static void RebuildTagHierarchyAndArray()
+        {
+            // Sort definitions to ensure parent tags are processed before children.
+            s_TagsDefinitionsList.Sort((a, b) => string.Compare(a.TagName, b.TagName, StringComparison.Ordinal));
+            
+            // Update runtime indices after sorting.
+            for (int i = 0; i < s_TagsDefinitionsList.Count; i++)
+            {
+                s_TagsDefinitionsList[i].SetRuntimeIndex(i);
+            }
+
+            // Rebuild hierarchy relationships.
+            var definitionsByName = s_TagsDefinitionsList.ToDictionary(d => d.TagName);
             foreach (var definition in s_TagsDefinitionsList)
             {
-                s_TagDefinitionsByName[definition.TagName] = definition;
+                if (definition.IsNone()) continue;
+
+                string parentName = GameplayTagUtility.GetParentName(definition.TagName);
+                if (!string.IsNullOrEmpty(parentName) && definitionsByName.TryGetValue(parentName, out var parentDef))
+                {
+                    definition.SetParent(parentDef);
+                }
             }
+            
+            foreach (var definition in s_TagsDefinitionsList)
+            {
+                if (definition.IsNone()) continue;
+                
+                var children = s_TagsDefinitionsList.Where(d => d.ParentTagDefinition == definition).ToList();
+                definition.SetChildren(children);
+
+                var hierarchyTags = new List<GameplayTag>();
+                var current = definition;
+                while (current != null && !current.IsNone())
+                {
+                    hierarchyTags.Add(current.Tag);
+                    current = current.ParentTagDefinition;
+                }
+                hierarchyTags.Reverse();
+                definition.SetHierarchyTags(hierarchyTags.ToArray());
+            }
+
             RebuildTagArray();
+        }
+
+        public static void ReloadTags()
+        {
+            s_IsInitialized = false;
+            s_TagDefinitionsByName.Clear();
+            s_TagsDefinitionsList.Clear();
+
+            InitializeIfNeeded();
+
+            s_HasBeenReloaded = true;
+
+            if (Application.isPlaying)
+            {
+                Debug.LogWarning("Gameplay tags have been reloaded at runtime." +
+                               " Existing data structures using gameplay tags may not work as expected." +
+                               " A domain reload is required.");
+            }
         }
     }
 }

@@ -427,12 +427,17 @@ public class HealAbilitySO : GameplayAbilitySO
 **Step 4.4: Test!**
 Run the scene. You won't see attributes in the Inspector because `PlayerAttributeSet` is a pure C# class. To test, you can add a debug log in `PlayerAttributeSet`'s `PreAttributeChange` method to see the value change. Press the `H` key. You should see a "Heal Ability Activated" message in your console.
 
+## Demo Preview
+-   DemoLink: [https://github.com/MaiKuraki/UnityGameplayAbilitySystemSample](https://github.com/MaiKuraki/UnityGameplayAbilitySystemSample)
+-   <img src="./Documents~/DemoPreview_2.gif" alt="Demo Preview 1" style="width: 100%; height: auto; max-width: 800px;" />
+-   <img src="./Documents~/DemoPreview_1.png" alt="Demo Preview 2" style="width: 100%; height: auto; max-width: 800px;" />
+
 ## Dependencies
 
 This package relies on the following external and internal packages:
 
 *   `com.cysharp.unitask`: For asynchronous operations.
-*   `com.unity.addressables`: For loading assets asynchronously.
-*   `com.cyclone-games.gameplay-tags`: For the underlying `GameplayTag` system.
+*   `com.cyclone-games.assetmanagement`: For loading assets.
+*   `com.cyclone-games.gameplay-tags`: For the underlying `GameplayTa g` system.
 *   `com.cyclone-games.logger`: For debug logging.
 *   `com.cyclone-games.factory`: For object creation and pooling.

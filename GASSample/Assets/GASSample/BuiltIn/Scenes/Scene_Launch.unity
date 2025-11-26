@@ -213,7 +213,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   parentReference:
     TypeName: GASSample.AOT.RootLifetimeScope
-  autoRun: 1
+  autoRun: 0
   autoInjectGameObjects: []
 --- !u!1660057539 &9223372036854775807
 SceneRoots:

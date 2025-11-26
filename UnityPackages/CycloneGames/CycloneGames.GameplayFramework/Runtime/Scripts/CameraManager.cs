@@ -2,7 +2,7 @@ using CycloneGames.Logger;
 using Unity.Cinemachine;
 using UnityEngine;
 
-namespace CycloneGames.GameplayFramework
+namespace CycloneGames.GameplayFramework.Runtime
 {
     public class CameraManager : Actor
     {
@@ -21,7 +21,7 @@ namespace CycloneGames.GameplayFramework
         public bool IsInitialized { get; private set; }
         private float lockedFOV;
         public float GetLockedFOV() => lockedFOV;
-        private Transform PendingViewTarget;
+        private Transform PendingViewTargetTF;
 
         /// <summary>
         /// Sets the provided camera as the new active camera.
@@ -48,12 +48,12 @@ namespace CycloneGames.GameplayFramework
 
         public virtual void SetViewTarget(Transform NewTargetTF)
         {
-            PendingViewTarget = NewTargetTF;
+            PendingViewTargetTF = NewTargetTF;
             // This also operates on the active camera.
-            if (ActiveVirtualCamera != null && PendingViewTarget != null)
+            if (ActiveVirtualCamera != null && PendingViewTargetTF != null)
             {
-                ActiveVirtualCamera.Follow = PendingViewTarget;
-                ActiveVirtualCamera.LookAt = PendingViewTarget;
+                ActiveVirtualCamera.Follow = PendingViewTargetTF;
+                ActiveVirtualCamera.LookAt = PendingViewTargetTF;
             }
         }
 

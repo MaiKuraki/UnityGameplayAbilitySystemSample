@@ -48,3 +48,5 @@ MonoBehaviour:
     TypeName: GASSample.AOT.RootLifetimeScope
   autoRun: 1
   autoInjectGameObjects: []
+  assetResolver: {fileID: 6774455459930225581, guid: 61d958907678b7341a755b3b916e985c,
+    type: 3}

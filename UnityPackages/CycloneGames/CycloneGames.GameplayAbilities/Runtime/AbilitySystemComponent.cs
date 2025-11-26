@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using CycloneGames.Factory.Runtime;
 using CycloneGames.GameplayTags.Runtime;
@@ -60,14 +60,15 @@ namespace CycloneGames.GameplayAbilities.Runtime
         private readonly List<GameplayAbilitySpec> activatableAbilities = new List<GameplayAbilitySpec>(16);
         public IReadOnlyList<GameplayAbilitySpec> GetActivatableAbilities() => activatableAbilities.AsReadOnly();
 
+        private readonly List<GameplayAbilitySpec> tickingAbilities = new List<GameplayAbilitySpec>(16);
         private readonly Dictionary<ActiveGameplayEffect, List<GameplayAbilitySpec>> effectGrantedAbilities = new Dictionary<ActiveGameplayEffect, List<GameplayAbilitySpec>>(16);
-        private readonly HashSet<GameplayAttribute> dirtyAttributes = new HashSet<GameplayAttribute>(32);
-        
-        // Caches which active effects affect which attributes, to optimize RecalculateDirtyAttributes.
-        private readonly Dictionary<GameplayAttribute, List<ActiveGameplayEffect>> attributeToActiveEffectsMap = new Dictionary<GameplayAttribute, List<ActiveGameplayEffect>>();
 
-        private static readonly List<ActiveGameplayEffect> expiredEffectsScratchPad = new List<ActiveGameplayEffect>(16);
-        private static List<ModifierInfo> executionOutputScratchPad = new List<ModifierInfo>(16);
+        private readonly List<GameplayAttribute> dirtyAttributes = new List<GameplayAttribute>(32);
+
+        [ThreadStatic]
+        private static List<ActiveGameplayEffect> expiredEffectsScratchPad;
+        [ThreadStatic]
+        private static List<ModifierInfo> executionOutputScratchPad;
 
         // --- Prediction ---
         private PredictionKey currentPredictionKey;
@@ -108,7 +109,11 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         public void MarkAttributeDirty(GameplayAttribute attribute)
         {
-            if (attribute != null) dirtyAttributes.Add(attribute);
+            if (attribute != null && !attribute.IsDirty)
+            {
+                attribute.IsDirty = true;
+                dirtyAttributes.Add(attribute);
+            }
         }
 
         public GameplayAttribute GetAttribute(string name)
@@ -121,7 +126,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
         {
             if (ability == null) return null;
 
-            var spec = new GameplayAbilitySpec(ability, level);
+            var spec = GameplayAbilitySpec.Create(ability, level);
             spec.Init(this);
 
             activatableAbilities.Add(spec);
@@ -210,6 +215,8 @@ namespace CycloneGames.GameplayAbilities.Runtime
             this.currentPredictionKey = activationInfo.PredictionKey;
 
             spec.IsActive = true;
+            tickingAbilities.Add(spec);
+
             ability.ActivateAbility(new GameplayAbilityActorInfo(OwnerActor, AvatarActor), spec, activationInfo);
 
             // Clear prediction key after atomic activation
@@ -266,7 +273,12 @@ namespace CycloneGames.GameplayAbilities.Runtime
         {
             if (ability.Spec != null)
             {
-                ability.Spec.IsActive = false;
+                if (ability.Spec.IsActive)
+                {
+                    ability.Spec.IsActive = false;
+                    tickingAbilities.Remove(ability.Spec);
+                }
+
                 // This ensures that flags like 'isEnding' are ready for the next activation.
                 ability.InternalOnEndAbility();
 
@@ -337,16 +349,16 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
             using (Pools.ListPool<ActiveGameplayEffect>.Get(out var removedEffects))
             {
-                // The predicate captures the effects to be removed into a temporary list for post-processing.
-                activeEffects.RemoveAll(effect =>
+                for (int i = activeEffects.Count - 1; i >= 0; i--)
                 {
+                    var effect = activeEffects[i];
                     bool shouldRemove = effect.Spec.Def.GrantedTags.HasAny(tags) || effect.Spec.Def.AssetTags.HasAny(tags);
                     if (shouldRemove)
                     {
+                        activeEffects.RemoveAt(i);
                         removedEffects.Add(effect);
                     }
-                    return shouldRemove;
-                });
+                }
 
                 foreach (var effect in removedEffects)
                 {
@@ -382,6 +394,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
             // Prediction of instant damage is complex and often avoided.
             if (spec.Def.Execution != null)
             {
+                if (executionOutputScratchPad == null) executionOutputScratchPad = new List<ModifierInfo>(16);
                 executionOutputScratchPad.Clear();
                 spec.Def.Execution.Execute(spec, ref executionOutputScratchPad);
                 foreach (var modInfo in executionOutputScratchPad)
@@ -395,13 +408,18 @@ namespace CycloneGames.GameplayAbilities.Runtime
                 }
             }
 
-            foreach (var mod in spec.Def.Modifiers)
+            var modifiers = spec.Def.Modifiers;
+            for (int i = 0; i < modifiers.Count; i++)
             {
-                var attribute = GetAttribute(mod.AttributeName);
+                var mod = modifiers[i];
+                GameplayAttribute attribute = null;
+                if (i < spec.TargetAttributes.Length) attribute = spec.TargetAttributes[i];
+                if (attribute == null) attribute = GetAttribute(mod.AttributeName);
+
                 if (attribute != null)
                 {
                     //  Modify the base value, so isFromExecution is true
-                    ApplyModifier(spec, attribute, mod, spec.GetCalculatedMagnitude(mod), true);
+                    ApplyModifier(spec, attribute, mod, spec.GetCalculatedMagnitude(i), true);
                 }
             }
 
@@ -411,32 +429,23 @@ namespace CycloneGames.GameplayAbilities.Runtime
         // --- Tick and State Management ---
         public void Tick(float deltaTime, bool isServer)
         {
-            // Tick tasks for active abilities
-            foreach (var spec in activatableAbilities)
+            for (int i = tickingAbilities.Count - 1; i >= 0; i--)
             {
-                if (spec.IsActive) spec.GetPrimaryInstance()?.TickTasks(deltaTime);
+                var spec = tickingAbilities[i];
+                spec.GetPrimaryInstance()?.TickTasks(deltaTime);
             }
 
             // Server is authoritative over effect duration
             if (isServer)
             {
-                expiredEffectsScratchPad.Clear();
                 for (int i = activeEffects.Count - 1; i >= 0; i--)
                 {
-                    if (activeEffects[i].Tick(deltaTime, this))
+                    var effect = activeEffects[i];
+                    if (effect.Tick(deltaTime, this))
                     {
-                        expiredEffectsScratchPad.Add(activeEffects[i]);
+                        RemoveActiveEffectAtIndex(i);
+                        OnEffectRemoved(effect, true);
                     }
-                }
-
-                if (expiredEffectsScratchPad.Count > 0)
-                {
-                    foreach (var expiredEffect in expiredEffectsScratchPad)
-                    {
-                        activeEffects.Remove(expiredEffect);
-                        OnEffectRemoved(expiredEffect, true);
-                    }
-                    expiredEffectsScratchPad.Clear();
                 }
             }
 
@@ -446,10 +455,23 @@ namespace CycloneGames.GameplayAbilities.Runtime
             }
         }
 
+        private void RemoveActiveEffectAtIndex(int index)
+        {
+            int lastIndex = activeEffects.Count - 1;
+            if (index != lastIndex)
+            {
+                activeEffects[index] = activeEffects[lastIndex];
+            }
+            activeEffects.RemoveAt(lastIndex);
+        }
+
         private void RecalculateDirtyAttributes()
         {
-            foreach (var attr in dirtyAttributes)
+            for (int d = 0; d < dirtyAttributes.Count; d++)
             {
+                var attr = dirtyAttributes[d];
+                attr.IsDirty = false;
+
                 float baseValue = attr.OwningSet.GetBaseValue(attr);
                 float additive = 0;
                 float multiplicitive = 1.0f;
@@ -457,36 +479,40 @@ namespace CycloneGames.GameplayAbilities.Runtime
                 float overrideValue = 0;
                 bool hasOverride = false;
 
-                if (attributeToActiveEffectsMap.TryGetValue(attr, out var affectingEffects))
+                var affectingEffects = attr.AffectingEffects;
+                for (int i = 0; i < affectingEffects.Count; i++)
                 {
-                    foreach (var effect in affectingEffects)
-                    {
-                        if (effect.Spec.Def.Period > 0 || (!effect.Spec.Def.OngoingTagRequirements.IsEmpty && !effect.Spec.Def.OngoingTagRequirements.MeetsRequirements(CombinedTags)))
-                        {
-                            continue;
-                        }
+                    var effect = affectingEffects[i];
 
-                        foreach (var mod in effect.Spec.Def.Modifiers)
+                    // Check if effect is active and meets requirements
+                    if (effect.Spec.Def.Period > 0 ||
+                        (!effect.Spec.Def.OngoingTagRequirements.IsEmpty && !effect.Spec.Def.OngoingTagRequirements.MeetsRequirements(CombinedTags)))
+                    {
+                        continue;
+                    }
+
+                    var modifiers = effect.Spec.Def.Modifiers;
+                    for (int m = 0; m < modifiers.Count; m++)
+                    {
+                        var mod = modifiers[m];
+                        if (effect.Spec.TargetAttributes[m] == attr)
                         {
-                            if (mod.AttributeName == attr.Name)
+                            float magnitude = effect.Spec.ModifierMagnitudes[m] * effect.StackCount;
+                            switch (mod.Operation)
                             {
-                                float magnitude = effect.Spec.GetCalculatedMagnitude(mod) * effect.StackCount;
-                                switch (mod.Operation)
-                                {
-                                    case EAttributeModifierOperation.Add:
-                                        additive += magnitude;
-                                        break;
-                                    case EAttributeModifierOperation.Multiply:
-                                        multiplicitive *= magnitude;
-                                        break;
-                                    case EAttributeModifierOperation.Division:
-                                        if (magnitude != 0) division *= magnitude;
-                                        break;
-                                    case EAttributeModifierOperation.Override:
-                                        overrideValue = magnitude;
-                                        hasOverride = true;
-                                        break;
-                                }
+                                case EAttributeModifierOperation.Add:
+                                    additive += magnitude;
+                                    break;
+                                case EAttributeModifierOperation.Multiply:
+                                    multiplicitive *= magnitude;
+                                    break;
+                                case EAttributeModifierOperation.Division:
+                                    if (magnitude != 0) division *= magnitude;
+                                    break;
+                                case EAttributeModifierOperation.Override:
+                                    overrideValue = magnitude;
+                                    hasOverride = true;
+                                    break;
                             }
                         }
                     }
@@ -505,19 +531,18 @@ namespace CycloneGames.GameplayAbilities.Runtime
         {
             fromEffectsTags.AddTags(effect.Spec.Def.GrantedTags);
             UpdateCombinedTags();
-            
-            // Update the attribute-to-effect map
-            foreach (var modifier in effect.Spec.Def.Modifiers)
+
+            // Update the attribute's internal effect list directly
+            var modifiers = effect.Spec.Def.Modifiers;
+            for (int i = 0; i < modifiers.Count; i++)
             {
-                var attribute = GetAttribute(modifier.AttributeName);
+                var attribute = effect.Spec.TargetAttributes[i];
+                // Fallback if cache is missing (rare/instant execution edge case), usually cached.
+                if (attribute == null) attribute = GetAttribute(modifiers[i].AttributeName);
+
                 if (attribute != null)
                 {
-                    if (!attributeToActiveEffectsMap.TryGetValue(attribute, out var effectList))
-                    {
-                        effectList = new List<ActiveGameplayEffect>();
-                        attributeToActiveEffectsMap[attribute] = effectList;
-                    }
-                    effectList.Add(effect);
+                    attribute.AffectingEffects.Add(effect);
                 }
             }
 
@@ -539,7 +564,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
                 // Iterate through the tags in the effect's cue container.
                 foreach (var cueTag in effect.Spec.Def.GameplayCues)
                 {
-                    if (cueTag == GameplayTag.None) continue;
+                    if (cueTag.IsNone) continue;
 
                     GameplayCueManager.Instance.HandleCue(cueTag, eventType, effect.Spec).Forget();
 
@@ -555,14 +580,24 @@ namespace CycloneGames.GameplayAbilities.Runtime
         {
             fromEffectsTags.RemoveTags(effect.Spec.Def.GrantedTags);
             UpdateCombinedTags();
-            
-            // Update the attribute-to-effect map
-            foreach (var modifier in effect.Spec.Def.Modifiers)
+
+            // Remove from attribute's internal list
+            var modifiers = effect.Spec.Def.Modifiers;
+            for (int i = 0; i < modifiers.Count; i++)
             {
-                var attribute = GetAttribute(modifier.AttributeName);
-                if (attribute != null && attributeToActiveEffectsMap.TryGetValue(attribute, out var effectList))
+                var attribute = effect.Spec.TargetAttributes[i];
+                // Fallback lookup
+                if (attribute == null) attribute = GetAttribute(modifiers[i].AttributeName);
+
+                if (attribute != null)
                 {
-                    effectList.Remove(effect);
+                    int index = attribute.AffectingEffects.IndexOf(effect);
+                    if (index >= 0)
+                    {
+                        int lastIndex = attribute.AffectingEffects.Count - 1;
+                        attribute.AffectingEffects[index] = attribute.AffectingEffects[lastIndex];
+                        attribute.AffectingEffects.RemoveAt(lastIndex);
+                    }
                 }
             }
 
@@ -576,7 +611,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
             {
                 foreach (var cueTag in effect.Spec.Def.GameplayCues)
                 {
-                    if (cueTag == GameplayTag.None) continue;
+                    if (cueTag.IsNone) continue;
                     GameplayCueManager.Instance.HandleCue(cueTag, EGameplayCueEvent.Removed, effect.Spec).Forget();
                 }
             }
@@ -677,14 +712,13 @@ namespace CycloneGames.GameplayAbilities.Runtime
         }
         private void ApplyModifier(GameplayEffectSpec spec, GameplayAttribute attribute, ModifierInfo mod, float magnitude, bool isFromExecution)
         {
-            var targetAttribute = GetAttribute(mod.AttributeName);
-            if (targetAttribute == null)
+            if (attribute == null)
             {
                 CLogger.LogWarning($"ApplyModifier failed: Attribute '{mod.AttributeName}' not found on ASC.");
                 return;
             }
 
-            var targetAttributeSet = targetAttribute.OwningSet;
+            var targetAttributeSet = attribute.OwningSet;
             if (targetAttributeSet == null) return;
 
             // If the effect is duration-based AND this is not an explicit execution (like a periodic tick),
@@ -706,19 +740,15 @@ namespace CycloneGames.GameplayAbilities.Runtime
             // Ensure the effect and its definition are valid.
             if (activeEffect?.Spec?.Def?.Modifiers == null) return;
 
-            // Iterate through all modifiers defined in the effect.
-            foreach (var modifier in activeEffect.Spec.Def.Modifiers)
+            var targetAttributes = activeEffect.Spec.TargetAttributes;
+            if (targetAttributes == null) return;
+
+            for (int i = 0; i < targetAttributes.Length; i++)
             {
-                // We cannot just use modifier.Attribute directly anymore as it doesn't exist.
-                // We use the attribute's name string to find the actual attribute instance.
-                if (!string.IsNullOrEmpty(modifier.AttributeName))
+                var attribute = targetAttributes[i];
+                if (attribute != null)
                 {
-                    var attribute = GetAttribute(modifier.AttributeName);
-                    if (attribute != null)
-                    {
-                        // Mark the resolved attribute instance as dirty.
-                        MarkAttributeDirty(attribute);
-                    }
+                    MarkAttributeDirty(attribute);
                 }
             }
         }

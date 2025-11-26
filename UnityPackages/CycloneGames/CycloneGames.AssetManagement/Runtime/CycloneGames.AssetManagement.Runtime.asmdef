@@ -1,0 +1,33 @@
+{
+    "name": "CycloneGames.AssetManagement.Runtime",
+    "rootNamespace": "",
+    "references": [
+        "UniTask",
+        "CycloneGames.Logger",
+        "Unity.Addressables",
+        "Unity.ResourceManager",
+        "YooAsset",
+        "VContainer",
+        "MackySoft.Navigathena"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.addressables",
+            "expression": "",
+            "define": "ADDRESSABLES_PRESENT"
+        },
+        {
+            "name": "com.tuyoogame.yooasset",
+            "expression": "",
+            "define": "YOOASSET_PRESENT"
+        }
+    ],
+    "noEngineReferences": false
+}

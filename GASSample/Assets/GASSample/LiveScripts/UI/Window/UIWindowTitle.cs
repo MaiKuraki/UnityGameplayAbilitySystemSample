@@ -1,9 +1,14 @@
-using CycloneGames.UIFramework;
+using CycloneGames.AssetManagement.Runtime;
+using CycloneGames.AssetManagement.Runtime.Integrations.Navigathena;
+using CycloneGames.UIFramework.Runtime;
 using GASSample.APIGateway;
+using GASSample.AssetManagement;
 using GASSample.Scene;
+using MackySoft.Navigathena.SceneManagement;
 using R3;
 using TMPro;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using VContainer;
 
@@ -11,6 +16,7 @@ namespace GASSample.UI
 {
     public class UIWindowTitle : UIWindow
     {
+        [Inject] private readonly IAssetModule assetModule;
         [Inject] private readonly ISceneManagementAPIGateway sceneManagementAPIGateway;
         [SerializeField] private Button buttonStart;
         [SerializeField] private TMP_Text versionText;
@@ -32,8 +38,10 @@ namespace GASSample.UI
 
         void ClickStart()
         {
-            // CLogger.LogInfo("[UIWindowTitle] ClickStart");
-            sceneManagementAPIGateway.Push(SceneDefinitions.Gameplay);
+            // CLogger.LogInfo("[UIWindowTitle] ClickStart");            
+            var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
+            AssetManagementSceneIdentifier sceneGameplay = new AssetManagementSceneIdentifier(pkg, ScenePath.Gameplay, LoadSceneMode.Additive, true);
+            GlobalSceneNavigator.Instance.Push(sceneGameplay);
         }
 
         /// <summary>

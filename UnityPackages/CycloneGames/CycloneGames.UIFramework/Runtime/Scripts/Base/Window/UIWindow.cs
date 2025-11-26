@@ -2,16 +2,16 @@ using UnityEngine;
 using Cysharp.Threading.Tasks;
 using System.Threading;
 
-namespace CycloneGames.UIFramework
+namespace CycloneGames.UIFramework.Runtime
 {
     public class UIWindow : MonoBehaviour
     {
         [SerializeField, Header("Priority Override"), Range(-100, 400)] private int priority = 0; // Default priority
         public int Priority => priority;
-        
+
         private string windowNameInternal;
         public string WindowName => windowNameInternal;
-        
+
         private IUIWindowState currentState;
         private CancellationTokenSource openCts;
         private CancellationTokenSource closeCts;
@@ -25,6 +25,12 @@ namespace CycloneGames.UIFramework
         private UILayer parentLayerInternal;
         public UILayer ParentLayer => parentLayerInternal; // Public getter
 
+        private CanvasGroup canvasGroup;
+        private string sourceAssetPath;
+        public System.Action<string> OnReleaseAssetReference;
+
+        public void SetSourceAssetPath(string path) => sourceAssetPath = path;
+
         private bool _isDestroying = false; // Flag to prevent multiple destruction logic paths
 
         /// <summary>
@@ -37,7 +43,7 @@ namespace CycloneGames.UIFramework
             {
                 Debug.LogError("[UIWindow] Window name cannot be null or empty.", this);
                 // Fallback to GameObject name if newWindowName is invalid, though this should be avoided.
-                windowNameInternal = gameObject.name; 
+                windowNameInternal = gameObject.name;
                 return;
             }
             windowNameInternal = newWindowName;
@@ -81,7 +87,14 @@ namespace CycloneGames.UIFramework
             openCts = null;
 
             closeCts?.Dispose();
-            closeCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+            if (externalToken == CancellationToken.None)
+            {
+                closeCts = new CancellationTokenSource();
+            }
+            else
+            {
+                closeCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+            }
             var ct = closeCts.Token;
 
             OnStartClose();
@@ -139,7 +152,7 @@ namespace CycloneGames.UIFramework
             _isDestroying = true; // Mark that destruction process has started from logical close
 
             ChangeState(ClosedStateShared);
-            
+
             // The window is responsible for destroying its GameObject.
             // UILayer will be notified via this window's OnDestroy method.
             if (gameObject) // Check if not already destroyed by some other means
@@ -155,6 +168,50 @@ namespace CycloneGames.UIFramework
             {
                 windowNameInternal = gameObject.name; // Fallback, but UIManager should set it.
             }
+            canvasGroup = GetComponent<CanvasGroup>();
+        }
+
+        /// <summary>
+        /// Sets the visibility of the window using CanvasGroup if available, otherwise SetActive.
+        /// This is more performant than SetActive for frequent toggling.
+        /// </summary>
+        public virtual void SetVisible(bool visible)
+        {
+            if (canvasGroup != null)
+            {
+                canvasGroup.alpha = visible ? 1f : 0f;
+                canvasGroup.interactable = visible;
+                canvasGroup.blocksRaycasts = visible;
+            }
+            else
+            {
+                gameObject.SetActive(visible);
+            }
+        }
+
+        [ContextMenu("Optimize Hierarchy (Disable RaycastTargets)")]
+        public void OptimizeHierarchy()
+        {
+            var graphics = GetComponentsInChildren<UnityEngine.UI.Graphic>(true);
+            foreach (var g in graphics)
+            {
+                // Skip if it's a button or explicitly interactive (rough heuristic)
+                if (g.GetComponent<UnityEngine.UI.Button>() != null ||
+                    g.GetComponent<UnityEngine.UI.InputField>() != null ||
+                    g.GetComponent<UnityEngine.UI.Toggle>() != null ||
+                    g.GetComponent<UnityEngine.UI.ScrollRect>() != null ||
+                    g.GetComponent<UnityEngine.UI.Slider>() != null ||
+                    g.GetComponent<UnityEngine.UI.Dropdown>() != null)
+                {
+                    continue;
+                }
+
+                // If it's just an Image or Text serving as decoration
+                g.raycastTarget = false;
+            }
+#if UNITY_EDITOR
+            UnityEditor.EditorUtility.SetDirty(this);
+#endif
         }
 
         /// <summary>
@@ -186,11 +243,11 @@ namespace CycloneGames.UIFramework
             {
                 await _transitionDriver.PlayOpenAsync(this, ct);
             }
-            
+
             // Allow derived classes to await custom animations; here it's immediate
             if (ct.IsCancellationRequested) return;
             OnFinishedOpen();
-            
+
             // The task is completed, signaling that the window is fully open.
             await Cysharp.Threading.Tasks.UniTask.CompletedTask;
         }
@@ -206,7 +263,14 @@ namespace CycloneGames.UIFramework
             closeCts = null;
 
             openCts?.Dispose();
-            openCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+            if (externalToken == CancellationToken.None)
+            {
+                openCts = new CancellationTokenSource();
+            }
+            else
+            {
+                openCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+            }
             var ct = openCts.Token;
 
             OnStartOpen();
@@ -236,7 +300,7 @@ namespace CycloneGames.UIFramework
             closeCts?.Cancel();
             closeCts?.Dispose();
             closeCts = null;
-            
+
             // Debug.Log($"[UIWindow] OnDestroy called for {WindowName}", this);
 
             // Notify the parent layer that this window is actually destroyed
@@ -244,12 +308,19 @@ namespace CycloneGames.UIFramework
             parentLayerInternal?.NotifyWindowDestroyed(this);
             parentLayerInternal = null; // Clear reference to prevent further calls
 
+            // Notify UIManager to release asset reference
+            if (!string.IsNullOrEmpty(sourceAssetPath))
+            {
+                OnReleaseAssetReference?.Invoke(sourceAssetPath);
+                OnReleaseAssetReference = null;
+            }
+
             // Ensure the current state's OnExit is called if it hasn't been through a normal close.
             // This is important if the GameObject is destroyed externally without going through Close().
             if (currentState != null && !(currentState is ClosedState))
             {
-                 // Debug.LogWarning($"[UIWindow] {WindowName} destroyed externally, attempting OnExit for state {currentState.GetType().Name}", this);
-                 currentState.OnExit(this); // Graceful exit for the current state
+                // Debug.LogWarning($"[UIWindow] {WindowName} destroyed externally, attempting OnExit for state {currentState.GetType().Name}", this);
+                currentState.OnExit(this); // Graceful exit for the current state
             }
             currentState = null; // Nullify state
         }

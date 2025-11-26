@@ -1,15 +1,20 @@
 using System;
 using System.Threading;
+using CycloneGames.AssetManagement.Runtime;
 using Cysharp.Threading.Tasks;
 using MackySoft.Navigathena;
 using MackySoft.Navigathena.SceneManagement;
 using MackySoft.Navigathena.SceneManagement.VContainer;
+using VContainer;
 
 namespace GASSample.AOT
 {
     public class LifecycleSceneLaunch : ISceneLifecycle
     {
         private const string DEBUG_FLAG = "[LifecycleSceneLaunch]";
+        [Inject] IAssetModule assetModule;
+        private const string DefaultPackage = "DefaultPackage";
+
         public UniTask OnEditorFirstPreInitialize(ISceneDataWriter writer, CancellationToken cancellationToken)
         {
             UnityEngine.Debug.LogWarning($"{DEBUG_FLAG} OnEditorFirstPreInitialize");
@@ -19,6 +24,9 @@ namespace GASSample.AOT
         public async UniTask OnEnter(ISceneDataReader reader, CancellationToken cancellationToken)
         {
             UnityEngine.Debug.LogWarning($"{DEBUG_FLAG} OnEnter");
+
+            var pkg = assetModule.GetPackage(DefaultPackage);
+
             await GlobalSceneNavigator.Instance.Push(BuiltInSceneDefinitions.Initial);
         }
 
@@ -34,10 +42,10 @@ namespace GASSample.AOT
             return UniTask.CompletedTask;
         }
 
-        public UniTask OnInitialize(ISceneDataReader reader, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
+        public async UniTask OnInitialize(ISceneDataReader reader, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
         {
             UnityEngine.Debug.LogWarning($"{DEBUG_FLAG} OnInitialize");
-            return UniTask.CompletedTask;
+            await UniTask.CompletedTask;
         }
     }
 }

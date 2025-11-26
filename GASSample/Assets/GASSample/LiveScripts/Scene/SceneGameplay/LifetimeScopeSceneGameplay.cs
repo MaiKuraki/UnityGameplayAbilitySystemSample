@@ -1,4 +1,4 @@
-using CycloneGames.GameplayFramework;
+using CycloneGames.GameplayFramework.Runtime;
 using GASSample.Gameplay;
 using MackySoft.Navigathena.SceneManagement.VContainer;
 using UnityEngine;

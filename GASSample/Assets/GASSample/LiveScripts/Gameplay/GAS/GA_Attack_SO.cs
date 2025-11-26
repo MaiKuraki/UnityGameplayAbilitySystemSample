@@ -165,15 +165,15 @@ namespace GASSample.Gameplay
 
         public override GameplayAbility CreateAbility()
         {
-            var effect_dmg = DmgEffect ? DmgEffect.CreateGameplayEffect() : null;
+            var effect_dmg = DmgEffect ? DmgEffect.GetGameplayEffect() : null;
             var ability = new GA_Attack(Anim_Character, bUseRootMotion, Anim_Camera, effect_dmg, ComboWindowDuration);
 
             ability.Initialize(
                 AbilityName,
                 InstancingPolicy,
                 NetExecutionPolicy,
-                CostEffect?.CreateGameplayEffect(),
-                CooldownEffect?.CreateGameplayEffect(),
+                CostEffect?.GetGameplayEffect(),
+                CooldownEffect?.GetGameplayEffect(),
                 AbilityTags,
                 ActivationBlockedTags,
                 ActivationRequiredTags,

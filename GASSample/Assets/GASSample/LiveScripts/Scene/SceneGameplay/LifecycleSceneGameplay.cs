@@ -1,6 +1,6 @@
 using System;
 using System.Threading;
-using CycloneGames.UIFramework;
+using CycloneGames.UIFramework.Runtime;
 using Cysharp.Threading.Tasks;
 using GASSample.APIGateway;
 using GASSample.UI;

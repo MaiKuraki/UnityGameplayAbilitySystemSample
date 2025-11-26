@@ -1,4 +1,4 @@
-using CycloneGames.GameplayFramework;
+using CycloneGames.GameplayFramework.Runtime;
 using UnityEngine;
 
 namespace GASSample.Gameplay

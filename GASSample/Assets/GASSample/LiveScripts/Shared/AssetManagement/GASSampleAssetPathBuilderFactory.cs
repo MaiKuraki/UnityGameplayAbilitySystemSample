@@ -1,4 +1,4 @@
-using CycloneGames.AssetManagement;
+using CycloneGames.AssetManagement.Runtime;
 
 namespace GASSample.AssetManagement
 {

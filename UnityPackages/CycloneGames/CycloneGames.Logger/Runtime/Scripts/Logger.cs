@@ -119,7 +119,7 @@ namespace CycloneGames.Logger
             try
             {
                 if (_loggerTypes.Contains(loggerType)) return;
-                
+
                 _loggers.Add(logger);
                 _loggerTypes.Add(loggerType);
             }
@@ -262,7 +262,7 @@ namespace CycloneGames.Logger
             try
             {
                 var logEntry = LogMessagePool.Get();
-                logEntry.Initialize(DateTime.Now, level, originalMessage, category, filePath, lineNumber, memberName);
+                logEntry.Initialize(DateTime.Now, level, originalMessage, null, category, filePath, lineNumber, memberName);
                 _processor.Enqueue(logEntry);
             }
             catch (InvalidOperationException) { /* Ignore if shutting down. */ }
@@ -275,20 +275,63 @@ namespace CycloneGames.Logger
             if (!ShouldLog(level, category)) return;
 
             StringBuilder sb = StringBuilderPool.Get();
-            string builtMessage = string.Empty;
             try
             {
                 messageBuilder?.Invoke(sb);
-                builtMessage = StringBuilderPool.GetStringAndReturn(sb);
+                var logEntry = LogMessagePool.Get();
+                logEntry.Initialize(DateTime.Now, level, null, sb, category, filePath, lineNumber, memberName);
+                _processor.Enqueue(logEntry);
             }
             catch
             {
-                // Ensure the builder is returned on exceptions
                 StringBuilderPool.Return(sb);
                 throw;
             }
+        }
 
-            EnqueueMessage(level, builtMessage, category, filePath, lineNumber, memberName);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void LogTrace<T>(T state, Action<T, StringBuilder> messageBuilder, string category = null, [CallerFilePath] string filePath = "", [CallerLineNumber] int lineNumber = 0, [CallerMemberName] string memberName = "")
+            => Instance.EnqueueMessage(LogLevel.Trace, state, messageBuilder, category, filePath, lineNumber, memberName);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void LogDebug<T>(T state, Action<T, StringBuilder> messageBuilder, string category = null, [CallerFilePath] string filePath = "", [CallerLineNumber] int lineNumber = 0, [CallerMemberName] string memberName = "")
+            => Instance.EnqueueMessage(LogLevel.Debug, state, messageBuilder, category, filePath, lineNumber, memberName);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void LogInfo<T>(T state, Action<T, StringBuilder> messageBuilder, string category = null, [CallerFilePath] string filePath = "", [CallerLineNumber] int lineNumber = 0, [CallerMemberName] string memberName = "")
+            => Instance.EnqueueMessage(LogLevel.Info, state, messageBuilder, category, filePath, lineNumber, memberName);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void LogWarning<T>(T state, Action<T, StringBuilder> messageBuilder, string category = null, [CallerFilePath] string filePath = "", [CallerLineNumber] int lineNumber = 0, [CallerMemberName] string memberName = "")
+            => Instance.EnqueueMessage(LogLevel.Warning, state, messageBuilder, category, filePath, lineNumber, memberName);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void LogError<T>(T state, Action<T, StringBuilder> messageBuilder, string category = null, [CallerFilePath] string filePath = "", [CallerLineNumber] int lineNumber = 0, [CallerMemberName] string memberName = "")
+            => Instance.EnqueueMessage(LogLevel.Error, state, messageBuilder, category, filePath, lineNumber, memberName);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void LogFatal<T>(T state, Action<T, StringBuilder> messageBuilder, string category = null, [CallerFilePath] string filePath = "", [CallerLineNumber] int lineNumber = 0, [CallerMemberName] string memberName = "")
+            => Instance.EnqueueMessage(LogLevel.Fatal, state, messageBuilder, category, filePath, lineNumber, memberName);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void EnqueueMessage<T>(LogLevel level, T state, Action<T, StringBuilder> messageBuilder, string category, string filePath, int lineNumber, string memberName)
+        {
+            if (!ShouldLog(level, category)) return;
+
+            StringBuilder sb = StringBuilderPool.Get();
+            try
+            {
+                messageBuilder?.Invoke(state, sb);
+                var logEntry = LogMessagePool.Get();
+                logEntry.Initialize(DateTime.Now, level, null, sb, category, filePath, lineNumber, memberName);
+                _processor.Enqueue(logEntry);
+            }
+            catch
+            {
+                StringBuilderPool.Return(sb);
+                throw;
+            }
         }
 
         internal void DispatchToLoggers(LogMessage logMessage)

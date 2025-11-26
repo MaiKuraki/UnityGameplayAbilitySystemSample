@@ -1,9 +1,9 @@
+using Cysharp.Threading.Tasks;
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using System.Threading.Tasks;
 
-namespace CycloneGames.AssetManagement
+namespace CycloneGames.AssetManagement.Runtime.Batch
 {
 	public sealed class GroupOperation : IGroupOperation
 	{
@@ -18,17 +18,23 @@ namespace CycloneGames.AssetManagement
 		private float _totalWeight;
 		private bool _canceled;
 		private string _error;
+		private readonly UniTaskCompletionSource<object> _tcs = new UniTaskCompletionSource<object>();
+		private List<IOperation> _itemsCache;
 
 		public bool IsDone { get; private set; }
 		public float Progress { get; private set; }
 		public string Error => _error;
+		public UniTask Task => _tcs.Task;
 		public IReadOnlyList<IOperation> Items
 		{
 			get
 			{
-				var list = new List<IOperation>(_items.Count);
-				for (int i = 0; i < _items.Count; i++) list.Add(_items[i].Op);
-				return list;
+				if (_itemsCache == null)
+				{
+					_itemsCache = new List<IOperation>(_items.Count);
+					for (int i = 0; i < _items.Count; i++) _itemsCache.Add(_items[i].Op);
+				}
+				return _itemsCache;
 			}
 		}
 
@@ -39,9 +45,10 @@ namespace CycloneGames.AssetManagement
 			_weightClamp(ref weight);
 			_items.Add(new Item(op, weight));
 			_totalWeight += weight;
+			_itemsCache = null; // Invalidate cache
 		}
 
-		public async Task StartAsync(CancellationToken cancellationToken = default)
+		public async UniTask StartAsync(CancellationToken cancellationToken = default)
 		{
 			if (IsDone) return;
 			if (_items.Count == 0) { IsDone = true; Progress = 1f; return; }
@@ -51,27 +58,32 @@ namespace CycloneGames.AssetManagement
 			{
 				cancellationToken.ThrowIfCancellationRequested();
 				var it = _items[i];
-				await _waitOpAsync(it.Op, cancellationToken);
+				if (it.Op != null)
+				{
+					await it.Op.Task.AttachExternalCancellation(cancellationToken);
+				}
 				if (_canceled) break;
-				if (!string.IsNullOrEmpty(it.Op.Error) && string.IsNullOrEmpty(_error)) _error = it.Op.Error;
+				if (!string.IsNullOrEmpty(it.Op?.Error) && string.IsNullOrEmpty(_error)) _error = it.Op.Error;
 				accWeight += it.Weight;
 				Progress = Math.Min(1f, _totalWeight <= 0f ? 1f : accWeight / _totalWeight);
 			}
 			IsDone = true;
+			if (!string.IsNullOrEmpty(_error))
+			{
+				_tcs.TrySetException(new Exception(_error));
+			}
+			else if (_canceled)
+			{
+				_tcs.TrySetCanceled();
+			}
+			else
+			{
+				_tcs.TrySetResult(null);
+			}
 		}
 
 		public void Cancel() { _canceled = true; }
 		public void WaitForAsyncComplete() { /* group is async-only by design */ }
-
-		private static async Task _waitOpAsync(IOperation op, CancellationToken ct)
-		{
-			if (op == null) return;
-			while (!op.IsDone)
-			{
-				ct.ThrowIfCancellationRequested();
-				await YieldUtil.Next(ct);
-			}
-		}
 
 		private static void _weightClamp(ref float w)
 		{

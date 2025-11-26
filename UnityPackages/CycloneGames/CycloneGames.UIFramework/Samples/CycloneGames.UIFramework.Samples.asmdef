@@ -4,13 +4,11 @@
     "references": [
         "UniTask",
         "LitMotion",
-        "CycloneGames.UIFramework",
-        "CycloneGames.Service",
-        "CycloneGames.Factory.Runtime",
-        "CycloneGames.AssetManagement",
         "CycloneGames.Utility.Runtime",
-        "Unity.Addressables",
-        "Unity.ResourceManager"
+        "CycloneGames.Factory.Runtime",
+        "CycloneGames.AssetManagement.Runtime",
+        "CycloneGames.Service.Runtime",
+        "CycloneGames.UIFramework.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

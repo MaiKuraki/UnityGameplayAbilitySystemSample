@@ -1,6 +1,6 @@
 using System.Threading;
 using CycloneGames.Factory.Runtime;
-using CycloneGames.GameplayFramework;
+using CycloneGames.GameplayFramework.Runtime;
 using Cysharp.Threading.Tasks;
 using VContainer;
 

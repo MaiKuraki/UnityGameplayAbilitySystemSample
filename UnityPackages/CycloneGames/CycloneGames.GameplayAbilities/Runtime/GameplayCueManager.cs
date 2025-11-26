@@ -2,9 +2,7 @@ using Cysharp.Threading.Tasks;
 using System.Collections.Generic;
 using CycloneGames.GameplayTags.Runtime;
 using UnityEngine;
-using UnityEngine.AddressableAssets;
-using UnityEngine.ResourceManagement.AsyncOperations;
-using UnityEngine.ResourceManagement.ResourceLocations;
+using CycloneGames.AssetManagement.Runtime;
 using CycloneGames.Logger;
 
 namespace CycloneGames.GameplayAbilities.Runtime
@@ -18,6 +16,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
         private static readonly GameplayCueManager instance = new GameplayCueManager();
         public static GameplayCueManager Instance => instance;
 
+        public IResourceLocator ResourceLocator => resourceLocator;
         private IResourceLocator resourceLocator;
         private IGameObjectPoolManager poolManager;
         private bool isInitialized = false;
@@ -34,32 +33,26 @@ namespace CycloneGames.GameplayAbilities.Runtime
         private readonly Dictionary<AbilitySystemComponent, List<ActiveCueInstance>> activeInstances = new Dictionary<AbilitySystemComponent, List<ActiveCueInstance>>();
         private GameplayCueManager() { }
 
-        /// <summary>
-        /// Initializes all internal systems and discovers cue assets. Must be called once at game startup.
-        /// </summary>
-        public async UniTask InitializeAsync(List<string> labelsToDiscover)
+        public void Initialize(IAssetPackage assetPackage)
         {
             if (isInitialized) return;
 
-            resourceLocator = new AddressableResourceLocator();
+            resourceLocator = new AssetManagementResourceLocator(assetPackage);
             poolManager = new GameObjectPoolManager(resourceLocator);
 
-            foreach (var label in labelsToDiscover)
-            {
-                var locationsHandle = Addressables.LoadResourceLocationsAsync(label, typeof(GameplayCueSO));
-                IList<IResourceLocation> locations = await locationsHandle.Task;
-                foreach (var loc in locations)
-                {
-                    if (GameplayTagManager.TryRequestTag(loc.PrimaryKey, out var tag))
-                    {
-                        staticCueAddressRegistry[tag] = loc.PrimaryKey;
-                    }
-                }
-                Addressables.Release(locationsHandle);
-            }
-
             isInitialized = true;
-            CLogger.LogInfo($"[GameplayCueManager] Initialized. Discovered {staticCueAddressRegistry.Count} static GameplayCues.");
+            CLogger.LogInfo($"[GameplayCueManager] Initialized.");
+        }
+
+        /// <summary>
+        /// Registers a static, asset-based GameplayCue.
+        /// </summary>
+        public void RegisterStaticCue(GameplayTag cueTag, string assetAddress)
+        {
+            if (cueTag.IsNone && !string.IsNullOrEmpty(assetAddress))
+            {
+                staticCueAddressRegistry[cueTag] = assetAddress;
+            }
         }
 
         /// <summary>
@@ -67,7 +60,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
         /// </summary>
         public void RegisterRuntimeHandler(GameplayTag cueTag, IGameplayCueHandler handler)
         {
-            if (cueTag == GameplayTag.None || handler == null) return;
+            if (cueTag.IsNone || handler == null) return;
             if (!runtimeCueHandlers.TryGetValue(cueTag, out var handlers))
             {
                 handlers = new List<IGameplayCueHandler>();
@@ -81,7 +74,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
         /// </summary>
         public void UnregisterRuntimeHandler(GameplayTag cueTag, IGameplayCueHandler handler)
         {
-            if (cueTag == GameplayTag.None || handler == null) return;
+            if (cueTag.IsNone || handler == null) return;
             if (runtimeCueHandlers.TryGetValue(cueTag, out var handlers))
             {
                 handlers.Remove(handler);
@@ -93,7 +86,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
         /// </summary>
         public async UniTaskVoid HandleCue(GameplayTag cueTag, EGameplayCueEvent eventType, GameplayEffectSpec spec)
         {
-            if (!isInitialized || cueTag == GameplayTag.None) return;
+            if (!isInitialized || cueTag.IsNone) return;
 
             var parameters = new GameplayCueParameters(spec);
 
@@ -110,9 +103,13 @@ namespace CycloneGames.GameplayAbilities.Runtime
             // Handle dynamic, code-based cues.
             if (runtimeCueHandlers.TryGetValue(cueTag, out var handlers))
             {
-                foreach (var handler in new List<IGameplayCueHandler>(handlers))
+                using (CycloneGames.GameplayTags.Runtime.Pools.ListPool<IGameplayCueHandler>.Get(out var safeHandlers))
                 {
-                    handler.HandleCue(cueTag, eventType, parameters);
+                    safeHandlers.AddRange(handlers);
+                    for (int i = 0; i < safeHandlers.Count; i++)
+                    {
+                        safeHandlers[i].HandleCue(cueTag, eventType, parameters);
+                    }
                 }
             }
         }

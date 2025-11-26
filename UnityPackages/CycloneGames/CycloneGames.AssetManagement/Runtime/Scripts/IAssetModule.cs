@@ -1,11 +1,11 @@
+using Cysharp.Threading.Tasks;
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace CycloneGames.AssetManagement
+namespace CycloneGames.AssetManagement.Runtime
 {
 	/// <summary>
 	/// Abstraction of the asset system. Designed for DI and provider-agnostic usage.
@@ -18,7 +18,7 @@ namespace CycloneGames.AssetManagement
 		/// Initializes the module. Idempotent. Safe to call multiple times.
 		/// </summary>
 		/// <param name="options">Global options (time slice, concurrency, logger etc.).</param>
-		void Initialize(AssetModuleOptions options = default);
+		void Initialize(AssetManagementOptions options = default);
 
 		/// <summary>
 		/// Destroys the module and releases all resources.
@@ -44,6 +44,11 @@ namespace CycloneGames.AssetManagement
 		/// Returns a snapshot of existing package names.
 		/// </summary>
 		IReadOnlyList<string> GetAllPackageNames();
+
+		/// <summary>
+		/// Creates a patch service for the specified package to manage the update workflow.
+		/// </summary>
+		IPatchService CreatePatchService(string packageName);
 	}
 
 	/// <summary>
@@ -57,36 +62,36 @@ namespace CycloneGames.AssetManagement
 		/// Initializes the package.
 		/// Provider-specific parameters are carried in <see cref="AssetPackageInitOptions.ProviderOptions"/>.
 		/// </summary>
-		Task<bool> InitializeAsync(AssetPackageInitOptions options, CancellationToken cancellationToken = default);
+		UniTask<bool> InitializeAsync(AssetPackageInitOptions options, CancellationToken cancellationToken = default);
 
 		/// <summary>
 		/// Destroys the package and releases all provider resources.
 		/// </summary>
-		Task DestroyAsync();
+		UniTask DestroyAsync();
 
 		// --- Update & Download ---
-		Task<string> RequestPackageVersionAsync(bool appendTimeTicks = true, int timeoutSeconds = 60, CancellationToken cancellationToken = default);
-		Task<bool> UpdatePackageManifestAsync(string packageVersion, int timeoutSeconds = 60, CancellationToken cancellationToken = default);
-		Task<bool> ClearCacheFilesAsync(string clearMode, object clearParam = null, CancellationToken cancellationToken = default);
+		UniTask<string> RequestPackageVersionAsync(bool appendTimeTicks = true, int timeoutSeconds = 60, CancellationToken cancellationToken = default);
+		UniTask<bool> UpdatePackageManifestAsync(string packageVersion, int timeoutSeconds = 60, CancellationToken cancellationToken = default);
+		UniTask<bool> ClearCacheFilesAsync(ClearCacheMode clearMode = ClearCacheMode.All, object clearParam = null, CancellationToken cancellationToken = default);
 
 		// Downloaders based on ACTIVE manifest
-		IDownloader CreateDownloaderForAll(int downloadingMaxNumber, int failedTryAgain, int timeoutSeconds = 60);
-		IDownloader CreateDownloaderForTags(string[] tags, int downloadingMaxNumber, int failedTryAgain, int timeoutSeconds = 60);
-		IDownloader CreateDownloaderForLocations(string[] locations, bool recursiveDownload, int downloadingMaxNumber, int failedTryAgain, int timeoutSeconds = 60);
+		IDownloader CreateDownloaderForAll(int downloadingMaxNumber, int failedTryAgain);
+		IDownloader CreateDownloaderForTags(string[] tags, int downloadingMaxNumber, int failedTryAgain);
+		IDownloader CreateDownloaderForLocations(string[] locations, bool recursiveDownload, int downloadingMaxNumber, int failedTryAgain);
 
 		// Pre-download for a SPECIFIC manifest version (without switching active manifest)
-		Task<IDownloader> CreatePreDownloaderForAllAsync(string packageVersion, int downloadingMaxNumber, int failedTryAgain, int timeoutSeconds = 60, CancellationToken cancellationToken = default);
-		Task<IDownloader> CreatePreDownloaderForTagsAsync(string packageVersion, string[] tags, int downloadingMaxNumber, int failedTryAgain, int timeoutSeconds = 60, CancellationToken cancellationToken = default);
-		Task<IDownloader> CreatePreDownloaderForLocationsAsync(string packageVersion, string[] locations, bool recursiveDownload, int downloadingMaxNumber, int failedTryAgain, int timeoutSeconds = 60, CancellationToken cancellationToken = default);
+		UniTask<IDownloader> CreatePreDownloaderForAllAsync(string packageVersion, int downloadingMaxNumber, int failedTryAgain, CancellationToken cancellationToken = default);
+		UniTask<IDownloader> CreatePreDownloaderForTagsAsync(string packageVersion, string[] tags, int downloadingMaxNumber, int failedTryAgain, CancellationToken cancellationToken = default);
+		UniTask<IDownloader> CreatePreDownloaderForLocationsAsync(string packageVersion, string[] locations, bool recursiveDownload, int downloadingMaxNumber, int failedTryAgain, CancellationToken cancellationToken = default);
 
 		// --- Asset Loading ---
 		IAssetHandle<TAsset> LoadAssetSync<TAsset>(string location) where TAsset : UnityEngine.Object;
-		IAssetHandle<TAsset> LoadAssetAsync<TAsset>(string location) where TAsset : UnityEngine.Object;
+		IAssetHandle<TAsset> LoadAssetAsync<TAsset>(string location, CancellationToken cancellationToken = default) where TAsset : UnityEngine.Object;
 
 		/// <summary>
 		/// Loads all sub-assets for a location (e.g., sprites in an atlas).
 		/// </summary>
-		IAllAssetsHandle<TAsset> LoadAllAssetsAsync<TAsset>(string location) where TAsset : UnityEngine.Object;
+		IAllAssetsHandle<TAsset> LoadAllAssetsAsync<TAsset>(string location, CancellationToken cancellationToken = default) where TAsset : UnityEngine.Object;
 
 		/// <summary>
 		/// Instantiates a prefab synchronously using a previously loaded handle. Returns null on error.
@@ -101,10 +106,10 @@ namespace CycloneGames.AssetManagement
 		// --- Scene Loading ---
 		ISceneHandle LoadSceneSync(string sceneLocation, LoadSceneMode loadMode = LoadSceneMode.Single);
 		ISceneHandle LoadSceneAsync(string sceneLocation, LoadSceneMode loadMode = LoadSceneMode.Single, bool activateOnLoad = true, int priority = 100);
-		Task UnloadSceneAsync(ISceneHandle sceneHandle);
+		UniTask UnloadSceneAsync(ISceneHandle sceneHandle);
 
 		// --- Maintenance ---
-		Task UnloadUnusedAssetsAsync();
+		UniTask UnloadUnusedAssetsAsync();
 	}
 
 	public interface IDownloader
@@ -119,7 +124,7 @@ namespace CycloneGames.AssetManagement
 		string Error { get; }
 
 		void Begin();
-		Task StartAsync(CancellationToken cancellationToken = default);
+		UniTask StartAsync(CancellationToken cancellationToken = default);
 		void Pause();
 		void Resume();
 		void Cancel();
@@ -131,6 +136,7 @@ namespace CycloneGames.AssetManagement
 		bool IsDone { get; }
 		float Progress { get; }
 		string Error { get; }
+		UniTask Task { get; }
 		void WaitForAsyncComplete();
 	}
 
@@ -153,19 +159,20 @@ namespace CycloneGames.AssetManagement
 	public interface ISceneHandle : IOperation
 	{
 		string ScenePath { get; }
+		Scene Scene { get; }
 	}
 
 	/// <summary>
 	/// Global configuration for the module.
 	/// </summary>
-	public readonly struct AssetModuleOptions
+	public readonly struct AssetManagementOptions
 	{
 		public readonly long OperationSystemMaxTimeSliceMs;
 		public readonly int BundleLoadingMaxConcurrency;
 		public readonly ILogger Logger;
 		public readonly bool EnableHandleTracking;
 
-		public AssetModuleOptions(long operationSystemMaxTimeSliceMs = 16, int bundleLoadingMaxConcurrency = int.MaxValue, ILogger logger = null, bool enableHandleTracking = true)
+		public AssetManagementOptions(long operationSystemMaxTimeSliceMs = 16, int bundleLoadingMaxConcurrency = int.MaxValue, ILogger logger = null, bool enableHandleTracking = true)
 		{
 			OperationSystemMaxTimeSliceMs = operationSystemMaxTimeSliceMs < 10 ? 10 : operationSystemMaxTimeSliceMs;
 			BundleLoadingMaxConcurrency = bundleLoadingMaxConcurrency;
@@ -198,5 +205,21 @@ namespace CycloneGames.AssetManagement
 		Host,
 		Web,
 		Custom
+	}
+	
+	public enum ClearCacheMode
+	{
+		/// <summary>
+		/// Clear all cached files, including asset bundles and manifests.
+		/// </summary>
+		All,
+		/// <summary>
+		/// Clear only the cached files that are no longer in use by the current manifest.
+		/// </summary>
+		Unused,
+		/// <summary>
+		/// Clear cached files associated with specific tags. The tags should be provided via the `clearParam`.
+		/// </summary>
+		ByTags
 	}
 }
