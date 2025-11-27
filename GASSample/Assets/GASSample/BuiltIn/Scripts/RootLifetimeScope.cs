@@ -34,7 +34,7 @@ namespace GASSample.AOT
             builder.RegisterBuildCallback(async resolver =>
             {
                 var assetModule = resolver.Resolve<IAssetModule>();
-                assetModule.Initialize(new AssetManagementOptions(operationSystemMaxTimeSliceMs: 16));
+                await assetModule.InitializeAsync(new AssetManagementOptions(operationSystemMaxTimeSliceMs: 16));
                 await AssetPackageFactory.CreateAndInitializePackageAsync(
                     module: assetModule,
                     packageName: DefaultPackage,
