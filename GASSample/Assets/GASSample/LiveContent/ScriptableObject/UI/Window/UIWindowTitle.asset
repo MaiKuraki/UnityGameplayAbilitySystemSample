@@ -13,7 +13,7 @@ MonoBehaviour:
   m_Name: UIWindowTitle
   m_EditorClassIdentifier: 
   source: 0
-  windowPrefab: {fileID: 34189576868520706, guid: 51f5a6da99c72eb4a992bf87dd1e450b,
+  windowPrefab: {fileID: 7826224127917042793, guid: 51f5a6da99c72eb4a992bf87dd1e450b,
     type: 3}
   prefabLocation: 
   layer: {fileID: 11400000, guid: 3bfe720be49edf0479c8d207b282b353, type: 2}

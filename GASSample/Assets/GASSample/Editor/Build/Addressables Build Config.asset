@@ -9,12 +9,12 @@ MonoBehaviour:
   m_GameObject: {fileID: 0}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: d806e2431ddff56488ec90fe262e1c15, type: 3}
-  m_Name: BuildData
+  m_Script: {fileID: 11500000, guid: 384e7e65e8377894c9a91420d8b5783f, type: 3}
+  m_Name: Addressables Build Config
   m_EditorClassIdentifier: 
-  launchScene: {fileID: 102900000, guid: 99c9720ab356a0642a771bea13969a05, type: 3}
-  applicationVersion: v0.1
-  outputBasePath: Build
-  useBuildalon: 0
-  useHybridCLR: 0
-  assetManagementType: 2
+  versionMode: 0
+  manualVersion: 1.0.0
+  versionPrefix: v0.1
+  buildRemoteCatalog: 0
+  copyToOutputDirectory: 1
+  buildOutputDirectory: 

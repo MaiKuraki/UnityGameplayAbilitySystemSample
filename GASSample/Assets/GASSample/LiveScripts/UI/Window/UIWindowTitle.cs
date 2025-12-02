@@ -1,6 +1,7 @@
 using CycloneGames.AssetManagement.Runtime;
 using CycloneGames.AssetManagement.Runtime.Integrations.Navigathena;
 using CycloneGames.UIFramework.Runtime;
+using Cysharp.Threading.Tasks;
 using GASSample.APIGateway;
 using GASSample.AssetManagement;
 using GASSample.Scene;
@@ -19,7 +20,7 @@ namespace GASSample.UI
         [Inject] private readonly IAssetModule assetModule;
         [Inject] private readonly ISceneManagementAPIGateway sceneManagementAPIGateway;
         [SerializeField] private Button buttonStart;
-        [SerializeField] private TMP_Text versionText;
+        [SerializeField] private AppVersionInfo appVersionInfo;
         private const string EDITOR_VERSION_TEXT = "EDITOR_MODE";
         private const string INVALID_VERSION_TEXT = "INVALID";
 
@@ -28,12 +29,13 @@ namespace GASSample.UI
             base.Awake();
 
             buttonStart.OnClickAsObservable().Subscribe(_ => ClickStart());
+        }
 
-#if UNITY_EDITOR
-            versionText.text = EDITOR_VERSION_TEXT;
-#else
-            DisplayBuildVersion();
-#endif
+        void Start()
+        {
+            appVersionInfo?.UpdateVersionDisplayEvent?.Invoke(assetModule)
+                .AttachExternalCancellation(this.GetCancellationTokenOnDestroy())
+                .Forget();
         }
 
         void ClickStart()
@@ -42,28 +44,6 @@ namespace GASSample.UI
             var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
             AssetManagementSceneIdentifier sceneGameplay = new AssetManagementSceneIdentifier(pkg, ScenePath.Gameplay, LoadSceneMode.Additive, true);
             GlobalSceneNavigator.Instance.Push(sceneGameplay);
-        }
-
-        /// <summary>
-        /// Loads version info from Resources and displays it.
-        /// This method is only intended to be called in a built player.
-        /// </summary>
-        private void DisplayBuildVersion()
-        {
-            var versionInfo = Resources.Load<VersionInfoData>("VersionInfoData");
-
-            if (versionInfo != null && !string.IsNullOrEmpty(versionInfo.commitHash))
-            {
-                string shortHash = versionInfo.commitHash.Length > 8
-                    ? versionInfo.commitHash.Substring(0, 8)
-                    : versionInfo.commitHash;
-
-                versionText.text = shortHash;
-            }
-            else
-            {
-                versionText.text = INVALID_VERSION_TEXT;
-            }
         }
     }
 }
