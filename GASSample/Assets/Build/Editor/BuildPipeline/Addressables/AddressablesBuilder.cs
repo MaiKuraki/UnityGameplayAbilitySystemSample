@@ -97,6 +97,13 @@ namespace Build.Pipeline.Editor
                     {
                         Debug.Log($"{DEBUG_FLAG} Build content success!");
 
+                        // Save version data to Addressables build output directory
+                        // This ensures:
+                        // 1. For full Player build: version file is included when Unity copies Addressables content to StreamingAssets
+                        // 2. For hot update build: version file is in build output and will be copied to output directory (if configured)
+                        // Returns true if file was auto-created (for cleanup tracking)
+                        bool wasAutoCreated = SaveVersionDataToAddressablesBuildPath(contentVersion, buildTarget, settings, settingsType);
+
                         if (useCopyToOutputDirectory)
                         {
                             CopyBuildResultToOutput(buildTarget, useBuildOutputDirectory, useBuildRemoteCatalog);
@@ -156,7 +163,6 @@ namespace Build.Pipeline.Editor
                 }
                 else
                 {
-                    // Fallback: try to set via field if property doesn't exist
                     FieldInfo overrideVersionField = ReflectionCache.GetField(settingsType, "m_overridePlayerVersion", BindingFlags.NonPublic | BindingFlags.Instance);
                     if (overrideVersionField != null)
                     {
@@ -334,9 +340,38 @@ namespace Build.Pipeline.Editor
 
                 if (Directory.Exists(buildPath))
                 {
+                    // Check if version file exists in build path before copying
+                    const string versionFileName = "AddressablesVersion.json";
+                    string buildVersionPath = Path.Combine(buildPath, versionFileName);
+                    bool versionFileExists = File.Exists(buildVersionPath);
+
+                    if (versionFileExists)
+                    {
+                        Debug.Log($"{DEBUG_FLAG} Version file found in build path: {buildVersionPath}");
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"{DEBUG_FLAG} Version file not found in build path: {buildVersionPath}. It may not be included in the copy.");
+                    }
+
                     BuildUtils.ClearDirectory(dstDir);
                     BuildUtils.CopyAllFilesRecursively(buildPath, dstDir, new string[] { ".meta" });
-                    Debug.Log($"{DEBUG_FLAG} Successfully copied build result to output directory.");
+
+                    // Verify version file was copied
+                    string dstVersionPath = Path.Combine(dstDir, versionFileName);
+                    if (File.Exists(dstVersionPath))
+                    {
+                        Debug.Log($"{DEBUG_FLAG} ✓ Successfully copied build result to output directory.");
+                        Debug.Log($"{DEBUG_FLAG} ✓ Version file verified in output directory: {dstVersionPath}");
+                    }
+                    else if (versionFileExists)
+                    {
+                        Debug.LogWarning($"{DEBUG_FLAG} ⚠ Version file was in build path but not found in output directory: {dstVersionPath}");
+                    }
+                    else
+                    {
+                        Debug.Log($"{DEBUG_FLAG} Successfully copied build result to output directory.");
+                    }
                 }
             }
             catch (Exception ex)
@@ -402,6 +437,171 @@ namespace Build.Pipeline.Editor
                 if (string.IsNullOrEmpty(count)) count = "0";
                 return $"{config.versionPrefix}.{count}";
             }
+        }
+
+        /// <summary>
+        /// Saves version data to Addressables build output path.
+        /// 
+        /// For full Player build:
+        ///   Unity automatically copies Addressables build output to StreamingAssets during Player build,
+        ///   so the version file will be included in the final build.
+        /// 
+        /// For hot update build (HotUpdateBuilder):
+        ///   Version file is saved to build output path, and will be copied to output directory
+        ///   (if copyToOutputDirectory is enabled) for deployment to server.
+        /// </summary>
+        private static bool SaveVersionDataToAddressablesBuildPath(string contentVersion, BuildTarget buildTarget, object settings, Type settingsType)
+        {
+            try
+            {
+                // Get the actual Addressables build output path
+                // This is where Addressables stores built content
+                // - For full build: Unity copies this to StreamingAssets during Player build
+                // - For hot update: This is copied to output directory for deployment
+                string buildPath = GetAddressablesBuildPath(settings, settingsType, buildTarget);
+                if (string.IsNullOrEmpty(buildPath) || !Directory.Exists(buildPath))
+                {
+                    Debug.LogWarning($"{DEBUG_FLAG} Addressables build path not found: {buildPath}. Cannot save version file.");
+                    return false;
+                }
+
+                const string versionFileName = "AddressablesVersion.json";
+                string versionFilePath = Path.Combine(buildPath, versionFileName);
+
+                // Check if file already exists (user-created)
+                bool fileExisted = File.Exists(versionFilePath);
+
+                // Create directory structure if needed (should already exist from Addressables build)
+                string directory = Path.GetDirectoryName(versionFilePath);
+                if (!Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                var versionData = new VersionDataJson { contentVersion = contentVersion };
+                string jsonContent = JsonUtility.ToJson(versionData, true);
+                File.WriteAllText(versionFilePath, jsonContent);
+
+                // Mark as auto-created if it didn't exist before
+                // Store flag in StreamingAssets path for cleanup tracking (since build path may be outside project)
+                if (!fileExisted)
+                {
+                    string streamingAssetsVersionPath = GetStreamingAssetsVersionPathForCleanup(buildTarget);
+                    string autoCreatedFlagPath = $"{streamingAssetsVersionPath}.autocreated";
+                    string flagDir = Path.GetDirectoryName(autoCreatedFlagPath);
+                    if (!Directory.Exists(flagDir))
+                    {
+                        Directory.CreateDirectory(flagDir);
+                    }
+                    File.WriteAllText(autoCreatedFlagPath, "true");
+                }
+
+                Debug.Log($"{DEBUG_FLAG} Saved version data to Addressables build path: {versionFilePath} ({(fileExisted ? "existing" : "auto-created")})");
+                Debug.Log($"{DEBUG_FLAG} Version file content: {jsonContent}");
+                Debug.Log($"{DEBUG_FLAG} Version file will be:");
+                Debug.Log($"{DEBUG_FLAG}   - Copied to StreamingAssets/aa/{buildTarget} during Player build (full build)");
+                Debug.Log($"{DEBUG_FLAG}   - Copied to output directory for hot update deployment (if copyToOutputDirectory enabled)");
+
+                // Verify file was actually written
+                if (File.Exists(versionFilePath))
+                {
+                    Debug.Log($"{DEBUG_FLAG} ✓ Version file verified at: {versionFilePath}");
+                }
+                else
+                {
+                    Debug.LogError($"{DEBUG_FLAG} ✗ Version file NOT found after write attempt: {versionFilePath}");
+                }
+
+                return !fileExisted; // Return true if auto-created
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"{DEBUG_FLAG} Failed to save version data to Addressables build path: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Gets the StreamingAssets path where version file will be located after Player build.
+        /// Used for cleanup tracking.
+        /// </summary>
+        private static string GetStreamingAssetsVersionPathForCleanup(BuildTarget buildTarget)
+        {
+            const string streamingAssetsPath = "Assets/StreamingAssets";
+            const string addressablesFolder = "aa";
+            string platformFolder = buildTarget.ToString();
+            const string versionFileName = "AddressablesVersion.json";
+            return Path.Combine(streamingAssetsPath, addressablesFolder, platformFolder, versionFileName);
+        }
+
+        /// <summary>
+        /// Cleans up auto-created version files after build.
+        /// Only removes files that were automatically created during build process.
+        /// User-created files are preserved.
+        /// 
+        /// This should be called after a full build (not after resource-only builds),
+        /// as the version file is needed during the build process.
+        /// </summary>
+        public static void CleanupAutoCreatedVersionFiles()
+        {
+            try
+            {
+                // Check all platform folders in StreamingAssets/aa/
+                // These files are created by Unity during Player build from Addressables build output
+                const string streamingAssetsPath = "Assets/StreamingAssets";
+                const string addressablesFolder = "aa";
+                const string versionFileName = "AddressablesVersion.json";
+
+                string addressablesRoot = Path.Combine(streamingAssetsPath, addressablesFolder);
+
+                if (!Directory.Exists(addressablesRoot))
+                {
+                    return; // No Addressables folder, nothing to clean
+                }
+
+                // Search for version files in all platform subdirectories
+                string[] platformDirs = Directory.GetDirectories(addressablesRoot);
+                foreach (string platformDir in platformDirs)
+                {
+                    string versionFilePath = Path.Combine(platformDir, versionFileName);
+                    string versionMetaPath = $"{versionFilePath}.meta";
+                    string autoCreatedFlagPath = $"{versionFilePath}.autocreated";
+
+                    // Only delete if it was auto-created (flag file exists)
+                    if (File.Exists(autoCreatedFlagPath))
+                    {
+                        // Delete the version file
+                        if (File.Exists(versionFilePath))
+                        {
+                            File.Delete(versionFilePath);
+                            Debug.Log($"{DEBUG_FLAG} Cleaned up auto-created version file: {versionFilePath}");
+                        }
+
+                        // Delete the meta file if it exists
+                        if (File.Exists(versionMetaPath))
+                        {
+                            File.Delete(versionMetaPath);
+                            Debug.Log($"{DEBUG_FLAG} Cleaned up auto-created version meta file: {versionMetaPath}");
+                        }
+
+                        // Delete the flag file
+                        File.Delete(autoCreatedFlagPath);
+                    }
+                }
+
+                AssetDatabase.Refresh();
+                Debug.Log($"{DEBUG_FLAG} Cleanup completed for auto-created version files.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"{DEBUG_FLAG} Failed to cleanup auto-created version files: {ex.Message}");
+            }
+        }
+
+        [System.Serializable]
+        private class VersionDataJson
+        {
+            public string contentVersion;
         }
     }
 }

@@ -39,7 +39,7 @@ namespace GASSample.UI
                 var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
                 if (pkg != null)
                 {
-                    resVersion = await pkg.RequestPackageVersionAsync(cancellationToken: destroyCancellationToken);
+                    resVersion = await pkg.RequestPackageVersionAsync(appendTimeTicks: false, cancellationToken: destroyCancellationToken);
                 }
             }
 
