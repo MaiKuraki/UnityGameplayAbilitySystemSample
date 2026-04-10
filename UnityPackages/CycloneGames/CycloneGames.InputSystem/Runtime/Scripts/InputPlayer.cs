@@ -1,0 +1,1176 @@
+using CycloneGames.Logger;
+using R3;
+using ReactiveInputSystem;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Users;
+using Cysharp.Threading.Tasks;
+
+namespace CycloneGames.InputSystem.Runtime
+{
+    /// <summary>
+    /// Manages input for a single player entity, handling context stacks, action events, and device pairing.
+    /// </summary>
+    public sealed class InputPlayer : IInputPlayer, IDisposable
+    {
+        private const string DEBUG_FLAG = "[InputPlayer]";
+
+        /// <summary>
+        /// Safely retrieves InputDevice from CallbackContext. Guards against stale controlIndex after device hot-swap or action state changes.
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        private static InputDevice TryGetControlDevice(in InputAction.CallbackContext ctx)
+        {
+            try
+            {
+                return ctx.control?.device;
+            }
+            catch (IndexOutOfRangeException)
+            {
+                // controlIndex is stale (device removed/action state changed between callback queuing and execution)
+                return null;
+            }
+        }
+
+        // Reactive Properties
+        public ReadOnlyReactiveProperty<string> ActiveContextName { get; private set; }
+        public ReadOnlyReactiveProperty<InputDeviceKind> ActiveDeviceKind { get; private set; }
+        public event Action<string> OnContextChanged;
+
+        // Context-aware device kind observable - only emits when the specified context is active
+        public Observable<InputDeviceKind> GetActiveDeviceKindObservableForContext(InputContext context)
+        {
+            return ActiveDeviceKind.Where(_ => _contextStack.Count > 0 && ReferenceEquals(_contextStack.Peek(), context));
+        }
+
+        // Player Info
+        public int PlayerId { get; }
+        public InputUser User { get; }
+
+        // State
+        private readonly ReactiveProperty<string> _activeContextName = new(null);
+        private readonly ReactiveProperty<InputDeviceKind> _activeDeviceKind = new(InputDeviceKind.Unknown);
+        private readonly Stack<InputContext> _contextStack = new();
+        private readonly HashSet<InputContext> _contextSet = new(); // O(1) membership test for PushContext dedup
+        private readonly List<InputContext> _tempContextList = new(); // Pooled list for stack operations (Zero-GC)
+
+        // Event Subjects (Keyed by zero-garbage struct InputActionKey)
+        private readonly Dictionary<InputActionKey, Subject<Unit>> _buttonSubjects = new();
+        private readonly Dictionary<InputActionKey, Subject<Unit>> _longPressSubjects = new();
+        private readonly Dictionary<InputActionKey, Subject<float>> _longPressProgressSubjects = new();
+        private readonly Dictionary<InputActionKey, BehaviorSubject<bool>> _pressStateSubjects = new();
+        private readonly Dictionary<InputActionKey, Subject<Vector2>> _vector2Subjects = new();
+        private readonly Dictionary<InputActionKey, Subject<float>> _scalarSubjects = new();
+
+        // Caches
+        private readonly HashSet<string> _requiredLayouts = new();
+        private readonly Dictionary<string, InputActionKey> _actionNameToKey = new();
+        private readonly Dictionary<int, InputAction> _actionLookup = new();
+        private readonly Dictionary<int, string> _actionIdToName = new();
+
+        // Disposables
+        private CompositeDisposable _subscriptions;
+        private readonly CompositeDisposable _actionWiringSubscriptions = new();
+        private readonly CancellationTokenSource _cancellation;
+        private readonly InputActionAsset _inputActionAsset;
+        private bool _isInputBlocked;
+
+        public InputPlayer(int playerId, InputUser user, PlayerSlotConfig config, InputDevice initialDevice = null)
+        {
+            PlayerId = playerId;
+            User = user;
+
+            _cancellation = new CancellationTokenSource();
+            _subscriptions = new CompositeDisposable();
+            ActiveContextName = _activeContextName;
+            ActiveDeviceKind = _activeDeviceKind;
+            _inputActionAsset = BuildAssetFromConfig(config);
+
+            User.AssociateActionsWithUser(_inputActionAsset);
+            UnityEngine.InputSystem.InputSystem.onDeviceChange += OnDeviceChanged;
+
+            if (initialDevice != null)
+            {
+                UpdateActiveDeviceKind(initialDevice);
+            }
+
+            // Start independent device detection polling (works even without Context)
+            StartDeviceDetectionPolling();
+        }
+
+        /// <summary>
+        /// Handles device hot-swapping. Thread-safe: schedules pairing on main thread.
+        /// </summary>
+        private void OnDeviceChanged(InputDevice device, InputDeviceChange change)
+        {
+            if (InputManager.IsListeningForPlayers) return;
+            if (change != InputDeviceChange.Added) return;
+
+            // Early guard: Skip if User is already invalid (prevents unnecessary async task)
+            if (User == null || !User.valid) return;
+
+            ScheduleDevicePairingAsync(device).Forget();
+        }
+
+        private async UniTaskVoid ScheduleDevicePairingAsync(InputDevice device)
+        {
+            await UniTask.Yield(PlayerLoopTiming.Update);
+
+            // Check if User is still valid after async delay (may have been removed/disposed)
+            if (User == null || !User.valid) return;
+
+            if (IsDeviceRequiredAndAvailable(device))
+            {
+                if (User == null || !User.valid) return;
+
+                CLogger.LogInfo($"{DEBUG_FLAG} [P{PlayerId}] New required device '{device.displayName}' connected. Pairing...");
+                InputUser.PerformPairingWithDevice(device, User);
+            }
+        }
+
+        /// <summary>
+        /// Checks if device matches required layout and is available. Uses cached collections to minimize allocations.
+        /// </summary>
+        private bool IsDeviceRequiredAndAvailable(InputDevice device)
+        {
+            if (User == null || !User.valid) return false;
+
+            if (User.pairedDevices.Contains(device)) return false;
+
+            string deviceLayout = device.layout;
+            bool isRequired = false;
+            foreach (var layout in _requiredLayouts)
+            {
+                if (UnityEngine.InputSystem.InputSystem.IsFirstLayoutBasedOnSecond(deviceLayout, layout))
+                {
+                    isRequired = true;
+                    break;
+                }
+            }
+
+            if (!isRequired) return false;
+
+            var allUsers = InputUser.all;
+            int userCount = allUsers.Count;
+            for (int i = 0; i < userCount; i++)
+            {
+                // Guard: Check if User is still valid before comparing IDs
+                if (User == null || !User.valid) return false;
+
+                if (allUsers[i].id != User.id && allUsers[i].pairedDevices.Contains(device))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public bool RemoveBindingFromContext(InputContext context, Observable<Unit> source)
+        {
+            if (context == null || source == null) return false;
+
+            bool removed = context.RemoveBinding(source);
+            if (removed && _contextStack.Count > 0 && ReferenceEquals(_contextStack.Peek(), context))
+            {
+                DeactivateTopContext();
+                ActivateTopContext();
+            }
+            return removed;
+        }
+
+        public bool RemoveBindingFromContext(InputContext context, Observable<Vector2> source)
+        {
+            if (context == null || source == null) return false;
+
+            bool removed = context.RemoveBinding(source);
+            if (removed && _contextStack.Count > 0 && ReferenceEquals(_contextStack.Peek(), context))
+            {
+                DeactivateTopContext();
+                ActivateTopContext();
+            }
+            return removed;
+        }
+
+        public bool RemoveBindingFromContext(InputContext context, Observable<float> source)
+        {
+            if (context == null || source == null) return false;
+
+            bool removed = context.RemoveBinding(source);
+            if (removed && _contextStack.Count > 0 && ReferenceEquals(_contextStack.Peek(), context))
+            {
+                DeactivateTopContext();
+                ActivateTopContext();
+            }
+            return removed;
+        }
+
+        public bool RemoveBindingFromContext(InputContext context, Observable<bool> source)
+        {
+            if (context == null || source == null) return false;
+
+            bool removed = context.RemoveBinding(source);
+            if (removed && _contextStack.Count > 0 && ReferenceEquals(_contextStack.Peek(), context))
+            {
+                DeactivateTopContext();
+                ActivateTopContext();
+            }
+            return removed;
+        }
+
+        /// <summary>
+        /// Removes a specific context instance from the stack, maintaining the relative order of other contexts.
+        /// <para>
+        /// Behavior: If the removed context was active (at the top), the next context becomes active.
+        /// If it was in the middle of the stack, it is simply removed without affecting the active context.
+        /// </para>
+        /// </summary>
+        public bool RemoveContext(InputContext context)
+        {
+            if (context == null) return false;
+
+            bool wasActive = _contextStack.Count > 0 && ReferenceEquals(_contextStack.Peek(), context);
+
+            if (wasActive)
+            {
+                DeactivateTopContext();
+            }
+
+            _tempContextList.Clear();
+            bool found = false;
+
+            while (_contextStack.Count > 0)
+            {
+                var ctx = _contextStack.Pop();
+                if (ReferenceEquals(ctx, context))
+                {
+                    found = true;
+                    break;
+                }
+                _tempContextList.Add(ctx);
+            }
+
+            for (int i = _tempContextList.Count - 1; i >= 0; i--)
+            {
+                _contextStack.Push(_tempContextList[i]);
+            }
+            _tempContextList.Clear();
+
+            if (wasActive)
+            {
+                ActivateTopContext();
+            }
+
+            if (found)
+            {
+                _contextSet.Remove(context);
+                context.RemoveOwner(this);
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// Pushes a context to the top of the stack, making it the active context.
+        /// <para>
+        /// Auto-Focus: If the context is already in the stack, it is moved to the top.
+        /// This ensures a context is never duplicated in the stack.
+        /// </para>
+        /// </summary>
+        public void PushContext(InputContext context)
+        {
+            if (context == null) return;
+
+            if (_contextSet.Contains(context))
+            {
+                _tempContextList.Clear();
+
+                while (_contextStack.Count > 0)
+                {
+                    var ctx = _contextStack.Pop();
+                    if (!ReferenceEquals(ctx, context))
+                    {
+                        _tempContextList.Add(ctx);
+                    }
+                }
+
+                for (int i = _tempContextList.Count - 1; i >= 0; i--)
+                {
+                    _contextStack.Push(_tempContextList[i]);
+                }
+                _tempContextList.Clear();
+            }
+
+            DeactivateTopContext();
+            _contextStack.Push(context);
+            _contextSet.Add(context);
+            context.AddOwner(this);
+            ActivateTopContext();
+        }
+
+        /// <summary>
+        /// Removes the top context from the stack.
+        /// <para>
+        ///     WARNING: Do not use this if you use ".AddTo(this)" for lifecycle binding. 
+        ///     PopContext blindly removes the top element. If the stack order has changed (e.g. dynamic UI), 
+        ///     you might pop the wrong context. Use "Dispose()" on the context or "RemoveContext()" instead.
+        /// </para>
+        /// </summary>
+        public void PopContext()
+        {
+            if (_contextStack.Count == 0) return;
+            var ctx = _contextStack.Peek();
+            DeactivateTopContext();
+            _contextStack.Pop();
+            _contextSet.Remove(ctx);
+            ctx.RemoveOwner(this);
+            ActivateTopContext();
+        }
+
+        public void RefreshActiveContext()
+        {
+            if (_contextStack.Count == 0) return;
+            DeactivateTopContext();
+            ActivateTopContext();
+        }
+
+        public Observable<Vector2> GetVector2Observable(string actionName)
+        {
+            var mapName = _contextStack.Count > 0 ? _contextStack.Peek().ActionMapName : null;
+            if (mapName != null)
+            {
+                var key = new InputActionKey(mapName, actionName);
+                if (_vector2Subjects.TryGetValue(key, out var subject)) return subject;
+            }
+            if (_actionNameToKey.TryGetValue(actionName, out var cachedKey) &&
+                _vector2Subjects.TryGetValue(cachedKey, out var cachedSubject))
+            {
+                return cachedSubject;
+            }
+            return EmptyObservables.Vector2;
+        }
+
+        public Observable<Unit> GetButtonObservable(string actionName)
+        {
+            var mapName = _contextStack.Count > 0 ? _contextStack.Peek().ActionMapName : null;
+            if (mapName != null)
+            {
+                var key = new InputActionKey(mapName, actionName);
+                if (_buttonSubjects.TryGetValue(key, out var subject)) return subject;
+            }
+            if (_actionNameToKey.TryGetValue(actionName, out var cachedKey) &&
+                _buttonSubjects.TryGetValue(cachedKey, out var cachedSubject))
+            {
+                return cachedSubject;
+            }
+            return EmptyObservables.Unit;
+        }
+
+        public Observable<Unit> GetLongPressObservable(string actionName)
+        {
+            var mapName = _contextStack.Count > 0 ? _contextStack.Peek().ActionMapName : null;
+            if (mapName != null)
+            {
+                var key = new InputActionKey(mapName, actionName);
+                if (_longPressSubjects.TryGetValue(key, out var subject)) return subject;
+            }
+            if (_actionNameToKey.TryGetValue(actionName, out var cachedKey) &&
+                _longPressSubjects.TryGetValue(cachedKey, out var cachedSubject))
+            {
+                return cachedSubject;
+            }
+            return EmptyObservables.Unit;
+        }
+
+        public Observable<float> GetScalarObservable(string actionName)
+        {
+            var mapName = _contextStack.Count > 0 ? _contextStack.Peek().ActionMapName : null;
+            if (mapName != null)
+            {
+                var key = new InputActionKey(mapName, actionName);
+                if (_scalarSubjects.TryGetValue(key, out var subject)) return subject;
+            }
+            if (_actionNameToKey.TryGetValue(actionName, out var cachedKey) &&
+                _scalarSubjects.TryGetValue(cachedKey, out var cachedSubject))
+            {
+                return cachedSubject;
+            }
+            return EmptyObservables.Float;
+        }
+
+        public Observable<bool> GetPressStateObservable(string actionName)
+        {
+            var mapName = _contextStack.Count > 0 ? _contextStack.Peek().ActionMapName : null;
+            if (mapName != null)
+            {
+                var key = new InputActionKey(mapName, actionName);
+                if (_pressStateSubjects.TryGetValue(key, out var subject)) return subject;
+            }
+            if (_actionNameToKey.TryGetValue(actionName, out var cachedKey) &&
+                _pressStateSubjects.TryGetValue(cachedKey, out var cachedSubject))
+            {
+                return cachedSubject;
+            }
+            return EmptyObservables.Bool;
+        }
+
+        public Observable<Vector2> GetVector2Observable(string actionMapName, string actionName)
+        {
+            var key = new InputActionKey(actionMapName, actionName);
+            return _vector2Subjects.TryGetValue(key, out var subject) ? subject : EmptyObservables.Vector2;
+        }
+
+        public Observable<Unit> GetButtonObservable(string actionMapName, string actionName)
+        {
+            var key = new InputActionKey(actionMapName, actionName);
+            return _buttonSubjects.TryGetValue(key, out var subject) ? subject : EmptyObservables.Unit;
+        }
+
+        public Observable<Unit> GetLongPressObservable(string actionMapName, string actionName)
+        {
+            var key = new InputActionKey(actionMapName, actionName);
+            return _longPressSubjects.TryGetValue(key, out var subject) ? subject : EmptyObservables.Unit;
+        }
+
+        public Observable<float> GetLongPressProgressObservable(string actionName)
+        {
+            var mapName = _contextStack.Count > 0 ? _contextStack.Peek().ActionMapName : null;
+            if (mapName != null)
+            {
+                var key = new InputActionKey(mapName, actionName);
+                if (_longPressProgressSubjects.TryGetValue(key, out var subject)) return subject;
+            }
+            if (_actionNameToKey.TryGetValue(actionName, out var cachedKey) &&
+                _longPressProgressSubjects.TryGetValue(cachedKey, out var cachedSubject))
+            {
+                return cachedSubject;
+            }
+            return EmptyObservables.Float;
+        }
+
+        public Observable<float> GetLongPressProgressObservable(string actionMapName, string actionName)
+        {
+            var key = new InputActionKey(actionMapName, actionName);
+            return _longPressProgressSubjects.TryGetValue(key, out var subject) ? subject : EmptyObservables.Float;
+        }
+
+        public Observable<float> GetScalarObservable(string actionMapName, string actionName)
+        {
+            var key = new InputActionKey(actionMapName, actionName);
+            return _scalarSubjects.TryGetValue(key, out var subject) ? subject : EmptyObservables.Float;
+        }
+
+        public Observable<bool> GetPressStateObservable(string actionMapName, string actionName)
+        {
+            var key = new InputActionKey(actionMapName, actionName);
+            return _pressStateSubjects.TryGetValue(key, out var subject) ? subject : EmptyObservables.Bool;
+        }
+
+        #region ZeroGC API
+        public Observable<Vector2> GetVector2Observable(int actionId) => FindAction(actionId) is { } action ? GetVector2Observable(action.actionMap.name, action.name) : EmptyObservables.Vector2;
+        public Observable<Unit> GetButtonObservable(int actionId) => FindAction(actionId) is { } action ? GetButtonObservable(action.actionMap.name, action.name) : EmptyObservables.Unit;
+        public Observable<Unit> GetLongPressObservable(int actionId) => FindAction(actionId) is { } action ? GetLongPressObservable(action.actionMap.name, action.name) : EmptyObservables.Unit;
+        public Observable<float> GetLongPressProgressObservable(int actionId) => FindAction(actionId) is { } action ? GetLongPressProgressObservable(action.actionMap.name, action.name) : EmptyObservables.Float;
+        public Observable<bool> GetPressStateObservable(int actionId) => FindAction(actionId) is { } action ? GetPressStateObservable(action.actionMap.name, action.name) : EmptyObservables.Bool;
+        public Observable<float> GetScalarObservable(int actionId) => FindAction(actionId) is { } action ? GetScalarObservable(action.actionMap.name, action.name) : EmptyObservables.Float;
+
+        private InputAction FindAction(int actionId)
+        {
+            if (_actionLookup.TryGetValue(actionId, out var action)) return action;
+            CLogger.LogWarning($"[InputPlayer] Action ID '{actionId}' not found. Regenerate constants after config changes.");
+            return null;
+        }
+        #endregion
+
+        public void BlockInput()
+        {
+            if (_isInputBlocked) return;
+            _isInputBlocked = true;
+            _inputActionAsset.Disable();
+        }
+
+        public void UnblockInput()
+        {
+            if (!_isInputBlocked) return;
+            _isInputBlocked = false;
+            if (_contextStack.Count > 0)
+            {
+                _inputActionAsset.FindActionMap(_contextStack.Peek().ActionMapName)?.Enable();
+            }
+        }
+
+        public void Dispose()
+        {
+            _cancellation.Cancel();
+            _cancellation.Dispose();
+            _subscriptions?.Dispose();
+            _actionWiringSubscriptions.Dispose();
+            _inputActionAsset.Disable();
+            if (_inputActionAsset != null)
+            {
+                var assetToDestroy = _inputActionAsset;
+                if (Application.isPlaying) UnityEngine.Object.Destroy(assetToDestroy);
+                else UnityEngine.Object.DestroyImmediate(assetToDestroy);
+            }
+
+            // Clean up context stack ownership to prevent stale references
+            while (_contextStack.Count > 0)
+            {
+                var ctx = _contextStack.Pop();
+                ctx.RemoveOwner(this);
+            }
+            _contextSet.Clear();
+
+            foreach (var s in _buttonSubjects.Values) s.Dispose();
+            foreach (var s in _longPressSubjects.Values) s.Dispose();
+            foreach (var s in _longPressProgressSubjects.Values) s.Dispose();
+            foreach (var s in _vector2Subjects.Values) s.Dispose();
+            foreach (var s in _scalarSubjects.Values) s.Dispose();
+            foreach (var s in _pressStateSubjects.Values) s.Dispose();
+            _activeContextName.Dispose();
+            _activeDeviceKind.Dispose();
+
+            // Guard: Check if User is still valid before cleanup (may have been removed externally)
+            if (User != null && User.valid)
+            {
+                User.UnpairDevicesAndRemoveUser();
+            }
+            UnityEngine.InputSystem.InputSystem.onDeviceChange -= OnDeviceChanged;
+        }
+
+        /// <summary>
+        /// Activates the top context in the stack. Enables the ActionMap and subscribes to the context's bindings.
+        /// <para>
+        /// Note: Multiple contexts can safely share the same ActionMap name. Each context's bindings
+        /// are stored independently in the context object, so switching between contexts with the same ActionMap
+        /// will correctly switch which bindings are active without conflicts.
+        /// </para>
+        /// </summary>
+        private void ActivateTopContext()
+        {
+            _subscriptions?.Dispose();
+            _subscriptions = new CompositeDisposable();
+
+            if (_contextStack.Count == 0)
+            {
+                _inputActionAsset.Disable();
+                _activeContextName.Value = null;
+                OnContextChanged?.Invoke(null);
+                return;
+            }
+
+            var topContext = _contextStack.Peek();
+            _inputActionAsset.Disable();
+
+            if (!_isInputBlocked)
+            {
+                _inputActionAsset.FindActionMap(topContext.ActionMapName)?.Enable();
+            }
+
+            // Subscribe to this specific context's bindings (independent of other contexts, even if they share the same ActionMap)
+            foreach (var (source, command) in topContext.ActionBindings)
+            {
+                source.Subscribe(_ => command.Execute()).AddTo(_subscriptions);
+            }
+            foreach (var (source, command) in topContext.MoveBindings)
+            {
+                source.Subscribe(command.Execute).AddTo(_subscriptions);
+            }
+            foreach (var (source, command) in topContext.ScalarBindings)
+            {
+                source.Subscribe(command.Execute).AddTo(_subscriptions);
+            }
+            foreach (var (source, command) in topContext.BoolBindings)
+            {
+                source.Subscribe(command.Execute).AddTo(_subscriptions);
+            }
+
+            _activeContextName.Value = topContext.Name;
+            OnContextChanged?.Invoke(topContext.Name);
+        }
+
+        private void DeactivateTopContext()
+        {
+            if (_subscriptions != null)
+            {
+                _subscriptions.Dispose();
+                _subscriptions = null;
+            }
+        }
+
+        private InputActionAsset BuildAssetFromConfig(PlayerSlotConfig config)
+        {
+            using (InputPerformanceProfiler.BeginScope("BuildAssetFromConfig"))
+            {
+                var asset = ScriptableObject.CreateInstance<InputActionAsset>();
+                var token = _cancellation.Token;
+                var actionsByMapAndName = new Dictionary<InputActionKey, InputAction>();
+
+                _requiredLayouts.Clear();
+                foreach (var ctx in config.Contexts)
+                    foreach (var binding in ctx.Bindings)
+                        foreach (var devBinding in binding.DeviceBindings)
+                        {
+                            int startIndex = devBinding.IndexOf('<');
+                            if (startIndex != -1)
+                            {
+                                int endIndex = devBinding.IndexOf('>');
+                                if (endIndex > startIndex) _requiredLayouts.Add(devBinding.Substring(startIndex + 1, endIndex - startIndex - 1));
+                            }
+                        }
+
+                if (config.JoinAction != null && !string.IsNullOrEmpty(config.JoinAction.ActionName))
+                {
+                    const string joinMapName = "GlobalActions";
+                    var joinMap = asset.FindActionMap(joinMapName) ?? asset.AddActionMap(joinMapName);
+                    var joinAction = joinMap.AddAction(config.JoinAction.ActionName, InputActionType.Button);
+                    foreach (var path in config.JoinAction.DeviceBindings)
+                    {
+                        joinAction.AddBinding(path);
+                    }
+
+                    string combinedId = $"{joinMapName}/{joinAction.name}";
+                    // Use context-aware hash for consistency (PlayerJoin is the context for join actions)
+                    const string joinContext = "PlayerJoin";
+                    var actionId = InputHashUtility.GetActionId(joinContext, joinMapName, joinAction.name);
+                    _actionLookup[actionId] = joinAction;
+                    _actionIdToName[actionId] = combinedId;
+
+                    var subject = new Subject<Unit>();
+                    joinAction.PerformedAsObservable(token).Select(_ => Unit.Default).Subscribe(subject.AsObserver()).AddTo(_actionWiringSubscriptions);
+                    var joinKey = new InputActionKey(joinMapName, joinAction.name);
+                    _buttonSubjects[joinKey] = subject;
+                    _actionNameToKey[joinAction.name] = joinKey;
+                }
+
+                foreach (var ctxConfig in config.Contexts)
+                {
+                    var map = asset.FindActionMap(ctxConfig.ActionMap) ?? asset.AddActionMap(ctxConfig.ActionMap);
+                    foreach (var bindingConfig in ctxConfig.Bindings)
+                    {
+                        var key = new InputActionKey(ctxConfig.ActionMap, bindingConfig.ActionName);
+                        var inferredType = bindingConfig.Type;
+                        if (inferredType == ActionValueType.Button)
+                        {
+                            bool looksVector2 = bindingConfig.DeviceBindings.Any(b =>
+                                b.Contains("2DVector") || 
+                                (b.Contains("leftStick") && !b.Contains("leftStick/")) || 
+                                (b.Contains("rightStick") && !b.Contains("rightStick/")) || 
+                                (b.Contains("dpad") && !b.Contains("dpad/")) || 
+                                b.EndsWith("/delta"));
+                            bool looksFloat = !looksVector2 && bindingConfig.DeviceBindings.Any(b => b.Contains("Trigger"));
+                            if (looksVector2) inferredType = ActionValueType.Vector2;
+                            else if (looksFloat) inferredType = ActionValueType.Float;
+                        }
+
+                        if (actionsByMapAndName.ContainsKey(key))
+                        {
+                            var existingAction = actionsByMapAndName[key];
+                            foreach (var path in bindingConfig.DeviceBindings) existingAction.AddBinding(path);
+                            if (inferredType == ActionValueType.Button && bindingConfig.LongPressMs > 0 && !_longPressSubjects.ContainsKey(key))
+                            {
+                                WireLongPressDetection(existingAction, bindingConfig.LongPressMs, key, token);
+                                WireLongPressProgressDetection(existingAction, bindingConfig.LongPressMs, key, token);
+                            }
+                            continue;
+                        }
+
+                        var actionType = inferredType switch
+                        {
+                            ActionValueType.Vector2 => InputActionType.Value,
+                            ActionValueType.Float => InputActionType.Value,
+                            _ => InputActionType.Button
+                        };
+                        var action = map.AddAction(bindingConfig.ActionName, actionType);
+
+                        foreach (var path in bindingConfig.DeviceBindings)
+                        {
+                            if (!TryAddInline2DVectorComposite(action, path))
+                            {
+                                action.AddBinding(path);
+                            }
+                        }
+
+                        actionsByMapAndName[key] = action;
+
+                        string combinedId = $"{ctxConfig.ActionMap}/{action.name}";
+                        // Use context-aware hash to ensure different contexts with same action map/name produce different IDs
+                        var actionId = InputHashUtility.GetActionId(ctxConfig.Name, ctxConfig.ActionMap, action.name);
+                        _actionLookup[actionId] = action;
+                        _actionIdToName[actionId] = combinedId;
+                        _actionNameToKey[action.name] = key;
+
+                        if (inferredType == ActionValueType.Vector2)
+                        {
+                            var subject = new Subject<Vector2>();
+
+                            // Auto-detect update mode: Polling for delta inputs, EventDriven for others
+                            var updateMode = bindingConfig.UpdateMode;
+                            if (updateMode == InputUpdateMode.EventDriven)
+                            {
+                                // Auto-detect: if bindings contain "/delta", use polling
+                                bool hasDeltaInput = bindingConfig.DeviceBindings.Any(b =>
+                                    b.Contains("/delta", StringComparison.OrdinalIgnoreCase));
+                                if (hasDeltaInput) updateMode = InputUpdateMode.Polling;
+                            }
+
+                            if (updateMode == InputUpdateMode.Polling)
+                            {
+                                // Poll every frame for smooth, responsive input (mouse delta, analog sticks)
+                                Observable.EveryUpdate(token)
+                                    .Subscribe(_ =>
+                                    {
+                                        if (!action.enabled) return;
+
+                                        var v = action.ReadValue<Vector2>();
+                                        var device = action.activeControl?.device;
+
+                                        // Anti-jitter: Ignore small mouse movements when using Gamepad
+                                        if (_activeDeviceKind.Value == InputDeviceKind.Gamepad)
+                                        {
+                                            if (device is UnityEngine.InputSystem.Mouse && v.magnitude < 1.0f) return;
+                                        }
+
+                                        // Update device kind when input is detected (only when there's actual input)
+                                        // This ensures device switching works correctly in polling mode
+                                        // Uses action.activeControl which is the most accurate source from Unity InputSystem
+                                        // Threshold 0.25 (sqrMagnitude) = 0.5 magnitude, filters out tiny noise
+                                        if (v.sqrMagnitude > 0.25f && device != null)
+                                        {
+                                            if (_contextStack.Count > 0 && _contextStack.Peek().ActionMapName == ctxConfig.ActionMap)
+                                            {
+                                                UpdateActiveDeviceKind(device);
+                                            }
+                                        }
+
+                                        if (v.sqrMagnitude > 1f) v = v.normalized;
+                                        subject.OnNext(v);
+                                    })
+                                    .AddTo(_actionWiringSubscriptions);
+                            }
+                            else
+                            {
+                                // Event-driven: only trigger on value change (efficient for discrete inputs)
+                                action.PerformedAsObservable(token)
+                                    .Subscribe(ctx =>
+                                    {
+                                        var v = ctx.ReadValue<Vector2>();
+                                        var device = TryGetControlDevice(ctx);
+
+                                        // Anti-jitter: Ignore small mouse movements when using Gamepad
+                                        if (device is UnityEngine.InputSystem.Mouse && _activeDeviceKind.Value == InputDeviceKind.Gamepad)
+                                        {
+                                            if (v.magnitude < 1.0f) return;
+                                        }
+
+                                        if (v.sqrMagnitude > 1f) v = v.normalized;
+                                        subject.OnNext(v);
+                                    })
+                                    .AddTo(_actionWiringSubscriptions);
+
+                                action.CanceledAsObservable(token)
+                                    .Select(_ => Vector2.zero)
+                                    .Subscribe(subject.AsObserver())
+                                    .AddTo(_actionWiringSubscriptions);
+                            }
+
+                            action.PerformedAsObservable(token).Subscribe(ctx =>
+                            {
+                                if (_contextStack.Count > 0 && _contextStack.Peek().ActionMapName == ctx.action.actionMap.name)
+                                {
+                                    UpdateActiveDeviceKind(TryGetControlDevice(ctx));
+                                }
+                            }).AddTo(_actionWiringSubscriptions);
+                            _vector2Subjects[key] = subject;
+                        }
+                        else if (inferredType == ActionValueType.Float)
+                        {
+                            var subject = new Subject<float>();
+                            action.PerformedAsObservable(token).Select(ctx => ctx.ReadValue<float>()).Subscribe(subject.AsObserver()).AddTo(_actionWiringSubscriptions);
+                            action.PerformedAsObservable(token).Subscribe(ctx =>
+                            {
+                                if (_contextStack.Count > 0 && _contextStack.Peek().ActionMapName == ctx.action.actionMap.name)
+                                {
+                                    UpdateActiveDeviceKind(TryGetControlDevice(ctx));
+                                }
+                            }).AddTo(_actionWiringSubscriptions);
+                            action.CanceledAsObservable(token).Select(_ => 0f).Subscribe(subject.AsObserver()).AddTo(_actionWiringSubscriptions);
+                            _scalarSubjects[key] = subject;
+
+                            // Optional long-press for Float using threshold if configured
+                            int longPressMs = bindingConfig.LongPressMs;
+                            if (longPressMs > 0)
+                            {
+                                WireFloatLongPressDetection(action, longPressMs, bindingConfig.LongPressValueThreshold, key, token);
+                            }
+                        }
+                        else
+                        {
+                            var subject = new Subject<Unit>();
+                            action.PerformedAsObservable(token).Select(_ => Unit.Default).Subscribe(subject.AsObserver()).AddTo(_actionWiringSubscriptions);
+                            action.PerformedAsObservable(token).Subscribe(ctx =>
+                            {
+                                if (_contextStack.Count > 0 && _contextStack.Peek().ActionMapName == ctx.action.actionMap.name)
+                                {
+                                    UpdateActiveDeviceKind(TryGetControlDevice(ctx));
+                                }
+                            }).AddTo(_actionWiringSubscriptions);
+                            _buttonSubjects[key] = subject;
+
+                            var pressState = new BehaviorSubject<bool>(false);
+                            action.StartedAsObservable(token).Select(_ => true).Subscribe(pressState.AsObserver()).AddTo(_actionWiringSubscriptions);
+                            action.CanceledAsObservable(token).Select(_ => false).Subscribe(pressState.AsObserver()).AddTo(_actionWiringSubscriptions);
+                            _pressStateSubjects[key] = pressState;
+
+                            int longPressMs = bindingConfig.LongPressMs;
+                            if (longPressMs > 0)
+                            {
+                                WireLongPressDetection(action, longPressMs, key, token);
+                                WireLongPressProgressDetection(action, longPressMs, key, token);
+                            }
+                        }
+                    }
+                }
+                return asset;
+            }
+        }
+
+        private void UpdateActiveDeviceKind(InputDevice device)
+        {
+            if (device == null) return;
+            if (device is Touchscreen)
+            {
+                _activeDeviceKind.Value = InputDeviceKind.Touchscreen;
+                return;
+            }
+            if (device is Keyboard || device is Mouse)
+            {
+                _activeDeviceKind.Value = InputDeviceKind.KeyboardMouse;
+                return;
+            }
+            if (device is Gamepad)
+            {
+                _activeDeviceKind.Value = InputDeviceKind.Gamepad;
+                return;
+            }
+            _activeDeviceKind.Value = InputDeviceKind.Other;
+        }
+
+        /// <summary>
+        /// Starts device detection polling that only updates ActiveDeviceKind when a Context is active.
+        /// This ensures ActiveDeviceKind behaves like Context bindings - only the top Context responds to device input.
+        /// </summary>
+        private void StartDeviceDetectionPolling()
+        {
+            var token = _cancellation.Token;
+
+            Observable.EveryUpdate(token)
+                .Subscribe(_ =>
+                {
+                    if (User == null || !User.valid) return;
+
+                    // Only update ActiveDeviceKind when there's an active Context (top of stack)
+                    if (_contextStack.Count == 0)
+                    {
+                        // CLogger.LogInfo($"{DEBUG_FLAG} [P{PlayerId}] No active context, skipping ActiveDeviceKind update");
+                        return;
+                    }
+
+                    var topContext = _contextStack.Peek();
+                    // CLogger.LogInfo($"{DEBUG_FLAG} [P{PlayerId}] Active context: {topContext.Name} ({topContext.GetType().Name})");
+
+                    InputDevice activeDevice = null;
+                    double latestTime = 0;
+
+                    foreach (var device in User.pairedDevices)
+                    {
+                        if (device == null) continue;
+
+                        double deviceTime = device.lastUpdateTime;
+                        if (deviceTime > latestTime)
+                        {
+                            if (HasRecentInput(device))
+                            {
+                                latestTime = deviceTime;
+                                activeDevice = device;
+                            }
+                        }
+                    }
+
+                    if (activeDevice != null)
+                    {
+                        InputDeviceKind newKind = GetDeviceKind(activeDevice);
+                        if (_activeDeviceKind.Value != newKind)
+                        {
+                            // CLogger.LogInfo($"{DEBUG_FLAG} [P{PlayerId}] Updating ActiveDeviceKind from {_activeDeviceKind.Value} to {newKind} for context {topContext.Name}");
+                            UpdateActiveDeviceKind(activeDevice);
+                        }
+                    }
+                })
+                .AddTo(_actionWiringSubscriptions);
+        }
+
+        /// <summary>
+        /// Checks if a device has recent input activity.
+        /// </summary>
+        private bool HasRecentInput(InputDevice device)
+        {
+            if (device == null) return false;
+
+            if (device is Keyboard keyboard)
+            {
+                if (keyboard.anyKey.wasPressedThisFrame || keyboard.anyKey.isPressed)
+                {
+                    return true;
+                }
+            }
+
+            if (device is Mouse mouse)
+            {
+                if (mouse.leftButton.wasPressedThisFrame || mouse.leftButton.isPressed ||
+                    mouse.rightButton.wasPressedThisFrame || mouse.rightButton.isPressed ||
+                    mouse.middleButton.wasPressedThisFrame || mouse.middleButton.isPressed)
+                {
+                    return true;
+                }
+                if (mouse.delta.ReadValue().sqrMagnitude > 0.01f)
+                {
+                    return true;
+                }
+            }
+
+            if (device is Gamepad gamepad)
+            {
+                if (gamepad.buttonSouth.wasPressedThisFrame || gamepad.buttonSouth.isPressed ||
+                    gamepad.buttonNorth.wasPressedThisFrame || gamepad.buttonNorth.isPressed ||
+                    gamepad.buttonEast.wasPressedThisFrame || gamepad.buttonEast.isPressed ||
+                    gamepad.buttonWest.wasPressedThisFrame || gamepad.buttonWest.isPressed ||
+                    gamepad.leftShoulder.wasPressedThisFrame || gamepad.leftShoulder.isPressed ||
+                    gamepad.rightShoulder.wasPressedThisFrame || gamepad.rightShoulder.isPressed ||
+                    gamepad.leftTrigger.isPressed || gamepad.rightTrigger.isPressed)
+                {
+                    return true;
+                }
+                if (gamepad.leftStick.ReadValue().sqrMagnitude > 0.01f ||
+                    gamepad.rightStick.ReadValue().sqrMagnitude > 0.01f)
+                {
+                    return true;
+                }
+            }
+
+            if (device is Touchscreen touchscreen)
+            {
+                foreach (var touch in touchscreen.touches)
+                {
+                    if (touch.press.isPressed || touch.press.wasPressedThisFrame)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Gets the InputDeviceKind for a given device.
+        /// </summary>
+        private InputDeviceKind GetDeviceKind(InputDevice device)
+        {
+            if (device == null) return InputDeviceKind.Unknown;
+            if (device is Touchscreen) return InputDeviceKind.Touchscreen;
+            if (device is Keyboard || device is Mouse) return InputDeviceKind.KeyboardMouse;
+            if (device is Gamepad) return InputDeviceKind.Gamepad;
+            return InputDeviceKind.Other;
+        }
+
+        /// <summary>
+        /// Wires long-press detection for button actions using async polling.
+        /// For InputActionType.Button, Started fires on press and Performed fires immediately after,
+        /// so time-diff detection is unreliable. Async polling with IsPressed() is the correct approach.
+        /// </summary>
+        private void WireLongPressDetection(InputAction action, int longPressMs, InputActionKey key, CancellationToken token)
+        {
+            var longPressSubject = new Subject<Unit>();
+            float thresholdSec = longPressMs / 1000f;
+
+            action.StartedAsObservable(token).Subscribe(_ =>
+            {
+                var startSnapshot = Time.realtimeSinceStartup;
+                var ct = _cancellation.Token;
+                UniTask.Void(async () =>
+                {
+                    try
+                    {
+                        float elapsed = 0f;
+                        while (action.IsPressed() && elapsed < thresholdSec)
+                        {
+                            await UniTask.Yield(PlayerLoopTiming.Update, ct);
+                            elapsed = Time.realtimeSinceStartup - startSnapshot;
+                        }
+                        if (action.IsPressed() && elapsed >= thresholdSec)
+                        {
+                            longPressSubject.OnNext(Unit.Default);
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                });
+            }).AddTo(_actionWiringSubscriptions);
+
+            _longPressSubjects[key] = longPressSubject;
+        }
+
+        /// <summary>
+        /// Wires long-press progress detection for button actions.
+        /// Emits continuous progress (0~1) while holding, and -1 when released before completion.
+        /// </summary>
+        private void WireLongPressProgressDetection(InputAction action, int longPressMs, InputActionKey key, CancellationToken token)
+        {
+            var progressSubject = new Subject<float>();
+            float thresholdSec = longPressMs / 1000f;
+
+            action.StartedAsObservable(token).Subscribe(_ =>
+            {
+                var startTime = Time.realtimeSinceStartup;
+                var ct = _cancellation.Token;
+                UniTask.Void(async () =>
+                {
+                    try
+                    {
+                        while (action.IsPressed())
+                        {
+                            float elapsed = Time.realtimeSinceStartup - startTime;
+                            float progress = Mathf.Clamp01(elapsed / thresholdSec);
+                            progressSubject.OnNext(progress);
+
+                            if (progress >= 1f) break; // Completed, stop emitting progress
+                            await UniTask.Yield(PlayerLoopTiming.Update, ct);
+                        }
+
+                        // Emit -1 if released before completion (cancelled)
+                        float finalElapsed = Time.realtimeSinceStartup - startTime;
+                        if (finalElapsed < thresholdSec)
+                        {
+                            progressSubject.OnNext(-1f);
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                });
+            }).AddTo(_actionWiringSubscriptions);
+
+            _longPressProgressSubjects[key] = progressSubject;
+        }
+
+        /// <summary>
+        /// Wires long-press detection for float/trigger actions using value threshold.
+        /// </summary>
+        private void WireFloatLongPressDetection(InputAction action, int longPressMs, float valueThreshold, InputActionKey key, CancellationToken token)
+        {
+            float thresholdSec = longPressMs / 1000f;
+            float clampedThreshold = valueThreshold > 0f ? Mathf.Clamp01(valueThreshold) : 0.5f;
+            var longPressSubject = new Subject<Unit>();
+            float activateTime = -1f;
+
+            action.PerformedAsObservable(token).Subscribe(ctx =>
+            {
+                float v = ctx.ReadValue<float>();
+                if (activateTime < 0f && v >= clampedThreshold)
+                {
+                    activateTime = Time.realtimeSinceStartup;
+                    var ct = _cancellation.Token;
+                    UniTask.Void(async () =>
+                    {
+                        try
+                        {
+                            float elapsed = 0f;
+                            while (action.ReadValue<float>() >= clampedThreshold && elapsed < thresholdSec)
+                            {
+                                await UniTask.Yield(PlayerLoopTiming.Update, ct);
+                                elapsed = Time.realtimeSinceStartup - activateTime;
+                            }
+                            if (action.ReadValue<float>() >= clampedThreshold && elapsed >= thresholdSec)
+                            {
+                                longPressSubject.OnNext(Unit.Default);
+                            }
+                        }
+                        catch (OperationCanceledException) { }
+                    });
+                }
+                else if (activateTime >= 0f && v < clampedThreshold)
+                {
+                    activateTime = -1f;
+                }
+            }).AddTo(_actionWiringSubscriptions);
+
+            action.CanceledAsObservable(token).Subscribe(_ => activateTime = -1f).AddTo(_actionWiringSubscriptions);
+            _longPressSubjects[key] = longPressSubject;
+        }
+
+        /// <summary>
+        /// Parses inline 2DVector composite syntax and expands it into proper composite binding.
+        /// Example: "2DVector(mode=2,up=<Keyboard>/w,down=<Keyboard>/s,left=<Keyboard>/a,right=<Keyboard>/d)"
+        /// </summary>
+        private static bool TryAddInline2DVectorComposite(InputAction action, string path)
+        {
+            const string compositePrefix = "2DVector(";
+            if (string.IsNullOrEmpty(path) || !path.StartsWith(compositePrefix, StringComparison.OrdinalIgnoreCase) || !path.EndsWith(")"))
+            {
+                return false;
+            }
+
+            var inner = path.Substring(compositePrefix.Length, path.Length - compositePrefix.Length - 1);
+            var segments = inner.Split(',');
+            string mode = null, up = null, down = null, left = null, right = null;
+            for (int i = 0; i < segments.Length; i++)
+            {
+                var seg = segments[i].Trim();
+                int eq = seg.IndexOf('=');
+                if (eq <= 0 || eq >= seg.Length - 1) continue;
+                var key = seg.Substring(0, eq).Trim();
+                var val = seg.Substring(eq + 1).Trim();
+                if (string.Equals(key, "mode", StringComparison.OrdinalIgnoreCase)) mode = val;
+                else if (string.Equals(key, "up", StringComparison.OrdinalIgnoreCase)) up = val;
+                else if (string.Equals(key, "down", StringComparison.OrdinalIgnoreCase)) down = val;
+                else if (string.Equals(key, "left", StringComparison.OrdinalIgnoreCase)) left = val;
+                else if (string.Equals(key, "right", StringComparison.OrdinalIgnoreCase)) right = val;
+            }
+            var header = mode != null ? $"2DVector(mode={mode})" : "2DVector";
+            var composite = action.AddCompositeBinding(header);
+            if (!string.IsNullOrEmpty(up)) composite.With("up", up);
+            if (!string.IsNullOrEmpty(down)) composite.With("down", down);
+            if (!string.IsNullOrEmpty(left)) composite.With("left", left);
+            if (!string.IsNullOrEmpty(right)) composite.With("right", right);
+            return true;
+        }
+        public bool IsLeftMouseButtonPressed
+        {
+            get
+            {
+                var mouse = UnityEngine.InputSystem.Mouse.current;
+                return mouse != null && mouse.leftButton.isPressed;
+            }
+        }
+
+        public bool IsRightMouseButtonPressed
+        {
+            get
+            {
+                var mouse = UnityEngine.InputSystem.Mouse.current;
+                return mouse != null && mouse.rightButton.isPressed;
+            }
+        }
+
+        public bool IsMiddleMouseButtonPressed
+        {
+            get
+            {
+                var mouse = UnityEngine.InputSystem.Mouse.current;
+                return mouse != null && mouse.middleButton.isPressed;
+            }
+        }
+    }
+}

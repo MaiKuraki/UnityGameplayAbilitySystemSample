@@ -32,5 +32,5 @@ MonoBehaviour:
   Anim_Character: {fileID: -203655887218126122, guid: 8ec7625eb1f7b2a439690467e71781c8,
     type: 3}
   Anim_Camera: {fileID: 0}
-  NextComboAbility: {fileID: 0}
+  NextComboAbility: {fileID: 11400000, guid: d3b3bf39fd9e0bc46aa71f3e613bc1e7, type: 2}
   ComboWindowDuration: 0.5

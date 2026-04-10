@@ -1,60 +1,75 @@
 #if USING_FPS_COUNTER
-// if you are using the CycloneGames.Utility.Runtime.FPSCounter in your project, remove the #if USING_FPS_COUNTER to enable the FPSCounter manager.
-// You can use this script into your own debug tools, such as 'Unity Debug Sheet' or 'SRDebugger' or any other debug tool.
 
-using System;
-using System.Reflection;
-
+/// <summary>
+/// Utility class for toggling FPSCounter visibility.
+/// Enable by defining USING_FPS_COUNTER in your scripting define symbols.
+///
+/// ── Reflection Fallback (for projects that do NOT reference this DLL) ──
+/// If your assembly cannot directly reference CycloneGames.Utility.Runtime,
+/// you can use reflection to toggle the FPS counter. Copy the snippet below
+/// into your own code. Note: reflection is slower, has GC overhead, and may
+/// break under IL2CPP stripping — prefer the direct reference approach above.
+///
+/// <code>
+/// using System;
+/// using System.Reflection;
+///
+/// public static class FPSCounterReflection
+/// {
+///     private static Type _type;
+///     private static PropertyInfo _instanceProp;
+///     private static FieldInfo _isVisibleField;
+///
+///     public static void Toggle()
+///     {
+///         if (_type == null)
+///         {
+///             _type = Type.GetType("CycloneGames.Utility.Runtime.FPSCounter, CycloneGames.Utility.Runtime");
+///             if (_type == null) return;
+///             _instanceProp = _type.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+///             _isVisibleField = _type.GetField("IsVisible", BindingFlags.Public | BindingFlags.Instance);
+///         }
+///         var instance = _instanceProp?.GetValue(null);
+///         if (instance == null || _isVisibleField == null) return;
+///         bool current = (bool)_isVisibleField.GetValue(instance);
+///         _isVisibleField.SetValue(instance, !current);
+///     }
+/// }
+/// </code>
+///
+/// IMPORTANT: When using IL2CPP, add a link.xml to prevent stripping:
+/// <code>
+/// <linker>
+///   <assembly fullname="CycloneGames.Utility.Runtime" preserve="all"/>
+/// </linker>
+/// </code>
+/// </summary>
 public static class FPSCounterManager
 {
     public static void ToggleFPSCounter()
     {
-        IsFPSVisible = !IsFPSVisible;
-        SetFPSVisibility(IsFPSVisible);
+        var instance = CycloneGames.Utility.Runtime.FPSCounter.Instance;
+        if (instance == null)
+        {
+#if UNITY_EDITOR
+            UnityEngine.Debug.LogWarning("[FPSCounterManager] No FPSCounter instance found.");
+#endif
+            return;
+        }
+        instance.SetVisible(!instance.IsVisible);
     }
-    
-    private static bool IsFPSVisible = false;
-    private static void SetFPSVisibility(bool isVisible)
+
+    public static void SetFPSVisibility(bool isVisible)
     {
-        try
+        var instance = CycloneGames.Utility.Runtime.FPSCounter.Instance;
+        if (instance == null)
         {
-            Type fpsType = Type.GetType("CycloneGames.Utility.Runtime.FPSCounter, Assembly-CSharp");
-
-            if (fpsType == null)
-            {
-                fpsType = Type.GetType("CycloneGames.Utility.Runtime.FPSCounter, CycloneGames.Utility.Runtime");
-
-                if (fpsType == null)
-                {
-                    UnityEngine.Debug.LogError("FPSCounter type not found");
-                    return;
-                }
-            }
-            UnityEngine.Object[] fpsCounters = UnityEngine.Object.FindObjectsByType(fpsType, UnityEngine.FindObjectsSortMode.None);
-
-            if (fpsCounters.Length == 0)
-            {
-                UnityEngine.Debug.LogWarning("No FPSCounter instances found");
-                return;
-            }
-            FieldInfo field = fpsType.GetField("IsVisible",
-                BindingFlags.Public | BindingFlags.Instance);
-
-            if (field == null)
-            {
-                UnityEngine.Debug.LogError("IsVisible field not found");
-                return;
-            }
-            foreach (UnityEngine.Object counter in fpsCounters)
-            {
-                field.SetValue(counter, isVisible);
-            }
+#if UNITY_EDITOR
+            UnityEngine.Debug.LogWarning("[FPSCounterManager] No FPSCounter instance found.");
+#endif
+            return;
         }
-        catch (System.Exception ex)
-        {
-            UnityEngine.Debug.LogError($"Reflection failed: {ex}");
-        }
+        instance.SetVisible(isVisible);
     }
 }
-
 #endif

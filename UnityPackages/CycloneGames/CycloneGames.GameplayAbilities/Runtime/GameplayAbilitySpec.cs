@@ -2,49 +2,73 @@ namespace CycloneGames.GameplayAbilities.Runtime
 {
     /// <summary>
     /// Represents a granted instance of a GameplayAbility on an AbilitySystemComponent.
-    /// It holds the runtime state for an ability, such as its level and whether it's currently active.
+    /// Holds runtime state such as level and active status.
+    /// Pooled via GASPool for zero-allocation runtime.
     /// </summary>
-    public class GameplayAbilitySpec
+    public class GameplayAbilitySpec : IGASPoolable
     {
-        private static readonly System.Collections.Generic.Stack<GameplayAbilitySpec> pool = new System.Collections.Generic.Stack<GameplayAbilitySpec>(16);
-
         /// <summary>
-        /// The stateless definition of the ability. This is the template from which instances are created.
+        /// The stateless definition of the ability (template).
         /// </summary>
         public GameplayAbility Ability { get; private set; }
 
         /// <summary>
-        /// A convenience accessor for the ability's Class Default Object (CDO).
-        /// This is the primary object for NonInstanced abilities.
+        /// Convenience accessor for the ability's CDO.
         /// </summary>
         public GameplayAbility AbilityCDO => Ability;
 
         /// <summary>
-        /// The live, stateful instance of the ability, if its instancing policy requires one.
-        /// This will be null for NonInstanced abilities.
+        /// The live, stateful instance if instancing policy requires one.
         /// </summary>
         public GameplayAbility AbilityInstance { get; private set; }
 
         /// <summary>
-        /// The current level of this specific granted ability.
+        /// The current level of this granted ability.
         /// </summary>
         public int Level { get; set; }
 
         /// <summary>
-        /// A flag indicating if this ability is currently executing.
+        /// Flag indicating if this ability is currently executing.
         /// </summary>
         public bool IsActive { get; internal set; }
 
         /// <summary>
-        /// A reference to the AbilitySystemComponent that owns this ability spec.
+        /// Reference to the owning ASC.
         /// </summary>
         public AbilitySystemComponent Owner { get; private set; }
 
-        private GameplayAbilitySpec() { }
+        /// <summary>
+        /// The ActiveGameplayEffect that granted this ability (null if granted directly).
+        /// Used for automatic cleanup when the granting effect is removed.
+        /// </summary>
+        public ActiveGameplayEffect GrantingEffect { get; internal set; }
+
+        public GameplayAbilitySpec() { }
+
+        #region IGASPoolable Implementation
+
+        void IGASPoolable.OnGetFromPool()
+        {
+            // Initialization happens in Initialize()
+        }
+
+        void IGASPoolable.OnReturnToPool()
+        {
+            Ability = null;
+            AbilityInstance = null;
+            Owner = null;
+            GrantingEffect = null;
+            Level = 0;
+            IsActive = false;
+        }
+
+        #endregion
+
+        #region Factory
 
         public static GameplayAbilitySpec Create(GameplayAbility ability, int level = 1)
         {
-            var spec = pool.Count > 0 ? pool.Pop() : new GameplayAbilitySpec();
+            var spec = GASPool<GameplayAbilitySpec>.Shared.Get();
             spec.Ability = ability;
             spec.Level = level;
             spec.IsActive = false;
@@ -58,14 +82,15 @@ namespace CycloneGames.GameplayAbilities.Runtime
             this.Owner = owner;
         }
 
+        #endregion
+
         /// <summary>
-        /// Gets the primary object to execute logic on. Returns the live instance if it exists,
-        /// otherwise falls back to the Class Default Object (for NonInstanced abilities).
+        /// Gets the primary object to execute logic on.
         /// </summary>
         public GameplayAbility GetPrimaryInstance() => AbilityInstance ?? AbilityCDO;
 
         /// <summary>
-        /// Creates a stateful instance of the ability if required by its instancing policy.
+        /// Creates a stateful instance if required by instancing policy.
         /// </summary>
         internal void CreateInstance()
         {
@@ -77,7 +102,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
         }
 
         /// <summary>
-        /// Clears the stateful instance of the ability, returning it to the pool if necessary.
+        /// Clears the stateful instance.
         /// </summary>
         internal void ClearInstance()
         {
@@ -94,7 +119,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
         }
 
         /// <summary>
-        /// Called when the ability is being removed from the ASC. Ensures proper cleanup.
+        /// Called when the ability is being removed from the ASC.
         /// </summary>
         internal void OnRemoveSpec()
         {
@@ -103,7 +128,6 @@ namespace CycloneGames.GameplayAbilities.Runtime
                 if (IsActive) AbilityInstance.CancelAbility();
                 if (Ability.InstancingPolicy != EGameplayAbilityInstancingPolicy.NonInstanced)
                 {
-                    // For PerActor instances, it's returned to pool on removal.
                     PoolManager.ReturnAbility(AbilityInstance);
                 }
                 AbilityInstance = null;
@@ -111,11 +135,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
             AbilityCDO?.OnRemoveAbility();
 
             // Return self to pool
-            Ability = null;
-            Owner = null;
-            Level = 0;
-            IsActive = false;
-            pool.Push(this);
+            GASPool<GameplayAbilitySpec>.Shared.Return(this);
         }
     }
 }

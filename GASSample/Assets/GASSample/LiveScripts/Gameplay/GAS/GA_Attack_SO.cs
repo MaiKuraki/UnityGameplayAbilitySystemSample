@@ -1,187 +1,453 @@
-using System.Linq;
+using System;
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayFramework;
+using CycloneGames.GameplayFramework.Runtime;
 using CycloneGames.GameplayTags.Runtime;
 using CycloneGames.Logger;
 using CycloneGames.Utility.Runtime;
 using UnityEngine;
+using UnityEngine.Serialization;
 
 namespace GASSample.Gameplay
 {
-    public class GA_Attack : GameplayAbility
+    public interface IComboChainAbility
     {
-        private const string DEBUG_FLAG = "[GameplayAbility]";
-        private readonly GameplayEffect effect_dmg;
-        private readonly AnimationClip anim_character;
-        private readonly bool useRootMotion;
-        private readonly AnimationClip anim_camera;
-        private readonly float comboWindowDuration;
-        private bool cachedRootMotionState;
+        bool TryGetNextComboAbilityTag(out GameplayTag tag);
+    }
 
-        public GA_Attack(AnimationClip anim_character, bool useRootMotion, AnimationClip anim_camera, GameplayEffect effect_dmg, float comboWindowDuration)
+    public class GA_Attack : GameplayAbility, IComboChainAbility
+    {
+        private readonly AnimationClip animCharacter;
+        private readonly bool useRootMotion;
+        private readonly AbilityCameraClip animCamera;
+        private readonly GameplayEffect effectDamage;
+        private readonly float comboWindowDuration;
+        private readonly AttackCameraRuntimePolicy cameraPolicy;
+        private readonly GameplayTag nextComboAbilityTag;
+
+        private readonly AbilityCinematicMode cameraModeInstance = new AbilityCinematicMode();
+        private bool cachedRootMotionState;
+        private Animator runtimeAnimator;
+        private int activationSerial;
+        private bool isSkillCameraActive;
+        private bool comboWindowTagApplied;
+        private bool nextComboTagApplied;
+        private bool runtimeStateCleaned;
+
+        public GA_Attack(
+            AnimationClip animCharacter,
+            bool useRootMotion,
+            AbilityCameraClip animCamera,
+            GameplayEffect effectDamage,
+            float comboWindowDuration,
+            AttackCameraRuntimePolicy cameraPolicy,
+            GameplayTag nextComboAbilityTag)
         {
-            this.anim_character = anim_character;
+            this.animCharacter = animCharacter;
             this.useRootMotion = useRootMotion;
-            this.anim_camera = anim_camera;
-            this.effect_dmg = effect_dmg;
+            this.animCamera = animCamera;
+            this.effectDamage = effectDamage;
             this.comboWindowDuration = comboWindowDuration;
+            this.cameraPolicy = cameraPolicy;
+            this.nextComboAbilityTag = nextComboAbilityTag;
         }
 
-        public override bool CanActivate(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec)
+        public bool TryGetNextComboAbilityTag(out GameplayTag tag)
         {
-            return base.CanActivate(actorInfo, spec);
+            tag = nextComboAbilityTag;
+            return !tag.IsNone;
         }
 
         public override void ActivateAbility(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, GameplayAbilityActivationInfo activationInfo)
         {
-            CommitAbility(actorInfo, spec);
+            activationSerial++;
+            runtimeStateCleaned = false;
+            comboWindowTagApplied = false;
+            nextComboTagApplied = false;
 
             GASSampleCharacter character = actorInfo.OwnerActor as GASSampleCharacter;
-            AbilitySystemComponent asc = character?.AbilitySystemComponent;
-
-            GASSamplePlayerController pc = (GASSamplePlayerController)character.Controller;
-            GASSampleCameraManager cm = pc?.GetCameraManager() as GASSampleCameraManager;
-            Animator cameraAnimator = cm.GetAnimator;
-
-            // Immediately clean up any orphaned combo window tag to ensure a clean state.
-            asc?.RemoveLooseGameplayTag(GameplayTagManager.RequestTag(GASSampleTags.Skill_State_ComboWindow));
-
             if (character == null)
             {
                 EndAbility();
                 return;
-
-            }
-            cachedRootMotionState = character.Animator.applyRootMotion;
-            character.Animator.applyRootMotion = useRootMotion;
-            character.Animator.CrossFade(anim_character.name, 0.1f);
-
-            if (cameraAnimator != null && anim_camera != null)
-            {
-                cameraAnimator.CrossFade(anim_camera.name, 0.1f);
             }
 
-            foreach (var tag in spec.Ability.AbilityTags)
+            CommitAbility(actorInfo, spec);
+
+            if (character.Animator != null && animCharacter != null)
             {
-                asc?.AddLooseGameplayTag(tag);
+                cachedRootMotionState = character.Animator.applyRootMotion;
+                runtimeAnimator = character.Animator;
+                character.Animator.applyRootMotion = useRootMotion;
+                character.Animator.CrossFade(animCharacter.name, 0.1f);
+            }
+            else
+            {
+                runtimeAnimator = null;
             }
 
-            if (this.CooldownEffectDefinition == null || this.CooldownEffectDefinition.Duration <= 0)
+            int serial = activationSerial;
+            var playerController = ResolvePlayerController(actorInfo.AvatarActor);
+            float animationDuration = animCharacter != null ? animCharacter.length : 0f;
+
+            StartSkillCamera(playerController);
+
+            BeginComboWindow(serial, animationDuration);
+
+            if (cameraPolicy.enableCamera
+                && animCamera != null
+                && (cameraPolicy.stopPolicy == CameraStopPolicy.ByCameraFinished
+                    || cameraPolicy.stopPolicy == CameraStopPolicy.FirstReached))
             {
-                CLogger.LogDebug($"{DEBUG_FLAG} not have Cooldown effect.");
-                character.Animator.applyRootMotion = cachedRootMotionState;
+                BeginCameraAutoStop(serial, playerController);
+            }
+
+            float activeDuration = ResolveActiveDuration(animationDuration);
+            if (activeDuration <= 0f)
+            {
+                CleanupRuntimeState(serial, playerController);
                 EndAbility();
                 return;
             }
 
-            float cooldownDuration = this.CooldownEffectDefinition.Duration;
-
-            var comboWindowStartTask = AbilityTask_WaitDelay.WaitDelay(this, cooldownDuration - comboWindowDuration);
-            comboWindowStartTask.OnFinishDelay += () =>
+            var durationTask = AbilityTask_WaitDelay.WaitDelay(this, activeDuration);
+            durationTask.OnFinishDelay += () =>
             {
-                if (!comboWindowStartTask.IsCancelled)
+                if (durationTask.IsCancelled || serial != activationSerial)
                 {
-                    ComboWindowStart(asc);
+                    return;
                 }
-            };
-            comboWindowStartTask.Activate();
 
-            var comboWindowEndTask = AbilityTask_WaitDelay.WaitDelay(this, cooldownDuration);
-            comboWindowEndTask.OnFinishDelay += () =>
-            {
-                if (!comboWindowEndTask.IsCancelled)
+                if (cameraPolicy.stopPolicy == CameraStopPolicy.ByAbilityEnd
+                    || cameraPolicy.stopPolicy == CameraStopPolicy.FirstReached)
                 {
-                    ComboWindowEnd(asc);
+                    StopSkillCamera(playerController);
                 }
-                foreach (var tag in spec.Ability.AbilityTags)
-                {
-                    asc?.RemoveLooseGameplayTag(tag);
-                }
-                character.Animator.applyRootMotion = cachedRootMotionState;
+
+                CleanupRuntimeState(serial, playerController);
                 EndAbility();
             };
-            comboWindowEndTask.Activate();
+            durationTask.Activate();
         }
 
         public override void CancelAbility()
         {
-            CLogger.LogInfo($"{DEBUG_FLAG} CancelAbility");
-            var asc = this.AbilitySystemComponent;
-            if (asc != null && this.Spec != null)
-            {
-                var definitionTag = this.Spec.Ability.AbilityTags.GetTags().FirstOrDefault();
-                if (definitionTag != null)
-                {
-                    asc.RemoveLooseGameplayTag(definitionTag);
-                }
-            }
-            GASSampleCharacter character = Spec?.Ability?.ActorInfo.OwnerActor as GASSampleCharacter;
-            if (character) character.Animator.applyRootMotion = cachedRootMotionState;
+            CleanupRuntimeState(activationSerial, ResolvePlayerController(ActorInfo.AvatarActor));
             base.CancelAbility();
         }
 
-        void ComboWindowStart(AbilitySystemComponent asc)
+        public override void OnRemoveAbility()
         {
-            CLogger.LogInfo($"Combo Window Start");
-            asc.AddLooseGameplayTag(GameplayTagManager.RequestTag(GASSampleTags.Skill_State_ComboWindow));
-        }
-
-        void ComboWindowEnd(AbilitySystemComponent asc)
-        {
-            CLogger.LogInfo($"Combo Window End");
-            asc.RemoveLooseGameplayTag(GameplayTagManager.RequestTag(GASSampleTags.Skill_State_ComboWindow));
+            CleanupRuntimeState(activationSerial, ResolvePlayerController(ActorInfo.AvatarActor));
+            base.OnRemoveAbility();
         }
 
         public override GameplayAbility CreatePoolableInstance()
         {
-            var ability = new GA_Attack(anim_character, useRootMotion, anim_camera, effect_dmg, comboWindowDuration);
+            var ability = new GA_Attack(
+                animCharacter,
+                useRootMotion,
+                animCamera,
+                effectDamage,
+                comboWindowDuration,
+                cameraPolicy,
+                nextComboAbilityTag);
 
             ability.Initialize(
-                this.Name,
-                this.InstancingPolicy,
-                this.NetExecutionPolicy,
-                this.CostEffectDefinition,
-                this.CooldownEffectDefinition,
-                this.AbilityTags,
-                this.ActivationBlockedTags,
-                this.ActivationRequiredTags,
-                this.CancelAbilitiesWithTag,
-                this.BlockAbilitiesWithTag
-            );
+                Name,
+                InstancingPolicy,
+                NetExecutionPolicy,
+                CostEffectDefinition,
+                CooldownEffectDefinition,
+                AbilityTags,
+                ActivationBlockedTags,
+                ActivationRequiredTags,
+                CancelAbilitiesWithTag,
+                BlockAbilitiesWithTag,
+                ActivationOwnedTags,
+                ActivateAbilityOnGranted,
+                SourceRequiredTags,
+                SourceBlockedTags,
+                TargetRequiredTags,
+                TargetBlockedTags,
+                AbilityTriggers as System.Collections.Generic.List<AbilityTriggerData>);
 
             return ability;
+        }
+
+        private void StartSkillCamera(PlayerController playerController)
+        {
+            if (!cameraPolicy.enableCamera || isSkillCameraActive || playerController == null || animCamera == null)
+            {
+                return;
+            }
+
+            while (playerController.RemoveCameraMode(cameraModeInstance))
+            {
+            }
+
+            float blendOutDuration = cameraPolicy.blendOutDuration > 0f ? cameraPolicy.blendOutDuration : 0.15f;
+            cameraModeInstance.Setup(animCamera, blendOutDuration);
+            if (playerController.TryPushCameraMode(cameraModeInstance))
+            {
+                isSkillCameraActive = true;
+            }
+        }
+
+        private void StopSkillCamera(PlayerController playerController)
+        {
+            if (!isSkillCameraActive)
+            {
+                return;
+            }
+
+            if (playerController == null)
+            {
+                isSkillCameraActive = false;
+                return;
+            }
+
+            bool removedAny = false;
+            while (playerController.RemoveCameraMode(cameraModeInstance))
+            {
+                removedAny = true;
+            }
+
+            if (removedAny)
+            {
+                isSkillCameraActive = false;
+            }
+        }
+
+        private void BeginCameraAutoStop(int serial, PlayerController playerController)
+        {
+            float delay = Mathf.Max(0f, GetCameraClipDuration());
+            var waitTask = AbilityTask_WaitDelay.WaitDelay(this, delay);
+            waitTask.OnFinishDelay += () =>
+            {
+                if (waitTask.IsCancelled || serial != activationSerial)
+                {
+                    return;
+                }
+
+                PollCameraStop(serial, playerController, 0f);
+            };
+            waitTask.Activate();
+        }
+
+        private void PollCameraStop(int serial, PlayerController playerController, float elapsed)
+        {
+            if (serial != activationSerial || !isSkillCameraActive)
+            {
+                return;
+            }
+
+            bool finished = cameraModeInstance.IsFinished;
+            bool settled = !cameraPolicy.requireSettledBeforeRemove || cameraModeInstance.IsSettled(
+                cameraPolicy.settledPositionEpsilon,
+                cameraPolicy.settledFovEpsilon,
+                cameraPolicy.defaultFov > 0f ? cameraPolicy.defaultFov : 60f);
+
+            if (finished && settled)
+            {
+                StopSkillCamera(playerController);
+                return;
+            }
+
+            float timeout = Mathf.Max(0.01f, cameraPolicy.stopSettleTimeout);
+            if (elapsed >= timeout)
+            {
+                StopSkillCamera(playerController);
+                return;
+            }
+
+            float interval = Mathf.Max(0.01f, cameraPolicy.stopCheckInterval);
+            var waitTask = AbilityTask_WaitDelay.WaitDelay(this, interval);
+            waitTask.OnFinishDelay += () =>
+            {
+                if (waitTask.IsCancelled || serial != activationSerial)
+                {
+                    return;
+                }
+
+                PollCameraStop(serial, playerController, elapsed + interval);
+            };
+            waitTask.Activate();
+        }
+
+        private void CleanupRuntimeState(int serial, PlayerController playerController)
+        {
+            if (runtimeStateCleaned || serial != activationSerial)
+            {
+                return;
+            }
+
+            runtimeStateCleaned = true;
+            CloseComboWindow();
+            StopSkillCamera(playerController);
+
+            if (runtimeAnimator != null)
+            {
+                runtimeAnimator.applyRootMotion = cachedRootMotionState;
+                runtimeAnimator = null;
+            }
+        }
+
+        private void BeginComboWindow(int serial, float animationDuration)
+        {
+            if (comboWindowDuration <= 0f)
+            {
+                return;
+            }
+
+            float delay = Mathf.Max(0f, animationDuration - comboWindowDuration);
+            var waitTask = AbilityTask_WaitDelay.WaitDelay(this, delay);
+            waitTask.OnFinishDelay += () =>
+            {
+                if (waitTask.IsCancelled || serial != activationSerial)
+                {
+                    return;
+                }
+
+                OpenComboWindow();
+            };
+            waitTask.Activate();
+        }
+
+        private void OpenComboWindow()
+        {
+            if (comboWindowTagApplied || AbilitySystemComponent == null)
+            {
+                return;
+            }
+
+            AbilitySystemComponent.CombinedTags.AddTag(GASSampleTags.Skill_State_ComboWindow);
+            comboWindowTagApplied = true;
+
+            if (!nextComboAbilityTag.IsNone)
+            {
+                AbilitySystemComponent.CombinedTags.AddTag(nextComboAbilityTag);
+                nextComboTagApplied = true;
+            }
+        }
+
+        private void CloseComboWindow()
+        {
+            if (!comboWindowTagApplied || AbilitySystemComponent == null)
+            {
+                return;
+            }
+
+            AbilitySystemComponent.CombinedTags.RemoveTag(GASSampleTags.Skill_State_ComboWindow);
+            comboWindowTagApplied = false;
+
+            if (nextComboTagApplied)
+            {
+                AbilitySystemComponent.CombinedTags.RemoveTag(nextComboAbilityTag);
+                nextComboTagApplied = false;
+            }
+        }
+
+        private float ResolveActiveDuration(float animationDuration)
+        {
+            return Mathf.Max(0f, animationDuration);
+        }
+
+        private float GetCameraClipDuration()
+        {
+            return animCamera != null ? animCamera.GetTotalDuration() : 0f;
+        }
+
+        private static PlayerController ResolvePlayerController(object avatarActor)
+        {
+            if (avatarActor is PlayerController pc)
+            {
+                return pc;
+            }
+
+            if (avatarActor is Pawn pawn)
+            {
+                return pawn.Controller as PlayerController;
+            }
+
+            if (avatarActor is Component component)
+            {
+                var pawnComponent = component.GetComponent<Pawn>();
+                if (pawnComponent != null)
+                {
+                    return pawnComponent.Controller as PlayerController;
+                }
+
+                return component.GetComponent<PlayerController>();
+            }
+
+            if (avatarActor is GameObject go)
+            {
+                var pawnFromGo = go.GetComponent<Pawn>();
+                if (pawnFromGo != null)
+                {
+                    return pawnFromGo.Controller as PlayerController;
+                }
+
+                return go.GetComponent<PlayerController>();
+            }
+
+            return null;
         }
     }
 
     [CreateAssetMenu(fileName = "GA_Attack", menuName = "GASSample/Gameplay/GAS/GA/Attack")]
     public class GA_Attack_SO : GameplayAbilitySO
     {
-        [PropertyGroup("Additional Config", true)]
-        [SerializeField] private GameplayEffectSO DmgEffect;
-        [SerializeField] private AnimationClip Anim_Character;
-        [SerializeField] private bool bUseRootMotion = true;
-        [SerializeField] private AnimationClip Anim_Camera;
-        [SerializeField] private float ComboWindowDuration = 0.2f;
+        [Header("Attack")]
+        [FormerlySerializedAs("Anim_Character")]
+        [SerializeField] private AnimationClip animCharacter;
+        [SerializeField] private bool useRootMotion = true;
+        [FormerlySerializedAs("DmgEffect")]
+        [SerializeField] private GameplayEffectSO damageEffect;
+        [FormerlySerializedAs("ComboWindowDuration")]
+        [SerializeField, Min(0f)] private float comboWindowDuration = 0.5f;
+        [FormerlySerializedAs("NextComboAbility")]
+        [SerializeField] private GameplayAbilitySO nextComboAbility;
+
+        [Header("Camera")]
+        [FormerlySerializedAs("Anim_Camera")]
+        [SerializeField] private AbilityCameraClip cameraClip;
+        [SerializeField] private AttackCameraRuntimePolicySO cameraPolicy;
 
         public override GameplayAbility CreateAbility()
         {
-            var effect_dmg = DmgEffect ? DmgEffect.GetGameplayEffect() : null;
-            var ability = new GA_Attack(Anim_Character, bUseRootMotion, Anim_Camera, effect_dmg, ComboWindowDuration);
+            var runtimePolicy = cameraPolicy != null ? cameraPolicy.Value : AttackCameraRuntimePolicy.Default;
+            var runtimeDamageEffect = damageEffect ? damageEffect.GetGameplayEffect() : null;
+            var nextComboTag = ResolveFirstAbilityTag(nextComboAbility);
 
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
+            var ability = new GA_Attack(
+                animCharacter,
+                useRootMotion,
+                cameraClip,
+                runtimeDamageEffect,
+                comboWindowDuration,
+                runtimePolicy,
+                nextComboTag);
+
+            InitializeAbility(ability);
 
             return ability;
+        }
+
+        private static GameplayTag ResolveFirstAbilityTag(GameplayAbilitySO abilitySO)
+        {
+            if (abilitySO == null || abilitySO.AbilityTags == null || abilitySO.AbilityTags.IsEmpty)
+            {
+                return default;
+            }
+
+            foreach (var tag in abilitySO.AbilityTags.GetExplicitTags())
+            {
+                return tag;
+            }
+
+            return default;
         }
     }
 }

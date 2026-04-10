@@ -81,6 +81,14 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   initialLifeSpanSec: 0
+  bCanBeDamaged: 1
+  bHidden: 0
+  tags: []
+  bUseControllerRotationPitch: 0
+  bUseControllerRotationYaw: 0
+  bUseControllerRotationRoll: 0
+  baseEyeHeight: 0.8
+  pawnConfig: {fileID: 0}
   <Animator>k__BackingField: {fileID: 8674566816488383285}
   InitialAttributes: {fileID: 11400000, guid: 4859eb649f451e145b39509482c05076, type: 2}
   InitialAbilities:
@@ -91,6 +99,8 @@ MonoBehaviour:
   - {fileID: 11400000, guid: 1e996b879c2d77d4daf188b5615bc75d, type: 2}
   LevelUpData: {fileID: 11400000, guid: f3fc0c4f14604eb4892179fe0ead72c8, type: 2}
   CameraFocusTF: {fileID: 4159062362017834748}
+  comboEntryAbilityTag:
+    m_Name: Skill.Definition.Attack_1
 --- !u!95 &8674566816488383285
 Animator:
   serializedVersion: 5

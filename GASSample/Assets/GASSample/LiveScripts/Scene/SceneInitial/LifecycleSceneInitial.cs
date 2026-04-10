@@ -57,8 +57,8 @@ namespace GASSample.Scene
 
             var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
 
-            graphicsSettingService.ChangeRenderResolution(1080);
-            graphicsSettingService.ChangeApplicationFrameRate(60);
+            graphicsSettingService.SetRenderResolution(1080);
+            graphicsSettingService.SetTargetFrameRate(60);
 
             await assetResolver.InitializeAsync(assetModule);
 

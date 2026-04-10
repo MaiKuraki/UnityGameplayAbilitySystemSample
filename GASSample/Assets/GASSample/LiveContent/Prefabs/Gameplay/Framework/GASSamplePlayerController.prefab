@@ -44,3 +44,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5b7d88cdad324d34db39ac24bd3c9eed, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  initialLifeSpanSec: 0
+  bCanBeDamaged: 1
+  bHidden: 0
+  tags: []
+  bAutoManageActiveCameraTarget: 1
+  followDistance: 3
+  pivotHeight: 1.6
+  lookAtHeight: 1.1
+  overrideFov: 60

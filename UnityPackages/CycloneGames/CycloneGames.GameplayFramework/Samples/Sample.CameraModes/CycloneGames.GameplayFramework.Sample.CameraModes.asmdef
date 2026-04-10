@@ -1,0 +1,17 @@
+{
+    "name": "CycloneGames.GameplayFramework.Sample.CameraModes",
+    "rootNamespace": "",
+    "references": [
+        "CycloneGames.GameplayFramework.Runtime",
+        "Unity.Mathematics"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

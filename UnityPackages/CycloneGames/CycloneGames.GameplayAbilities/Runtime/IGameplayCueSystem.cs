@@ -1,3 +1,5 @@
+using System.Threading;
+using CycloneGames.GameplayAbilities.Core;
 using CycloneGames.GameplayTags.Runtime;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
@@ -5,14 +7,21 @@ using UnityEngine;
 namespace CycloneGames.GameplayAbilities.Runtime
 {
     /// <summary>
+    /// Represents a loaded asset handle that must be disposed when no longer needed.
+    /// This allows the underlying asset management system to properly track and evict unused assets.
+    /// </summary>
+    public interface IResourceHandle<T> : System.IDisposable where T : Object
+    {
+        T Asset { get; }
+    }
+
+    /// <summary>
     /// Defines the contract for a system that can asynchronously load assets.
     /// This decouples the rest of the system from a specific implementation like Addressables.
     /// </summary>
     public interface IResourceLocator
     {
-        UniTask<T> LoadAssetAsync<T>(object key) where T : Object;
-        void ReleaseAsset(object key);
-        void ReleaseAll();
+        UniTask<IResourceHandle<T>> LoadAssetAsync<T>(object key, string bucket = null, string cacheTag = null, string cacheOwner = null, CancellationToken cancellationToken = default) where T : Object;
     }
 
     /// <summary>
@@ -20,21 +29,13 @@ namespace CycloneGames.GameplayAbilities.Runtime
     /// </summary>
     public interface IGameObjectPoolManager
     {
-        UniTask<GameObject> GetAsync(object assetRef, Vector3 position, Quaternion rotation, Transform parent = null);
+        UniTask<GameObject> GetAsync(object assetRef, Vector3 position, Quaternion rotation, Transform parent = null, string bucket = null, string cacheTag = null, string cacheOwner = null);
         void Release(GameObject instance);
         void Shutdown();
     }
 
-    /// <summary>
-    /// Describes the type of event that triggered a GameplayCue.
-    /// </summary>
-    public enum EGameplayCueEvent
-    {
-        OnActive,
-        WhileActive,
-        Removed,
-        Executed
-    }
+    // EGameplayCueEvent is canonically defined in Core/GASInterfaces.cs.
+    // Re-export here so Runtime consumers can use it without importing Core namespace.
 
     /// <summary>
     /// A data structure passed to GameplayCues, providing context about the event.

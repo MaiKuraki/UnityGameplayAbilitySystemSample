@@ -32,11 +32,12 @@ namespace CycloneGames.GameplayAbilities.Sample
             // Play sound effect
             if (!string.IsNullOrEmpty(ImpactSound))
             {
-                var audioClip = await GameplayCueManager.Instance.ResourceLocator.LoadAssetAsync<AudioClip>(ImpactSound);
+                var audioClipHandle = await GameplayCueManager.Default.ResourceLocator.LoadAssetAsync<AudioClip>(ImpactSound);
+                var audioClip = audioClipHandle?.Asset;
                 if (audioClip)
                 {
                     AudioSource.PlayClipAtPoint(audioClip, parameters.TargetObject.transform.position);
-                    GameplayCueManager.Instance.ResourceLocator.ReleaseAsset(ImpactSound);
+                    audioClipHandle?.Dispose();
                 }
             }
         }

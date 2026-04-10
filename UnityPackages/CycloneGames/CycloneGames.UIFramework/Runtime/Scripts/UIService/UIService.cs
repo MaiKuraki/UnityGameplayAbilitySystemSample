@@ -3,6 +3,7 @@ using Cysharp.Threading.Tasks;
 using CycloneGames.Factory.Runtime;             // For IUnityObjectSpawner
 using CycloneGames.Service.Runtime;             // For IMainCameraService
 using CycloneGames.AssetManagement.Runtime;     // For IAssetPathBuilderFactory
+using CycloneGames.Logger;
 
 namespace CycloneGames.UIFramework.Runtime
 {
@@ -35,7 +36,7 @@ namespace CycloneGames.UIFramework.Runtime
         /// </summary>
         /// <param name="windowName">The name of the UI window.</param>
         /// <returns>The UIWindow instance if found and active, otherwise null.</returns>
-        UIWindow GetUIWindow(string windowName); // Renamed from GetUIPage for consistency
+        UIWindow GetUIWindow(string windowName); // Renamed from GetUIWindow for consistency
 
         // Optional: Methods to manage UI camera stacking if not handled internally by UIManager
         // void AddUICameraToMainCameraStack();
@@ -43,27 +44,70 @@ namespace CycloneGames.UIFramework.Runtime
 
         (float, float) GetRootCanvasSize();
 
+        /// <summary>
+        /// Gets the UI Camera from the UIRoot.
+        /// </summary>
+        /// <returns>The UI Camera if available, otherwise null.</returns>
+        UnityEngine.Camera GetUICamera();
+
         void Initialize(IAssetPathBuilderFactory factory, IUnityObjectSpawner spawner, IMainCameraService cameraService);
         void Initialize(IAssetPathBuilderFactory factory, IUnityObjectSpawner spawner, IMainCameraService cameraService, IAssetPackage package);
+
+        /// <summary>
+        /// Returns the active navigation service, or null if none has been set.
+        /// </summary>
+        IUINavigationService NavigationService { get; }
+
+        /// <summary>
+        /// Attaches an IUINavigationService. The service will be notified automatically
+        /// when any window opens or closes through this UIService.
+        /// </summary>
+        void SetNavigationService(IUINavigationService nav);
+
+        /// <summary>Returns the active transition coordinator, or null if none.</summary>
+        IUITransitionCoordinator TransitionCoordinator { get; }
+
+        /// <summary>
+        /// Attaches a coordinator for simultaneous two-window transitions.
+        /// Pass null to fall back to sequential (independent) animations.
+        /// </summary>
+        void SetTransitionCoordinator(IUITransitionCoordinator coordinator);
+
+        /// <summary>
+        /// Sets the strategy for handling rapid sequential coordinated navigations.
+        /// <see cref="CoordinatedNavStrategy.DirectJump"/>: skip intermediate pages.
+        /// <see cref="CoordinatedNavStrategy.CardStack"/>: overlapping cascading transitions.
+        /// </summary>
+        void SetCoordinatedNavStrategy(CoordinatedNavStrategy strategy);
+
+        /// <summary>
+        /// Navigates from <paramref name="fromWindow"/> to <paramref name="toWindow"/> using the
+        /// active IUITransitionCoordinator. Falls back to sequential OpenUI when no coordinator is set.
+        /// </summary>
+        Cysharp.Threading.Tasks.UniTask CoordinatedNavigateAsync(
+            string fromWindow, string toWindow,
+            NavigationDirection direction = NavigationDirection.Forward,
+            System.Threading.CancellationToken ct = default);
     }
 
     public class UIService : IDisposable, IUIService
     {
         private const string DEBUG_FLAG = "[UIService]";
         private UIManager uiManagerInstance;
+        private bool _ownsUIManager; // true when UIService created the UIManager (DontDestroyOnLoad)
 
-        // Dependencies are injected via constructor
+        // Dependencies
         private IAssetPathBuilderFactory assetPathBuilderFactory;
         private IUnityObjectSpawner objectSpawner;
         private IMainCameraService mainCameraService;
 
         private bool isInitialized = false;
 
-        // Default constructor might be used if service locator pattern is used elsewhere to provide dependencies later.
-        // However, constructor injection is generally preferred for clarity of dependencies.
+        /// <summary>
+        /// Default constructor. Call Initialize() to complete setup.
+        /// </summary>
         public UIService()
         {
-            //  You must Initialize UIService
             isInitialized = false;
         }
 
@@ -88,7 +132,7 @@ namespace CycloneGames.UIFramework.Runtime
         {
             if (isInitialized)
             {
-                UnityEngine.Debug.LogWarning($"{DEBUG_FLAG} UIService already initialized. Operation aborted.");
+                CLogger.LogWarning($"{DEBUG_FLAG} UIService already initialized. Operation aborted.");
                 return;
             }
             if (factory == null) throw new ArgumentNullException(nameof(factory));
@@ -133,7 +177,7 @@ namespace CycloneGames.UIFramework.Runtime
         {
             if (isInitialized)
             {
-                UnityEngine.Debug.LogWarning($"{DEBUG_FLAG} UIService already initialized. Operation aborted.");
+                CLogger.LogWarning($"{DEBUG_FLAG} UIService already initialized. Operation aborted.");
                 return;
             }
             if (factory == null) throw new ArgumentNullException(nameof(factory));
@@ -160,11 +204,12 @@ namespace CycloneGames.UIFramework.Runtime
                 UnityEngine.GameObject managerObject = new UnityEngine.GameObject("UIManager_RuntimeInstance");
                 uiManagerInstance = managerObject.AddComponent<UIManager>();
                 UnityEngine.Object.DontDestroyOnLoad(managerObject); // Make it persist across scene loads
-                UnityEngine.Debug.Log($"{DEBUG_FLAG} UIManager instance created and marked DontDestroyOnLoad.");
+                _ownsUIManager = true;
+                CLogger.LogInfo($"{DEBUG_FLAG} UIManager instance created and marked DontDestroyOnLoad.");
             }
             else
             {
-                UnityEngine.Debug.Log($"{DEBUG_FLAG} Found existing UIManager instance in the scene.");
+                CLogger.LogInfo($"{DEBUG_FLAG} Found existing UIManager instance in the scene.");
             }
 
             // Initialize the UIManager instance with the provided dependencies.
@@ -176,7 +221,7 @@ namespace CycloneGames.UIFramework.Runtime
         {
             if (!isInitialized || uiManagerInstance == null)
             {
-                UnityEngine.Debug.LogError($"{DEBUG_FLAG} UIService or UIManager is not initialized. Operation aborted.");
+                CLogger.LogError($"{DEBUG_FLAG} UIService or UIManager is not initialized. Operation aborted.");
                 return false;
             }
             return true;
@@ -249,13 +294,16 @@ namespace CycloneGames.UIFramework.Runtime
 
         public void Dispose()
         {
-            UnityEngine.Debug.Log($"{DEBUG_FLAG} Disposing UIService.");
+            CLogger.LogInfo($"{DEBUG_FLAG} Disposing UIService.");
+            _navigationService?.Dispose();
+            _navigationService = null;
+            _transitionCoordinator = null;
             if (uiManagerInstance != null)
             {
-                // Decide if UIService disposing should destroy the UIManager GameObject.
-                // If UIManager is a persistent singleton, maybe not.
-                // If UIManager is tied to this UIService instance's lifetime, then yes.
-                // UnityEngine.Object.Destroy(uiManagerInstance.gameObject);
+                if (_ownsUIManager)
+                {
+                    UnityEngine.Object.Destroy(uiManagerInstance.gameObject);
+                }
                 uiManagerInstance = null;
             }
             isInitialized = false;
@@ -265,10 +313,55 @@ namespace CycloneGames.UIFramework.Runtime
         {
             if (!CheckInitialization())
             {
-                UnityEngine.Debug.LogError($"{DEBUG_FLAG} UIService is not initialized. Operation aborted.");
+                CLogger.LogError($"{DEBUG_FLAG} UIService is not initialized. Operation aborted.");
                 return (0, 0);
             }
             return uiManagerInstance.GetRootCanvasSize();
+        }
+
+        public UnityEngine.Camera GetUICamera()
+        {
+            if (!CheckInitialization())
+            {
+                CLogger.LogError($"{DEBUG_FLAG} UIService is not initialized. Operation aborted.");
+                return null;
+            }
+            return uiManagerInstance.GetUICamera();
+        }
+
+        public IUINavigationService NavigationService => _navigationService;
+        private IUINavigationService _navigationService;
+
+        public void SetNavigationService(IUINavigationService nav)
+        {
+            _navigationService = nav;
+            if (uiManagerInstance != null)
+                uiManagerInstance.SetNavigationService(nav);
+        }
+
+        public IUITransitionCoordinator TransitionCoordinator => _transitionCoordinator;
+        private IUITransitionCoordinator _transitionCoordinator;
+
+        public void SetTransitionCoordinator(IUITransitionCoordinator coordinator)
+        {
+            _transitionCoordinator = coordinator;
+            if (uiManagerInstance != null)
+                uiManagerInstance.SetTransitionCoordinator(coordinator);
+        }
+
+        public void SetCoordinatedNavStrategy(CoordinatedNavStrategy strategy)
+        {
+            if (uiManagerInstance != null)
+                uiManagerInstance.SetCoordinatedNavStrategy(strategy);
+        }
+
+        public async Cysharp.Threading.Tasks.UniTask CoordinatedNavigateAsync(
+            string fromWindow, string toWindow,
+            NavigationDirection direction = NavigationDirection.Forward,
+            System.Threading.CancellationToken ct = default)
+        {
+            if (!CheckInitialization()) return;
+            await uiManagerInstance.CoordinatedNavigateAsync(fromWindow, toWindow, direction, _transitionCoordinator, ct);
         }
     }
 }

@@ -1,80 +1,258 @@
+using System;
+using System.IO;
 using System.Threading.Tasks;
-using UnityEngine;
+using CycloneGames.Logger;
 using UnityEngine.Networking;
+using VYaml.Serialization;
 
 namespace CycloneGames.InputSystem.Runtime
 {
     /// <summary>
-    /// A pure C# static class responsible for loading the input configuration
-    /// and initializing the InputManager. It now supports a primary user path
-    /// and a fallback default path to enable user-specific settings.
+    /// Loads input configuration and initializes InputManager. Supports user config with default fallback.
     /// </summary>
     public static class InputSystemLoader
     {
+        private const string DEBUG_FLAG = "[InputSystemLoader]";
+
         /// <summary>
-        /// Asynchronously loads the configuration and initializes the InputManager.
-        /// It first tries to load from the userConfigUri. If that fails or the file
-        /// doesn't exist, it loads from the defaultConfigUri and then saves a copy
-        /// to the userConfigUri location.
+        /// Loads config from userConfigUri, falls back to defaultConfigUri if not found.
         /// </summary>
-        /// <param name="defaultConfigUri">The URI for the default, read-only configuration (e.g., from StreamingAssets).</param>
-        /// <param name="userConfigUri">The URI for the user-specific, writable configuration (e.g., in PersistentDataPath).</param>
         public static async Task InitializeAsync(string defaultConfigUri, string userConfigUri)
         {
             string yamlContent = null;
+            string defaultYamlContent = null;
             bool loadedFromUserConfig = false;
+            bool userConfigCorrupted = false;
 
-            // 1. Try to load from the user-specific configuration path first.
-            if (!string.IsNullOrEmpty(userConfigUri))
+            // Always load default config first for fallback
+            if (!string.IsNullOrEmpty(defaultConfigUri))
             {
-                (bool success, string content) = await LoadConfigFromUriAsync(userConfigUri);
-                if (success)
-                {
-                    yamlContent = content;
-                    loadedFromUserConfig = true;
-                    Debug.Log($"[InputSystemLoader] Successfully loaded user config from: {userConfigUri}");
-                }
-            }
-
-            // 2. If user config failed to load, fall back to the default configuration.
-            if (string.IsNullOrEmpty(yamlContent))
-            {
-                if (string.IsNullOrEmpty(defaultConfigUri))
-                {
-                    Debug.LogError("[InputSystemLoader] Both user and default config URIs are invalid. Initialization failed.");
-                    return;
-                }
-                
                 (bool success, string content) = await LoadConfigFromUriAsync(defaultConfigUri);
                 if (success)
                 {
-                    yamlContent = content;
-                    Debug.Log($"[InputSystemLoader] Loaded default config from: {defaultConfigUri}. Will create user copy.");
-                }
-                else
-                {
-                    Debug.LogError($"[InputSystemLoader] CRITICAL: Failed to load both user and default configurations. Input system will not function.");
-                    return;
+                    defaultYamlContent = content;
+                    CLogger.LogInfo($"{DEBUG_FLAG} Loaded default config from: {defaultConfigUri}");
                 }
             }
 
-            // 3. Initialize the manager with the loaded content.
+            // Try loading user config
+            if (!string.IsNullOrEmpty(userConfigUri))
+            {
+                (bool success, string content) = await LoadConfigFromUriAsync(userConfigUri);
+                if (success && !string.IsNullOrEmpty(content))
+                {
+                    // Validate user config before use
+                    if (ValidateYamlContent(content))
+                    {
+                        yamlContent = content;
+                        loadedFromUserConfig = true;
+                        CLogger.LogInfo($"{DEBUG_FLAG} Loaded and validated user config from: {userConfigUri}");
+                    }
+                    else
+                    {
+                        CLogger.LogWarning($"{DEBUG_FLAG} User config is corrupted or invalid, will use default config. Uri: {userConfigUri}");
+                        userConfigCorrupted = true;
+                        
+                        // Delete corrupted user config file
+                        TryDeleteCorruptedUserConfig(userConfigUri);
+                    }
+                }
+            }
+
+            // Fallback to default config
+            if (string.IsNullOrEmpty(yamlContent))
+            {
+                if (string.IsNullOrEmpty(defaultYamlContent))
+                {
+                    CLogger.LogError($"{DEBUG_FLAG} Both config URIs invalid. Initialization failed.");
+                    return;
+                }
+                yamlContent = defaultYamlContent;
+            }
+
             if (!string.IsNullOrEmpty(yamlContent))
             {
                 InputManager.Instance.Initialize(yamlContent, userConfigUri);
-
-                // 4. If we loaded from the default config, save it as the initial user config.
-                if (!loadedFromUserConfig)
+                
+                // Save user config if: not loaded from user config OR user config was corrupted
+                if (!loadedFromUserConfig || userConfigCorrupted)
                 {
                     await InputManager.Instance.SaveUserConfigurationAsync();
+                    CLogger.LogInfo($"{DEBUG_FLAG} Saved fresh user config.");
                 }
             }
         }
 
         /// <summary>
-        /// Helper method to perform a UnityWebRequest to get text content from a URI.
+        /// Validates YAML content by attempting to parse it.
+        /// Returns true if valid, false if corrupted/invalid.
         /// </summary>
-        /// <returns>A tuple containing success status and file content.</returns>
+        private static bool ValidateYamlContent(string yamlContent)
+        {
+            if (string.IsNullOrEmpty(yamlContent)) return false;
+
+            try
+            {
+                // Normalize line endings to handle cross-platform issues (Windows CRLF vs Unix LF)
+                string normalizedContent = NormalizeLineEndings(yamlContent);
+                
+                // Try to parse the YAML
+                var config = YamlSerializer.Deserialize<InputConfiguration>(System.Text.Encoding.UTF8.GetBytes(normalizedContent));
+                if (config == null || config.PlayerSlots == null) return false;
+
+#if UNITY_EDITOR
+                // Schema fingerprint check: editor-only, not needed in shipped builds
+                if (config.SchemaFingerprint != InputSchemaFingerprint.Current)
+                {
+                    CLogger.LogWarning($"{DEBUG_FLAG} Schema fingerprint mismatch: file has [{config.SchemaFingerprint ?? "none"}], current is [{InputSchemaFingerprint.Current}]. " +
+                                       "Some settings may use default values. Re-save in editor to upgrade.");
+                }
+#endif
+
+                return true;
+            }
+            catch (Exception e)
+            {
+                CLogger.LogWarning($"{DEBUG_FLAG} YAML validation failed: {e.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Normalizes line endings to Unix-style (LF only) for cross-platform compatibility.
+        /// </summary>
+        private static string NormalizeLineEndings(string content)
+        {
+            if (string.IsNullOrEmpty(content)) return content;
+            // Replace CRLF with LF, then any remaining CR with LF
+            return content.Replace("\r\n", "\n").Replace("\r", "\n");
+        }
+
+        /// <summary>
+        /// Resets user configuration to default. Deletes user config file and reinitializes with default config.
+        /// Cross-platform compatible: Windows, macOS, Linux, Android, iOS, WebGL.
+        /// </summary>
+        /// <param name="defaultConfigUri">URI to default config (e.g., StreamingAssets)</param>
+        /// <param name="userConfigUri">URI to user config (e.g., PersistentData)</param>
+        /// <returns>True if reset was successful</returns>
+        public static async Task<bool> ResetToDefaultAsync(string defaultConfigUri, string userConfigUri)
+        {
+            if (string.IsNullOrEmpty(defaultConfigUri))
+            {
+                CLogger.LogError($"{DEBUG_FLAG} Cannot reset: defaultConfigUri is null or empty.");
+                return false;
+            }
+
+            bool deleteSuccess = TryDeleteUserConfigFile(userConfigUri);
+            if (!deleteSuccess)
+            {
+                CLogger.LogWarning($"{DEBUG_FLAG} Failed to delete user config, but will continue with reset.");
+            }
+
+            await InitializeAsync(defaultConfigUri, userConfigUri);
+            
+            CLogger.LogInfo($"{DEBUG_FLAG} Reset to default configuration completed.");
+            return true;
+        }
+
+        /// <summary>
+        /// Deletes user config file. Cross-platform compatible.
+        /// </summary>
+        /// <param name="userConfigUri">URI to user config file</param>
+        /// <returns>True if deletion was successful or file didn't exist</returns>
+        public static bool TryDeleteUserConfigFile(string userConfigUri)
+        {
+            if (string.IsNullOrEmpty(userConfigUri))
+            {
+                return true; // Nothing to delete
+            }
+
+            try
+            {
+#if UNITY_WEBGL && !UNITY_EDITOR
+                // WebGL: Use PlayerPrefs-based storage or IndexedDB
+                // Since we can't directly delete files in WebGL, we mark it for recreation
+                string key = GetPlayerPrefsKeyFromUri(userConfigUri);
+                if (UnityEngine.PlayerPrefs.HasKey(key))
+                {
+                    UnityEngine.PlayerPrefs.DeleteKey(key);
+                    UnityEngine.PlayerPrefs.Save();
+                    CLogger.LogInfo($"{DEBUG_FLAG} Deleted user config from PlayerPrefs: {key}");
+                }
+                return true;
+#else
+                // All other platforms: Standard file deletion
+                string filePath = GetFilePathFromUri(userConfigUri);
+                if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                    CLogger.LogInfo($"{DEBUG_FLAG} Deleted user config file: {filePath}");
+                }
+                return true;
+#endif
+            }
+            catch (Exception e)
+            {
+                CLogger.LogWarning($"{DEBUG_FLAG} Failed to delete user config: {e.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Extracts file path from URI. Handles different URI formats for cross-platform compatibility.
+        /// </summary>
+        private static string GetFilePathFromUri(string uri)
+        {
+            if (string.IsNullOrEmpty(uri)) return null;
+
+            try
+            {
+                // Handle file:// URIs
+                if (uri.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+                {
+                    return new Uri(uri).LocalPath;
+                }
+                
+                // Handle direct paths (Android, iOS, etc.)
+                if (uri.StartsWith("/") || (uri.Length > 1 && uri[1] == ':'))
+                {
+                    return uri;
+                }
+
+                // Try parsing as URI
+                if (Uri.TryCreate(uri, UriKind.Absolute, out Uri parsedUri))
+                {
+                    return parsedUri.LocalPath;
+                }
+
+                return uri;
+            }
+            catch (Exception e)
+            {
+                CLogger.LogWarning($"{DEBUG_FLAG} Failed to parse URI '{uri}': {e.Message}");
+                return null;
+            }
+        }
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        /// <summary>
+        /// Generates a deterministic PlayerPrefs key from URI for WebGL storage.
+        /// Uses FNV-1a instead of string.GetHashCode() which is non-deterministic across IL2CPP runs.
+        /// </summary>
+        private static string GetPlayerPrefsKeyFromUri(string uri)
+        {
+            return $"InputConfig_{InputHashUtility.GetDeterministicHashCode(uri):X8}";
+        }
+#endif
+
+        /// <summary>
+        /// Attempts to delete a corrupted user config file.
+        /// </summary>
+        private static void TryDeleteCorruptedUserConfig(string userConfigUri)
+        {
+            TryDeleteUserConfigFile(userConfigUri);
+        }
+
         private static async Task<(bool, string)> LoadConfigFromUriAsync(string uri)
         {
             using (UnityWebRequest uwr = UnityWebRequest.Get(uri))
@@ -87,26 +265,22 @@ namespace CycloneGames.InputSystem.Runtime
                         await Task.Yield();
                     }
 
-                    // For file paths, "Not Found" is a common, valid case (e.g., user runs for the first time).
-                    // We treat it as a non-successful load but not a critical error.
                     if (uwr.result == UnityWebRequest.Result.Success)
                     {
                         return (true, uwr.downloadHandler.text);
                     }
                     else
                     {
-                        // Log other types of errors (e.g., malformed URI, connection issues).
-                        // Don't log "Not Found" as an error since it's an expected fallback condition.
-                        if(!uwr.error.ToLower().Contains("not found"))
+                        if (!uwr.error.ToLower().Contains("not found"))
                         {
-                            Debug.LogWarning($"[InputSystemLoader] Failed to load from '{uri}': {uwr.error}");
+                            CLogger.LogWarning($"{DEBUG_FLAG} Failed to load from '{uri}': {uwr.error}");
                         }
                         return (false, null);
                     }
                 }
                 catch (System.Exception e)
                 {
-                    Debug.LogError($"[InputSystemLoader] An exception occurred while loading from '{uri}': {e.Message}");
+                    CLogger.LogError($"{DEBUG_FLAG} Exception loading from '{uri}': {e.Message}");
                     return (false, null);
                 }
             }

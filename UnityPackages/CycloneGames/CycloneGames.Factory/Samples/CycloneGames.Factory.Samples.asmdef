@@ -3,10 +3,12 @@
     "rootNamespace": "",
     "references": [
         "UniTask",
-        "CycloneGames.Factory.Runtime",
         "Unity.Burst",
         "Unity.Mathematics",
-        "Unity.Collections"
+        "Unity.Collections",
+        "Unio",
+        "CycloneGames.Factory.Runtime",
+        "CycloneGames.Factory.DOD.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

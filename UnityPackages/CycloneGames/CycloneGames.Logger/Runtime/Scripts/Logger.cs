@@ -56,9 +56,11 @@ namespace CycloneGames.Logger
             }
             catch
             {
-                // Fallback for platforms that do not support background threads
                 _processor = new SingleThreadLogProcessor(this);
             }
+
+            LogMessagePool.Prewarm();
+            Util.StringBuilderPool.Prewarm();
         }
 
         /// <summary>
@@ -197,6 +199,7 @@ namespace CycloneGames.Logger
 
             lock (_filterLock)
             {
+                currentFilter = _currentLogFilter;
                 switch (currentFilter)
                 {
                     case LogFilter.LogWhiteList: return _whiteList.Contains(category);
@@ -268,7 +271,6 @@ namespace CycloneGames.Logger
             catch (InvalidOperationException) { /* Ignore if shutting down. */ }
         }
 
-        // Zero/min-GC-friendly overloads that build messages only when logging is enabled.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void EnqueueMessage(LogLevel level, Action<StringBuilder> messageBuilder, string category, string filePath, int lineNumber, string memberName)
         {
@@ -341,22 +343,13 @@ namespace CycloneGames.Logger
             {
                 for (int i = 0; i < _loggers.Count; i++)
                 {
-                    var logger = _loggers[i];
                     try
                     {
-                        switch (logMessage.Level)
-                        {
-                            case LogLevel.Trace: logger.LogTrace(logMessage); break;
-                            case LogLevel.Debug: logger.LogDebug(logMessage); break;
-                            case LogLevel.Info: logger.LogInfo(logMessage); break;
-                            case LogLevel.Warning: logger.LogWarning(logMessage); break;
-                            case LogLevel.Error: logger.LogError(logMessage); break;
-                            case LogLevel.Fatal: logger.LogFatal(logMessage); break;
-                        }
+                        _loggers[i].Log(logMessage);
                     }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"[CRITICAL] CLogger: Logger {logger.GetType().Name} failed. {ex.Message}");
+                        Console.Error.WriteLine($"[CRITICAL] CLogger: Logger {_loggers[i].GetType().Name} failed. {ex.Message}");
                     }
                 }
             }

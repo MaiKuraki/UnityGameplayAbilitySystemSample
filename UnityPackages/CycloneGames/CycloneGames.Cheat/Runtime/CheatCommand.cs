@@ -15,7 +15,7 @@ namespace CycloneGames.Cheat.Runtime
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public CheatCommand(string inCommandId)
         {
-            CommandID = inCommandId;
+            CommandID = inCommandId ?? throw new ArgumentNullException(nameof(inCommandId));
         }
     }
 
@@ -27,11 +27,14 @@ namespace CycloneGames.Cheat.Runtime
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public CheatCommand(string inCommandId, in T arg)
         {
-            CommandID = inCommandId;
+            CommandID = inCommandId ?? throw new ArgumentNullException(nameof(inCommandId));
             Arg = arg;
         }
     }
 
+    /// <summary>
+    /// Class-argument command. Heap-allocated - prefer struct variants when possible.
+    /// </summary>
     public sealed class CheatCommandClass<T> : ICheatCommand where T : class
     {
         public string CommandID { get; }
@@ -40,7 +43,7 @@ namespace CycloneGames.Cheat.Runtime
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public CheatCommandClass(string inCommandId, T arg)
         {
-            CommandID = inCommandId;
+            CommandID = inCommandId ?? throw new ArgumentNullException(nameof(inCommandId));
             Arg = arg ?? throw new ArgumentNullException(nameof(arg));
         }
     }
@@ -55,7 +58,7 @@ namespace CycloneGames.Cheat.Runtime
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public CheatCommand(string inCommandId, in T1 arg1, in T2 arg2)
         {
-            CommandID = inCommandId;
+            CommandID = inCommandId ?? throw new ArgumentNullException(nameof(inCommandId));
             Arg1 = arg1;
             Arg2 = arg2;
         }
@@ -72,7 +75,7 @@ namespace CycloneGames.Cheat.Runtime
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public CheatCommand(string inCommandId, in T1 arg1, in T2 arg2, in T3 arg3)
         {
-            CommandID = inCommandId;
+            CommandID = inCommandId ?? throw new ArgumentNullException(nameof(inCommandId));
             Arg1 = arg1;
             Arg2 = arg2;
             Arg3 = arg3;

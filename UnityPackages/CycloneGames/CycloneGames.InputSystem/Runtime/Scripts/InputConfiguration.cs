@@ -8,12 +8,10 @@ namespace CycloneGames.InputSystem.Runtime
         Unknown,
         KeyboardMouse,
         Gamepad,
+        Touchscreen,
         Other
     }
-    /// <summary>
-    /// Explicit value type for an input action. This removes brittle heuristics and
-    /// enables zero-GC routing with precise action wiring.
-    /// </summary>
+
     public enum ActionValueType
     {
         Button,
@@ -22,11 +20,29 @@ namespace CycloneGames.InputSystem.Runtime
     }
 
     /// <summary>
+    /// Input update mode: Event-driven (only on value change) or Polling (every frame).
+    /// Polling is recommended for continuous inputs like mouse delta or analog sticks.
+    /// </summary>
+    public enum InputUpdateMode
+    {
+        EventDriven,  // Only trigger when value changes (default, efficient for buttons/discrete inputs)
+        Polling       // Poll every frame (required for smooth continuous inputs like mouse delta)
+    }
+
+    /// <summary>
     /// Represents the root of the YAML input configuration file.
     /// </summary>
     [YamlObject]
     public partial class InputConfiguration
     {
+        /// <summary>
+        /// Schema fingerprint stamped at save time. Automatically computed from the [YamlMember] structure
+        /// via <see cref="InputSchemaFingerprint"/>. Changes whenever a field is added, removed, renamed,
+        /// retyped, or an enum value changes — no manual version bumping required.
+        /// </summary>
+        [YamlMember("schemaFingerprint")]
+        public string SchemaFingerprint { get; set; }
+
         // A template configuration for each possible player slot.
         [YamlMember("playerSlots")]
         public List<PlayerSlotConfig> PlayerSlots { get; set; }
@@ -52,9 +68,6 @@ namespace CycloneGames.InputSystem.Runtime
         public List<ContextDefinitionConfig> Contexts { get; set; }
     }
 
-    /// <summary>
-    /// Defines a single input context, its associated action map, and its action bindings.
-    /// </summary>
     [YamlObject]
     public partial class ContextDefinitionConfig
     {
@@ -63,14 +76,11 @@ namespace CycloneGames.InputSystem.Runtime
 
         [YamlMember("actionMap")]
         public string ActionMap { get; set; }
-        
+
         [YamlMember("bindings")]
         public List<ActionBindingConfig> Bindings { get; set; }
     }
 
-    /// <summary>
-    /// Defines an action and its corresponding raw device input paths.
-    /// </summary>
     [YamlObject]
     public partial class ActionBindingConfig
     {
@@ -79,17 +89,27 @@ namespace CycloneGames.InputSystem.Runtime
 
         [YamlMember("action")]
         public string ActionName { get; set; }
-        
+
         [YamlMember("deviceBindings")]
         public List<string> DeviceBindings { get; set; }
 
-        // Optional: when set (> 0) and Type == Button, emits a separate long-press event
-        // after holding the button for at least the specified number of milliseconds.
+        /// <summary>
+        /// Input update mode. Auto-detected if not specified:
+        /// - Polling: if bindings contain "/delta" (mouse delta, etc.)
+        /// - EventDriven: otherwise (buttons, discrete inputs)
+        /// </summary>
+        [YamlMember("updateMode")]
+        public InputUpdateMode UpdateMode { get; set; } = InputUpdateMode.EventDriven;
+
+        /// <summary>
+        /// Long-press duration in milliseconds. When > 0, emits separate long-press event.
+        /// </summary>
         [YamlMember("longPressMs")]
         public int LongPressMs { get; set; }
 
-        // Optional: for Float actions (e.g., Trigger) define the actuation threshold (0-1)
-        // above which the value is considered "pressed" for long-press timing. Default 0.5.
+        /// <summary>
+        /// For Float actions: actuation threshold (0-1) for long-press timing. Default 0.5.
+        /// </summary>
         [YamlMember("longPressValueThreshold")]
         public float LongPressValueThreshold { get; set; }
     }

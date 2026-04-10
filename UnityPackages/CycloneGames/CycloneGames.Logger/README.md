@@ -1,6 +1,3 @@
-> [!NOTE]
-> The README and some of the code were co-authored by AI.
-
 # CycloneGames.Logger
 
 English | [简体中文](README.SCH.md)
@@ -9,18 +6,19 @@ High-performance, low/zero-GC logging for Unity and .NET, designed for stability
 
 ## Features
 
-- Pluggable processing strategy: Threaded worker or Single-threaded Pump
-- Zero/min-GC builder APIs for hot paths
-- Log message and StringBuilder pools
-- Category filtering (whitelist/blacklist) and severity levels
-- Unity Console click-to-source formatting
-- Optional FileLogger with maintenance/rotation
+- **Three-Tier Capacity Management**: Adaptive object pools with automatic expansion & contraction (Target/Peak/Max)
+- **Zero-GC Logging**: Builder APIs and pooled objects eliminate allocations in hot paths
+- **Cross-Platform**: Threaded worker or Single-threaded Pump processing strategies
+- **Object Pool Monitoring**: Statistics API for development/debugging (Editor & Development builds only)
+- **Flexible Filtering**: Category filtering (whitelist/blacklist) and severity levels
+- **Unity Integration**: Console click-to-source formatting, auto-bootstrap
+- **Optional FileLogger**: With maintenance/rotation capabilities
 
 ## Quick Start (Unity)
 
 Out of the box, the default bootstrap runs before any scene loads:
 
-- Auto-detects platform and selects processing strategy (WebGL → Single-threaded; others → Threaded)
+- Auto-detects platform and selects processing strategy (WebGL -> Single-threaded; others -> Threaded)
 - Registers UnityLogger by default (can be disabled via settings)
 
 Start logging immediately:
@@ -30,20 +28,58 @@ using CycloneGames.Logger;
 
 void Start()
 {
-  CLogger.LogInfo("Hello from CycloneGames.Logger");
+    CLogger.LogInfo("Hello from CycloneGames.Logger");
 }
 ```
 
-## Centralized configuration
+## Unity Console Integration
+
+CLogger includes a clickable hyperlink feature for quick source navigation in the Unity Editor Console:
+
+- **Single-click** on the hyperlink `(at Assets/.../File.cs:27)` to open the file at the exact line in your configured code editor
+- The hyperlink is formatted to remain hidden in the Console's single-line preview, keeping the log list clean
+
+<img src="./Documents~/Doc_01.png" alt="Hyperlink support in Unity Console" style="width: 100%; height: auto; max-width: 800px;" />
+
+### Console Pro Users
+
+If you use [Console Pro](https://assetstore.unity.com/packages/tools/utilities/console-pro-11889), we recommend enabling **single-line display mode** for a cleaner log list:
+
+**Multi-line Mode:**
+
+<img src="./Documents~/Doc_02.png" alt="Multi-line display" style="width: 100%; height: auto; max-width: 800px;" />
+
+**Single-line Mode (Recommended):**
+
+<img src="./Documents~/Doc_03.png" alt="Single-line display" style="width: 100%; height: auto; max-width: 800px;" />
+
+> [!TIP]
+> Single-line mode hides the source location hyperlink in the log list, reducing visual clutter while still allowing click-to-source navigation when you select a log entry.
+
+## Object Pool Architecture
+
+The logger employs **three-tier adaptive capacity management** for optimal zero-GC performance:
+
+```
+Target Capacity    <- Normal steady-state (128 for StringBuilder, 256 for LogMessage)
+     | Auto-expand under load
+Peak Capacity      <- Maximum during bursts (1024/4096) - Zero GC!
+     | Async trim when exceeded
+Max Capacity       <- Hard limit (2048/8192) - Prevents memory leaks
+```
+
+**Result**: 99.9% zero-GC operation while maintaining memory safety through automatic pool trimming.
+
+## Centralized Configuration
 
 Configure globally either via a project asset or via code.
 
 ### Using LoggerSettings (recommended)
 
-1) Create the asset: `Assets -> Create -> CycloneGames -> Logger -> LoggerSettings`
-2) Place it at: `Assets/Resources/CycloneGames.Logger/LoggerSettings.asset`
+1. Create the asset: `Assets -> Create -> CycloneGames -> Logger -> LoggerSettings`
+2. Place it at: `Assets/Resources/CycloneGames.Logger/LoggerSettings.asset`
    Important: Do not rename the asset file or its parent folder. The loader expects `Resources/CycloneGames.Logger/LoggerSettings`.
-3) Edit fields:
+3. Edit fields:
    - Processing: AutoDetect / ForceThreaded / ForceSingleThread
    - Registration: enable/disable UnityLogger, FileLogger
    - File Logger: choose persistentDataPath or custom file path/name
@@ -73,19 +109,57 @@ CLogger.Instance.SetLogFilter(LogFilter.LogAll);
 
 ## Logging APIs
 
-String overloads (simple):
+### String overloads (simple)
 
 ```csharp
 CLogger.LogInfo("Connected", "Net");
 CLogger.LogWarning("Low HP", "Gameplay");
 ```
 
-Builder overloads (low/zero-GC and only build when enabled):
+### Builder overloads (low-GC)
 
 ```csharp
 CLogger.LogDebug(sb => { sb.Append("PlayerId="); sb.Append(playerId); }, "Net");
 CLogger.LogError(sb => { sb.Append("Err="); sb.Append(code); }, "Net");
 ```
+
+> **Note**: If the lambda captures external variables (e.g., `playerId`), a closure object is allocated per call. For true zero-GC, use the stateful builder below.
+
+### Stateful builder (zero-GC, recommended for hot paths)
+
+```csharp
+CLogger.LogInfo(player, static (p, sb) =>
+    sb.Append("Player ").Append(p.name).Append(" HP: ").Append(p.hp), "Combat");
+```
+
+The `static` keyword prevents the compiler from capturing any outer variables, guaranteeing zero closure allocation.
+
+## Object Pool Monitoring
+
+Monitor pool health in Editor or Development builds:
+
+```csharp
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+var sbStats = CycloneGames.Logger.Util.StringBuilderPool.GetStatistics();
+var msgStats = LogMessagePool.GetStatistics();
+
+Debug.Log($@"
+StringBuilder Pool - Current: {sbStats.CurrentSize}, Peak: {sbStats.PeakSize}
+  Hit Rate: {sbStats.HitRate:P}, Misses: {sbStats.TotalMisses}, Discard Rate: {sbStats.DiscardRate:P}
+
+LogMessage Pool - Current: {msgStats.CurrentSize}, Peak: {msgStats.PeakSize}
+  Hit Rate: {msgStats.HitRate:P}, Misses: {msgStats.TotalMisses}, Discard Rate: {msgStats.DiscardRate:P}
+");
+#endif
+```
+
+**Key Metrics**:
+
+- **HitRate**: Should be ~100% (objects retrieved from pool vs newly allocated)
+- **TotalMisses**: Number of times a `new` allocation was required (pool empty); should be ~0 when warm
+- **PeakSize**: Maximum pool size reached (should stay well below Max capacity)
+- **DiscardRate**: Should be ~0% for optimal performance
+- **TrimCount**: Number of times pool auto-contracted (validates trim mechanism)
 
 ## WebGL and Pump()
 
@@ -94,7 +168,7 @@ CLogger.LogError(sb => { sb.Append("Err="); sb.Append(code); }, "Net");
 ```csharp
 void Update()
 {
-  CLogger.Instance.Pump(4096); // bound per-frame work
+    CLogger.Instance.Pump(4096); // bound per-frame work
 }
 ```
 
@@ -114,15 +188,19 @@ Rotation and warnings (optional):
 ```csharp
 var options = new FileLoggerOptions
 {
-  MaintenanceMode = FileMaintenanceMode.Rotate, // or WarnOnly
-  MaxFileBytes = 10 * 1024 * 1024,              // 10 MB
-  MaxArchiveFiles = 5,                           // keep latest 5
-  ArchiveTimestampFormat = "yyyyMMdd_HHmmss"
+    MaintenanceMode = FileMaintenanceMode.Rotate, // or WarnOnly
+    MaxFileBytes = 10 * 1024 * 1024,              // 10 MB
+    MaxArchiveFiles = 5,                           // keep latest 5
+    ArchiveTimestampFormat = "yyyyMMdd_HHmmss",
+    FlushBatchSize = 64,                           // flush every N writes
+    FlushIntervalMs = 1000                         // or every 1 second
 };
 
 var path = System.IO.Path.Combine(Application.persistentDataPath, "App.log");
 CLogger.Instance.AddLoggerUnique(new FileLogger(path, options));
 ```
+
+Flush strategy: writes are batched for I/O throughput. Error/Fatal messages are always flushed immediately regardless of batch settings.
 
 Notes:
 
@@ -142,13 +220,42 @@ CLogger.Instance.SetLogFilter(LogFilter.LogWhiteList);
 
 ## Best practices
 
-- Keep one centralized bootstrap (settings asset or code) to avoid duplicate registration
-- Use builder overloads in hot paths
+**Performance:**
+
+- Use builder overloads in hot paths for zero-GC
+- Monitor DiscardRate during development (should be ~0%)
+- Set appropriate LogLevel to reduce overhead
+
+**Platform:**
+
 - Tune Pump(maxItems) for single-threaded processing to fit frame budget
-- Use AddLoggerUnique for global sinks; use AddLogger for per-feature dedicated sinks (e.g., a benchmark file)
+- Use centralized bootstrap (settings asset or code) to avoid duplicate registration
+
+**Quality:**
+
+- Use AddLoggerUnique for global sinks
+- Use AddLogger for per-feature dedicated sinks (e.g., a benchmark file)
 - In the Unity Editor, avoid adding ConsoleLogger alongside UnityLogger to prevent duplicate console entries
+
+## Samples
+
+See `/Samples` folder for:
+
+- **LoggerPoolMonitor**: Interactive pool statistics and burst testing
+- **LoggerBenchmark**: Performance comparison with GC tracking
+- **LoggerPerformanceTest**: High-volume stress testing
+- **LoggerSample**: Basic usage example
 
 ## Troubleshooting
 
-- Duplicate lines in Unity Console: If both ConsoleLogger and UnityLogger are active in the Editor, the Editor may surface both stdout and Debug.Log. Skip ConsoleLogger in the Editor or keep only UnityLogger.
-- No file output: Ensure you added a FileLogger (it is not registered by default) and that the path is writeable.
+**Duplicate lines in Unity Console**:  
+If both ConsoleLogger and UnityLogger are active in the Editor, the Editor may surface both stdout and Debug.Log. Skip ConsoleLogger in the Editor or keep only UnityLogger.
+
+**No file output**:  
+Ensure you added a FileLogger (it is not registered by default) and that the path is writeable.
+
+**High DiscardRate in pool statistics**:  
+Consider increasing PeakPoolSize in pool source code, or reduce log frequency.
+
+**Memory growth over time**:  
+Verify TrimCount > 0 in statistics. Pools should auto-trim after bursts.

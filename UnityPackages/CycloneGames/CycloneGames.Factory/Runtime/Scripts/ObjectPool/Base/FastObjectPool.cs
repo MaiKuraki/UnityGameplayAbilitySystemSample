@@ -11,9 +11,10 @@ namespace CycloneGames.Factory.Runtime
     /// - Smart auto-shrink logic based on usage peaks.
     /// - Minimal GC overhead.
     /// </summary>
-    public abstract class FastObjectPool<T> : IMemoryPool<T> where T : class
+    public abstract class FastObjectPool<T> : IMemoryPool<T>, IDisposable where T : class
     {
         protected readonly Stack<T> _pool;
+        private bool _disposed;
 
         public int NumTotal => NumActive + NumInactive;
         public int NumActive { get; protected set; }
@@ -30,15 +31,19 @@ namespace CycloneGames.Factory.Runtime
         /// </summary>
         public int MinCapacity { get; set; } = 16;
 
-        // How many despawns to wait before checking if we should shrink.
         private const int kCheckInterval = 128;
-        // The pool tries to keep capacity at PeakActive * BufferRatio.
         private const float kBufferRatio = 1.25f;
-        // Limit how many items can be destroyed in a single frame/check to prevent spikes.
         private const int kMaxDestroyPerCheck = 8;
 
         private int _peakActiveSinceLastCheck = 0;
         private int _despawnCounter = 0;
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private long _totalGets = 0;
+        private long _totalReturns = 0;
+        private long _totalDiscards = 0;
+        private int _peakActive = 0;
+#endif
 
         protected FastObjectPool(int initialCapacity = 16)
         {
@@ -50,6 +55,8 @@ namespace CycloneGames.Factory.Runtime
 
         public T Spawn()
         {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
             T item;
             while (_pool.Count > 0)
             {
@@ -59,16 +66,30 @@ namespace CycloneGames.Factory.Runtime
                     NumActive++;
                     TrackPeak();
                     OnSpawn(item);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    _totalGets++;
+                    int peak = _peakActive;
+                    if (NumActive > peak)
+                    {
+                        _peakActive = NumActive;
+                    }
+#endif
                     return item;
                 }
-                // If item is invalid (e.g. destroyed externally), it's just dropped here.
             }
 
-            // Pool empty or all popped items were invalid
             item = CreateNew();
             NumActive++;
             TrackPeak();
             OnSpawn(item);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            _totalGets++;
+            int peakCheck = _peakActive;
+            if (NumActive > peakCheck)
+            {
+                _peakActive = NumActive;
+            }
+#endif
             return item;
         }
 
@@ -82,7 +103,6 @@ namespace CycloneGames.Factory.Runtime
 
         public void Despawn(T item)
         {
-            // Crucial check: If the item is already destroyed (Unity fake null), discard it.
             if (!IsValid(item))
             {
                 if (NumActive > 0) NumActive--;
@@ -91,16 +111,28 @@ namespace CycloneGames.Factory.Runtime
 
             NumActive--;
 
-            // If pool is too full, destroy immediately to prevent overflow.
-            if (MaxCapacity > 0 && _pool.Count >= MaxCapacity)
+            if (_disposed)
             {
                 OnDespawn(item);
                 DestroyItem(item);
                 return;
             }
 
+            if (MaxCapacity > 0 && _pool.Count >= MaxCapacity)
+            {
+                OnDespawn(item);
+                DestroyItem(item);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                _totalDiscards++;
+#endif
+                return;
+            }
+
             OnDespawn(item);
             _pool.Push(item);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            _totalReturns++;
+#endif
 
             _despawnCounter++;
             if (_despawnCounter >= kCheckInterval)
@@ -190,6 +222,11 @@ namespace CycloneGames.Factory.Runtime
 
         public void ExpandBy(int num)
         {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (MaxCapacity > 0)
+            {
+                num = Math.Min(num, Math.Max(0, MaxCapacity - _pool.Count));
+            }
             for (int i = 0; i < num; i++)
             {
                 T item = CreateNew();
@@ -206,5 +243,67 @@ namespace CycloneGames.Factory.Runtime
                 if (IsValid(item)) DestroyItem(item);
             }
         }
+
+        /// <summary>
+        /// Spreads pool warmup across multiple frames to avoid lag spikes on low-end devices.
+        /// Use with StartCoroutine in Unity or iterate manually in pure C#.
+        /// </summary>
+        public System.Collections.IEnumerator WarmupCoroutine(int count, int batchSize = 8)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (_disposed) yield break;
+                if (MaxCapacity > 0 && _pool.Count >= MaxCapacity) yield break;
+                T item = CreateNew();
+                OnDespawn(item);
+                _pool.Push(item);
+                if ((i + 1) % batchSize == 0) yield return null;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            Dispose(true);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (disposing) Clear();
+        }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        public PoolStatistics GetStatistics()
+        {
+            return new PoolStatistics
+            {
+                NumActive = NumActive,
+                NumInactive = NumInactive,
+                TotalGets = _totalGets,
+                TotalReturns = _totalReturns,
+                TotalDiscards = _totalDiscards,
+                PeakActive = _peakActive
+            };
+        }
+
+        public void ResetStatistics()
+        {
+            _totalGets = 0;
+            _totalReturns = 0;
+            _totalDiscards = 0;
+            _peakActive = 0;
+        }
+
+        public struct PoolStatistics
+        {
+            public int NumActive;
+            public int NumInactive;
+            public long TotalGets;
+            public long TotalReturns;
+            public long TotalDiscards;
+            public int PeakActive;
+        }
+#endif
     }
 }

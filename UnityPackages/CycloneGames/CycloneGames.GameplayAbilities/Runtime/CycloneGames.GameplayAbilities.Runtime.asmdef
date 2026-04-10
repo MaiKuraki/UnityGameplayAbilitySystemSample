@@ -6,7 +6,8 @@
         "CycloneGames.Logger",
         "CycloneGames.Factory.Runtime",
         "CycloneGames.AssetManagement.Runtime",
-        "CycloneGames.GameplayTags.Runtime"
+        "CycloneGames.GameplayTags.Runtime",
+        "CycloneGames.GameplayAbilities.Core"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

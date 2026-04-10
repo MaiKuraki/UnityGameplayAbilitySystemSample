@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+using CycloneGames.GameplayAbilities.Core;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
@@ -14,10 +14,12 @@ namespace CycloneGames.GameplayAbilities.Runtime
         void Reset();
     }
 
-    public class GameplayEffectContext : IGameplayEffectContext
+    /// <summary>
+    /// Context object carrying metadata about an effect's application.
+    /// Pooled via GASPool for zero-allocation runtime.
+    /// </summary>
+    public class GameplayEffectContext : IGameplayEffectContext, IGASPoolable
     {
-        private static readonly Stack<GameplayEffectContext> pool = new Stack<GameplayEffectContext>(64);
-
         public AbilitySystemComponent Instigator { get; private set; }
         public GameplayAbility AbilityInstance { get; private set; }
         public TargetData TargetData { get; private set; }
@@ -25,10 +27,19 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         public GameplayEffectContext() { }
 
-        internal static GameplayEffectContext Get()
+        #region IGASPoolable Implementation
+
+        void IGASPoolable.OnGetFromPool()
         {
-            return pool.Count > 0 ? pool.Pop() : new GameplayEffectContext();
+            // Initialization happens via AddInstigator/AddTargetData
         }
+
+        void IGASPoolable.OnReturnToPool()
+        {
+            Reset();
+        }
+
+        #endregion
 
         public void AddInstigator(AbilitySystemComponent instigator, GameplayAbility abilityInstance)
         {
@@ -49,10 +60,12 @@ namespace CycloneGames.GameplayAbilities.Runtime
             PredictionKey = default;
         }
 
+        /// <summary>
+        /// Returns this context to the pool.
+        /// </summary>
         public void ReturnToPool()
         {
-            Reset();
-            pool.Push(this);
+            GASPool<GameplayEffectContext>.Shared.Return(this);
         }
     }
 }

@@ -15,6 +15,7 @@ namespace GASSample.Gameplay
         [Inject] IWorld world;
 
         [SerializeField] private Transform CameraFocusTF;
+        [SerializeField] private GameplayTag comboEntryAbilityTag = GASSampleTags.Skill_Definition_Attack_1;
 
         protected override void Awake()
         {
@@ -33,30 +34,72 @@ namespace GASSample.Gameplay
 
             if (Input.GetMouseButtonDown(0))
             {
-                if (AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_State_ComboWindow))
-                {
-                    if (AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_Definition_Attack_2))
-                    {
-                        TryActiveAbilityByTag(GASSampleTags.Skill_Definition_Attack_3);
-                    }
-                    else if (AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_Definition_Attack_1))
-                    {
-                        TryActiveAbilityByTag(GASSampleTags.Skill_Definition_Attack_2);
-                    }
-                }
-                else
-                {
-                    bool isAnyAttackActive = 
-                        AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_Definition_Attack_1) ||
-                        AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_Definition_Attack_2) ||
-                        AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_Definition_Attack_3);
+                HandleAttackInput();
+            }
+        }
 
-                    if (!isAnyAttackActive)
-                    {
-                        TryActiveAbilityByTag(GASSampleTags.Skill_Definition_Attack_1);
-                    }
+        private void HandleAttackInput()
+        {
+            if (AbilitySystemComponent == null)
+            {
+                return;
+            }
+
+            bool inComboWindow = AbilitySystemComponent.CombinedTags.Contains(GASSampleTags.Skill_State_ComboWindow);
+            if (inComboWindow && TryActivateNextComboAbility())
+            {
+                return;
+            }
+
+            bool isAnyAttackActive = HasActiveComboAbility();
+            if (!isAnyAttackActive)
+            {
+                TryActiveAbilityByTag(comboEntryAbilityTag);
+            }
+        }
+
+        private bool HasActiveComboAbility()
+        {
+            if (AbilitySystemComponent == null)
+            {
+                return false;
+            }
+
+            var abilities = AbilitySystemComponent.GetActivatableAbilities();
+            foreach (var abilitySpec in abilities)
+            {
+                if (abilitySpec.IsActive && abilitySpec.Ability is IComboChainAbility)
+                {
+                    return true;
                 }
             }
+
+            return false;
+        }
+
+        private bool TryActivateNextComboAbility()
+        {
+            if (AbilitySystemComponent == null)
+            {
+                return false;
+            }
+
+            var abilities = AbilitySystemComponent.GetActivatableAbilities();
+            foreach (var abilitySpec in abilities)
+            {
+                if (!abilitySpec.IsActive)
+                {
+                    continue;
+                }
+
+                if (abilitySpec.Ability is IComboChainAbility comboAbility
+                    && comboAbility.TryGetNextComboAbilityTag(out GameplayTag nextTag))
+                {
+                    return TryActiveAbilityByTag(nextTag);
+                }
+            }
+
+            return false;
         }
 
         public override void PossessedBy(Controller NewController)
@@ -130,18 +173,24 @@ namespace GASSample.Gameplay
             }
         }
 
-        private void TryActiveAbilityByTag(GameplayTag tag)
+        private bool TryActiveAbilityByTag(GameplayTag tag)
         {
+            if (AbilitySystemComponent == null || tag.IsNone)
+            {
+                return false;
+            }
+
             var abilities = AbilitySystemComponent.GetActivatableAbilities();
             foreach (var abilitySpec in abilities)
             {
                 if (abilitySpec.Ability != null && abilitySpec.Ability.AbilityTags.HasTag(tag))
                 {
                     AbilitySystemComponent.CombinedTags.RemoveTag(GASSampleTags.Skill_Cooldown_Attack);
-                    AbilitySystemComponent.TryActivateAbility(abilitySpec);
-                    return;
+                    return AbilitySystemComponent.TryActivateAbility(abilitySpec);
                 }
             }
+
+            return false;
         }
 
         private void OnHealthChanged(float oldValue, float newValue)

@@ -1,6 +1,5 @@
 using System.Collections.Generic;
 using CycloneGames.GameplayTags.Runtime;
-using CycloneGames.Logger;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
@@ -8,16 +7,12 @@ namespace CycloneGames.GameplayAbilities.Runtime
     /// Represents a stateful, runtime instance of a GameplayEffect.
     /// This class encapsulates all the necessary context for an effect's application,
     /// such as its source, target, level, and pre-calculated modifier magnitudes.
-    /// It acts as a "live" version of the stateless GameplayEffect definition.
-    /// This object is designed to be pooled for high performance, minimizing garbage collection.
+    /// Designed to be pooled for high performance using GASPool.
     /// </summary>
-    public class GameplayEffectSpec
+    public class GameplayEffectSpec : IGASPoolable
     {
-        // object pool, reducing GC overhead during gameplay.
-        private static readonly Stack<GameplayEffectSpec> pool = new Stack<GameplayEffectSpec>(32);
-
         /// <summary>
-        /// The stateless definition (template) of this effect. Contains all the core data like duration, modifiers, tags, etc.
+        /// The stateless definition (template) of this effect.
         /// </summary>
         public GameplayEffect Def { get; private set; }
 
@@ -32,99 +27,57 @@ namespace CycloneGames.GameplayAbilities.Runtime
         public AbilitySystemComponent Target { get; private set; }
 
         /// <summary>
-        /// A context object carrying metadata about the effect's application, such as the instigating ability and targeting data.
+        /// A context object carrying metadata about the effect's application.
         /// </summary>
         public IGameplayEffectContext Context { get; private set; }
 
         /// <summary>
-        /// The level at which this effect spec was created. Used for calculating level-scalable magnitudes.
+        /// The level at which this effect spec was created.
         /// </summary>
         public int Level { get; private set; }
 
         /// <summary>
-        /// The duration for this specific instance of the effect. Initialized from the definition but can potentially be modified.
+        /// The duration for this specific instance of the effect.
         /// </summary>
         public float Duration { get; private set; }
 
-        // Optimization: Use raw arrays instead of List for maximum performance (direct memory access).
-        // These arrays act as buffers. Their Length might be larger than the actual modifier count.
-        // We rely on Def.Modifiers.Count to know how many elements are valid.
+        // Raw arrays for maximum performance (direct memory access)
         public float[] ModifierMagnitudes = System.Array.Empty<float>();
         public GameplayAttribute[] TargetAttributes = System.Array.Empty<GameplayAttribute>();
 
+        /// <summary>
+        /// Tags added at runtime to this specific spec instance, supplementing the definition's GrantedTags.
+        /// UE5: FGameplayEffectSpec::DynamicGrantedTags.
+        /// These tags are granted to the target in addition to Def.GrantedTags.
+        /// </summary>
+        public GameplayTagContainer DynamicGrantedTags { get; } = new GameplayTagContainer();
+
+        /// <summary>
+        /// Tags added at runtime to this specific spec instance, supplementing the definition's AssetTags.
+        /// UE5: FGameplayEffectSpec::DynamicAssetTags.
+        /// These tags describe this specific instance and can be used for immunity/removal checks.
+        /// </summary>
+        public GameplayTagContainer DynamicAssetTags { get; } = new GameplayTagContainer();
+
+        // SetByCaller magnitude storage
         private readonly Dictionary<GameplayTag, float> setByCallerMagnitudes = new Dictionary<GameplayTag, float>();
+        private readonly Dictionary<string, float> setByCallerMagnitudesByName = new Dictionary<string, float>(System.StringComparer.Ordinal);
 
-        // Private constructor to enforce creation via the pooling system.
-        private GameplayEffectSpec() { }
+        public GameplayEffectSpec() { }
 
-        /// <summary>
-        /// Factory method to create or retrieve a GameplayEffectSpec from the pool.
-        /// This is the primary way to instantiate a new effect spec.
-        /// </summary>
-        /// <param name="def">The stateless GameplayEffect definition.</param>
-        /// <param name="source">The AbilitySystemComponent applying the effect.</param>
-        /// <param name="level">The level to create the effect at.</param>
-        /// <returns>An initialized GameplayEffectSpec instance.</returns>
-        public static GameplayEffectSpec Create(GameplayEffect def, AbilitySystemComponent source, int level = 1)
+        #region IGASPoolable Implementation
+
+        void IGASPoolable.OnGetFromPool()
         {
-            var spec = pool.Count > 0 ? pool.Pop() : new GameplayEffectSpec();
-            spec.Def = def;
-            spec.Source = source;
-            spec.Level = level;
-            spec.Duration = def.Duration;
-
-            // Acquire a context object (likely also pooled) from the source ASC's factory.
-            spec.Context = source.MakeEffectContext();
-            // Set the instigator of this effect. The ability instance can be null if the effect is not applied from an ability.
-            spec.Context.AddInstigator(source, null);
-
-            // Ensure capacity without creating new List objects
-            int modCount = def.Modifiers.Count;
-            spec.EnsureCapacity(modCount);
-
-            // Pre-calculate the magnitude of all modifiers based on the spec's level and context at creation time.
-            for (int i = 0; i < modCount; i++)
-            {
-                var mod = def.Modifiers[i];
-                float magnitude;
-                if (mod.CustomCalculation != null)
-                {
-                    magnitude = mod.CustomCalculation.CalculateMagnitude(spec);
-                }
-                else
-                {
-                    magnitude = mod.Magnitude.GetValueAtLevel(level);
-                }
-
-                // Direct array access - Fastest possible write
-                spec.ModifierMagnitudes[i] = magnitude;
-                spec.TargetAttributes[i] = null; // Reset target attribute cache
-            }
-            return spec;
+            // Initialization happens in Initialize() after pool retrieval
         }
 
-        private void EnsureCapacity(int count)
+        void IGASPoolable.OnReturnToPool()
         {
-            if (ModifierMagnitudes.Length < count)
-            {
-                // Expand array. In a pooled system, this only happens during "warmup".
-                // We double the required size or pick a minimum to reduce future resizes.
-                int newSize = System.Math.Max(count, ModifierMagnitudes.Length == 0 ? 8 : ModifierMagnitudes.Length * 2);
-                System.Array.Resize(ref ModifierMagnitudes, newSize);
-                System.Array.Resize(ref TargetAttributes, newSize);
-            }
-        }
-
-        /// <summary>
-        /// Resets the spec's state and returns it to the object pool.
-        /// This is essential for preventing memory leaks and ensuring instances are clean for reuse.
-        /// </summary>
-        public void ReturnToPool()
-        {
-            // If the context itself is a pooled object, ensure it's returned to its own pool.
+            // Return nested context to its pool
             if (Context is GameplayEffectContext pooledContext)
             {
-                pooledContext.ReturnToPool();
+                GASPool<GameplayEffectContext>.Shared.Return(pooledContext);
             }
 
             Def = null;
@@ -134,36 +87,81 @@ namespace CycloneGames.GameplayAbilities.Runtime
             Level = 0;
             Duration = 0;
 
-            // Fast clear of references to avoid memory leaks
+            // Fast clear of references
             System.Array.Clear(TargetAttributes, 0, TargetAttributes.Length);
-
             setByCallerMagnitudes.Clear();
+            setByCallerMagnitudesByName.Clear();
+            DynamicGrantedTags.Clear();
+            DynamicAssetTags.Clear();
+        }
 
-            pool.Push(this);
+        #endregion
+
+        #region Factory Methods
+
+        /// <summary>
+        /// Factory method to create or retrieve a GameplayEffectSpec from the pool.
+        /// </summary>
+        public static GameplayEffectSpec Create(GameplayEffect def, AbilitySystemComponent source, int level = 1)
+        {
+            var spec = GASPool<GameplayEffectSpec>.Shared.Get();
+            spec.Initialize(def, source, level);
+            return spec;
+        }
+
+        private void Initialize(GameplayEffect def, AbilitySystemComponent source, int level)
+        {
+            Def = def;
+            Source = source;
+            Level = level;
+            Duration = def.Duration;
+
+            Context = GASPool<GameplayEffectContext>.Shared.Get();
+            Context.AddInstigator(source, null);
+
+            int modCount = def.Modifiers.Count;
+            EnsureCapacity(modCount);
+
+            for (int i = 0; i < modCount; i++)
+            {
+                var mod = def.Modifiers[i];
+                float magnitude = mod.CustomCalculation != null
+                    ? mod.CustomCalculation.CalculateMagnitude(this)
+                    : mod.Magnitude.GetValueAtLevel(level);
+
+                ModifierMagnitudes[i] = magnitude;
+                TargetAttributes[i] = null;
+            }
+        }
+
+        private void EnsureCapacity(int count)
+        {
+            if (ModifierMagnitudes.Length < count)
+            {
+                int newSize = System.Math.Max(count, ModifierMagnitudes.Length == 0 ? 8 : ModifierMagnitudes.Length * 2);
+                System.Array.Resize(ref ModifierMagnitudes, newSize);
+                System.Array.Resize(ref TargetAttributes, newSize);
+            }
         }
 
         /// <summary>
-        /// Sets a magnitude value associated with a GameplayTag. This is the "snapshotting" mechanism.
+        /// Returns this spec to the object pool.
         /// </summary>
-        /// <param name="dataTag">The GameplayTag to use as a key.</param>
-        /// <param name="magnitude">The float value to store.</param>
+        public void ReturnToPool()
+        {
+            GASPool<GameplayEffectSpec>.Shared.Return(this);
+        }
+
+        #endregion
+
+        #region SetByCaller API
+
         public void SetSetByCallerMagnitude(GameplayTag dataTag, float magnitude)
         {
-            if (dataTag.IsNone)
-            {
-                // Optional: Add a warning here if you want to prevent using invalid tags.
-                return;
-            }
+            if (dataTag.IsNone) return;
             setByCallerMagnitudes[dataTag] = magnitude;
         }
 
-        /// <summary>
-        /// Retrieves a magnitude value associated with a GameplayTag from the SetByCaller cache.
-        /// </summary>
-        /// <param name="dataTag">The GameplayTag key to look up.</param>
-        /// <param name="warnIfNotFound">If true, logs a warning if the key is not found.</param>
-        /// <param name="defaultValue">The value to return if the key is not found.</param>
-        /// <returns>The stored magnitude or the default value.</returns>
         public float GetSetByCallerMagnitude(GameplayTag dataTag, bool warnIfNotFound = true, float defaultValue = 0f)
         {
             if (setByCallerMagnitudes.TryGetValue(dataTag, out float magnitude))
@@ -173,23 +171,53 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
             if (warnIfNotFound)
             {
-                // Consider using your CLogger here
-                CLogger.LogWarning($"GetSetByCallerMagnitude: Tag '{dataTag.Name}' not found in spec for effect '{Def?.Name}'. Returning default value.");
+                GASLog.Warning($"GetSetByCallerMagnitude: Tag '{dataTag.Name}' not found in spec for effect '{Def?.Name}'.");
             }
-
             return defaultValue;
         }
 
-        /// <summary>
-        /// Retrieves the pre-calculated magnitude for a given modifier.
-        /// Using this avoids expensive re-computation during attribute recalculations.
-        /// </summary>
-        /// <param name="modifier">The modifier definition to look up.</param>
-        /// <returns>The calculated magnitude, or 0 if the modifier is not found in the cache.</returns>
+        public void SetSetByCallerMagnitude(string dataName, float magnitude)
+        {
+            if (string.IsNullOrEmpty(dataName))
+            {
+                GASLog.Warning("SetSetByCallerMagnitude: dataName cannot be null or empty.");
+                return;
+            }
+            setByCallerMagnitudesByName[dataName] = magnitude;
+        }
+
+        public float GetSetByCallerMagnitude(string dataName, bool warnIfNotFound = true, float defaultValue = 0f)
+        {
+            if (setByCallerMagnitudesByName.TryGetValue(dataName, out float magnitude))
+            {
+                return magnitude;
+            }
+
+            if (warnIfNotFound)
+            {
+                GASLog.Warning($"GetSetByCallerMagnitude: Name '{dataName}' not found in spec for effect '{Def?.Name}'.");
+            }
+            return defaultValue;
+        }
+
+        public bool HasSetByCallerMagnitude(string dataName)
+        {
+            return !string.IsNullOrEmpty(dataName) && setByCallerMagnitudesByName.ContainsKey(dataName);
+        }
+
+        public bool HasSetByCallerMagnitude(GameplayTag dataTag)
+        {
+            return !dataTag.IsNone && setByCallerMagnitudes.ContainsKey(dataTag);
+        }
+
+        #endregion
+
+        #region Magnitude Lookup
+
         public float GetCalculatedMagnitude(ModifierInfo modifier)
         {
             if (Def == null || Def.Modifiers == null) return 0f;
-            
+
             int index = -1;
             for (int i = 0; i < Def.Modifiers.Count; i++)
             {
@@ -207,9 +235,6 @@ namespace CycloneGames.GameplayAbilities.Runtime
             return 0f;
         }
 
-        /// <summary>
-        /// Retrieves the pre-calculated magnitude by index. Faster if index is known.
-        /// </summary>
         public float GetCalculatedMagnitude(int index)
         {
             if (index >= 0 && index < ModifierMagnitudes.Length)
@@ -219,16 +244,14 @@ namespace CycloneGames.GameplayAbilities.Runtime
             return 0f;
         }
 
+        #endregion
+
         /// <summary>
-        /// Assigns the target AbilitySystemComponent to this spec.
-        /// This is typically done just before the effect is applied.
+        /// Assigns the target AbilitySystemComponent and resolves attribute cache.
         /// </summary>
-        /// <param name="target">The component that will receive the effect.</param>
         public void SetTarget(AbilitySystemComponent target)
         {
             Target = target;
-            // Resolve and cache target attributes for fast lookup during recalculation.
-            // This avoids string comparisons in the hot path.
             if (Def != null && Def.Modifiers != null)
             {
                 for (int i = 0; i < Def.Modifiers.Count; i++)

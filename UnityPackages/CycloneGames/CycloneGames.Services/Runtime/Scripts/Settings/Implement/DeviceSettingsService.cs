@@ -1,119 +1,156 @@
 using System;
 using System.Buffers;
 using System.IO;
+using CycloneGames.Logger;
+using CycloneGames.Utility.Runtime;
 using UnityEngine;
 using VYaml.Parser;
 using VYaml.Emitter;
 using VYaml.Serialization;
+using Unio;
+using Unity.Collections;
 
 namespace CycloneGames.Service.Runtime
 {
     /// <summary>
-    /// A service that manages device-specific settings like graphics, audio, localization and etc.
+    /// Generic device-settings persistence with YAML serialization, version migration, and integrity checking.
+    ///
+    /// Usage:
+    ///   var provider = new GraphicsSettingsDefaultProvider();
+    ///   var service = new DeviceSettingsService<GraphicsSettingsData>("graphics.yaml", provider, "Settings");
+    ///   service.LoadSettings();
+    ///
+    ///   service.UpdateSettings((ref GraphicsSettingsData s) => s.AntiAliasingLevel = 4);
+    ///   service.SaveSettings();
     /// </summary>
-    /// <typeparam name="T">The settings data struct.</typeparam>
     public class DeviceSettingsService<T> : ISettingsService<T> where T : struct
     {
-        // A delegate that defines an action to modify a struct by reference.
-        public delegate void RefAction(ref T settings);
+        private const string DEBUG_FLAG = "[DeviceSettings]";
 
-        private const string DEBUG_FLAG = "[DeviceSettingsService]";
         private T _settings;
         private string _filePath;
         private string _tempFilePath;
+        private string _checksumFilePath;
         private YamlSerializerOptions _serializerOptions;
         private IDefaultProvider<T> _defaultProvider;
-        public bool IsInitialized { get; private set; }
-        public string cachedTypeName;
-        
-        /// <summary>
-        /// Gets a COPY of the current settings for safe reading.
-        /// </summary>
-        public T Settings => _settings;
+        private ISettingsVersionMigrator<T> _migrator;
+        private string _cachedTypeName;
 
+        public bool IsInitialized { get; private set; }
+        public T Settings => _settings;
+        public SettingsIntegrity LastLoadIntegrity { get; private set; } = SettingsIntegrity.Missing;
+
+        public event Action<T> OnSettingsChanged;
+
+        // Parameterless for DI containers that require post-construction initialization
         public DeviceSettingsService() { }
 
-        public DeviceSettingsService(string fileName, IDefaultProvider<T> defaultProvider, string basePathInPersistentDataPath = null)
+        public DeviceSettingsService(string fileName, IDefaultProvider<T> defaultProvider,
+            string subDirectory = null, ISettingsVersionMigrator<T> migrator = null)
         {
-            Initialize(fileName, defaultProvider, basePathInPersistentDataPath);
+            Initialize(fileName, defaultProvider, subDirectory, migrator);
         }
 
-        public void Initialize(string fileName, IDefaultProvider<T> defaultProvider, string basePathInPersistentDataPath = null)
+        public void Initialize(string fileName, IDefaultProvider<T> defaultProvider,
+            string subDirectory = null, ISettingsVersionMigrator<T> migrator = null)
         {
             if (IsInitialized)
             {
-                Debug.LogWarning($"{DEBUG_FLAG} Service for type '{typeof(T).FullName}' has already been initialized. Skipping re-initialization.");
+                CLogger.LogWarning($"{DEBUG_FLAG} Already initialized for type '{_cachedTypeName}'");
                 return;
             }
 
             if (string.IsNullOrEmpty(fileName))
-            {
-                Debug.LogError($"{DEBUG_FLAG} 'fileName' cannot be null or empty.");
-                throw new ArgumentException("File name must be provided for the settings service.", nameof(fileName));
-            }
+                throw new ArgumentException("File name must be provided", nameof(fileName));
 
-            _serializerOptions = new YamlSerializerOptions
-            {
-                Resolver = SettingsYamlResolver.Instance
-            };
+            _serializerOptions = new YamlSerializerOptions { Resolver = SettingsYamlResolver.Instance };
+            _cachedTypeName = typeof(T).Name;
+            _migrator = migrator;
 
-            // Path.Combine handles null or empty basePathInPersistentDataPath gracefully.
-            string directoryPath = string.IsNullOrEmpty(basePathInPersistentDataPath)
+            string directory = string.IsNullOrEmpty(subDirectory)
                 ? Application.persistentDataPath
-                : Path.Combine(Application.persistentDataPath, basePathInPersistentDataPath);
+                : Path.Combine(Application.persistentDataPath, subDirectory);
 
-            _filePath = Path.Combine(directoryPath, fileName);
+            _filePath = Path.Combine(directory, fileName);
             _tempFilePath = _filePath + ".tmp";
-
+            _checksumFilePath = _filePath + ".checksum";
             _defaultProvider = defaultProvider;
             _settings = _defaultProvider.GetDefault();
 
-            cachedTypeName = typeof(T).FullName;
             IsInitialized = true;
-
-            Debug.Log($"{DEBUG_FLAG} Initialized for type '{cachedTypeName}'. Path: {_filePath}");
+            CLogger.LogInfo($"{DEBUG_FLAG} Initialized for '{_cachedTypeName}' at: {_filePath}");
         }
 
         /// <summary>
-        /// Safely updates the internal settings using a provided action.
+        /// Zero-GC mutation via ref delegate — no struct copy.
         /// </summary>
-        /// <param name="updateAction">The action to perform on the settings.</param>
-        public void UpdateSettings(RefAction updateAction)
+        public void UpdateSettings(SettingsRefAction<T> updateAction)
         {
             if (!IsInitialized)
             {
-                Debug.LogError($"{DEBUG_FLAG} Service not initialized, cannot update settings for type '{cachedTypeName}'.");
+                CLogger.LogError($"{DEBUG_FLAG} Not initialized, cannot update '{_cachedTypeName}'");
                 return;
             }
-            // The action directly modifies the internal _settings struct.
             updateAction(ref _settings);
+            OnSettingsChanged?.Invoke(_settings);
+        }
+
+        public void ResetToDefaults()
+        {
+            if (!IsInitialized)
+            {
+                CLogger.LogError($"{DEBUG_FLAG} Not initialized, cannot reset '{_cachedTypeName}'");
+                return;
+            }
+            _settings = _defaultProvider.GetDefault();
+            OnSettingsChanged?.Invoke(_settings);
+            CLogger.LogInfo($"{DEBUG_FLAG} Reset to defaults for '{_cachedTypeName}'");
         }
 
         public void LoadSettings()
         {
             if (!IsInitialized)
             {
-                Debug.LogError($"{DEBUG_FLAG} Service for type '{cachedTypeName}' is not initialized. Cannot load settings.");
+                CLogger.LogError($"{DEBUG_FLAG} Not initialized, cannot load '{_cachedTypeName}'");
                 return;
             }
 
             if (!File.Exists(_filePath))
             {
-                Debug.Log($"{DEBUG_FLAG} Settings file not found for '{cachedTypeName}' at '{_filePath}'. Creating a new one with default values.");
-                // SaveSettings will now handle directory creation, so this call is safe.
+                CLogger.LogInfo($"{DEBUG_FLAG} Settings file not found for '{_cachedTypeName}', creating with defaults");
+                LastLoadIntegrity = SettingsIntegrity.Missing;
                 SaveSettings();
                 return;
             }
 
             try
             {
-                byte[] fileBytes = File.ReadAllBytes(_filePath);
+                using var nativeBytes = NativeFile.ReadAllBytes(_filePath);
+                byte[] fileBytes = NormalizeLineEndings(nativeBytes.ToArray());
+
+                LastLoadIntegrity = VerifyChecksum(fileBytes);
+                if (LastLoadIntegrity == SettingsIntegrity.Modified)
+                {
+                    CLogger.LogWarning($"{DEBUG_FLAG} Settings file for '{_cachedTypeName}' was modified externally (checksum mismatch)");
+                }
+
                 var parser = new YamlParser(new ReadOnlySequence<byte>(fileBytes));
                 _settings = YamlSerializer.Deserialize<T>(ref parser, _serializerOptions);
+
+                // Run version migration if migrator is provided and data needs it
+                if (_migrator != null && _migrator.NeedsMigration(in _settings))
+                {
+                    CLogger.LogInfo($"{DEBUG_FLAG} Migrating '{_cachedTypeName}' to version {_migrator.CurrentVersion}");
+                    _migrator.Migrate(ref _settings);
+                    SaveSettings();
+                }
+
+                OnSettingsChanged?.Invoke(_settings);
             }
             catch (Exception ex)
             {
-                Debug.LogError($"{DEBUG_FLAG} Failed to parse '{_filePath}' for type '{cachedTypeName}', it may be corrupted. Error: {ex.Message}. Resetting to default.");
+                CLogger.LogError($"{DEBUG_FLAG} Failed to parse '{_filePath}': {ex.Message}. Resetting to default.");
+                LastLoadIntegrity = SettingsIntegrity.Corrupted;
                 _settings = _defaultProvider.GetDefault();
                 SaveSettings();
             }
@@ -123,7 +160,7 @@ namespace CycloneGames.Service.Runtime
         {
             if (!IsInitialized)
             {
-                Debug.LogError($"{DEBUG_FLAG} Service for type '{cachedTypeName}' is not initialized. Cannot save settings.");
+                CLogger.LogError($"{DEBUG_FLAG} Not initialized, cannot save '{_cachedTypeName}'");
                 return;
             }
 
@@ -133,28 +170,112 @@ namespace CycloneGames.Service.Runtime
                 if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
                 {
                     Directory.CreateDirectory(directory);
-                    Debug.Log($"{DEBUG_FLAG} Created directory for settings: {directory}");
                 }
+
+                CleanupTempFile();
 
                 var bufferWriter = new ArrayBufferWriter<byte>();
                 var emitter = new Utf8YamlEmitter(bufferWriter);
 
                 YamlSerializer.Serialize(ref emitter, _settings, _serializerOptions);
 
-                using (var fs = new FileStream(_tempFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
-                {
-                    fs.Write(bufferWriter.WrittenSpan);
-                }
+                byte[] yamlBytes = NormalizeLineEndings(bufferWriter.WrittenSpan.ToArray());
 
-                if (File.Exists(_filePath))
-                {
-                    File.Delete(_filePath);
-                }
-                File.Move(_tempFilePath, _filePath);
+                using var nativeArray = new NativeArray<byte>(yamlBytes, Allocator.Temp);
+                NativeFile.WriteAllBytes(_tempFilePath, nativeArray);
+
+                // Atomic replace: Copy+Delete because Move lacks overwrite in older .NET
+                File.Copy(_tempFilePath, _filePath, overwrite: true);
+                File.Delete(_tempFilePath);
+
+                WriteChecksum(yamlBytes);
             }
             catch (Exception ex)
             {
-                Debug.LogError($"{DEBUG_FLAG} Failed to save settings for type '{cachedTypeName}' to '{_filePath}'. Error: {ex.Message}");
+                CLogger.LogError($"{DEBUG_FLAG} Failed to save '{_cachedTypeName}': {ex.Message}");
+                CleanupTempFile();
+            }
+        }
+
+        #region Line Ending Normalization (byte-level, avoids string allocation)
+
+        private static byte[] NormalizeLineEndings(byte[] data)
+        {
+            bool hasCR = false;
+            for (int i = 0; i < data.Length; i++)
+            {
+                if (data[i] == 0x0D) { hasCR = true; break; }
+            }
+            if (!hasCR) return data;
+
+            byte[] buffer = new byte[data.Length];
+            int j = 0;
+            for (int i = 0; i < data.Length; i++)
+            {
+                if (data[i] == 0x0D) // \r
+                {
+                    buffer[j++] = 0x0A; // -> \n
+                    if (i + 1 < data.Length && data[i + 1] == 0x0A) i++; // skip \n in \r\n
+                }
+                else
+                {
+                    buffer[j++] = data[i];
+                }
+            }
+
+            if (j == data.Length) return buffer;
+            byte[] result = new byte[j];
+            Buffer.BlockCopy(buffer, 0, result, 0, j);
+            return result;
+        }
+
+        #endregion
+
+        #region Integrity (xxHash64 checksum sidecar file)
+
+        private SettingsIntegrity VerifyChecksum(byte[] data)
+        {
+            if (!File.Exists(_checksumFilePath))
+                return SettingsIntegrity.Missing;
+
+            try
+            {
+                string storedHash = File.ReadAllText(_checksumFilePath).Trim();
+                string computedHash = ComputeHash(data);
+                return storedHash == computedHash ? SettingsIntegrity.Valid : SettingsIntegrity.Modified;
+            }
+            catch
+            {
+                return SettingsIntegrity.Missing;
+            }
+        }
+
+        private void WriteChecksum(byte[] data)
+        {
+            try
+            {
+                File.WriteAllText(_checksumFilePath, ComputeHash(data));
+            }
+            catch (Exception ex)
+            {
+                CLogger.LogWarning($"{DEBUG_FLAG} Failed to write checksum for '{_cachedTypeName}': {ex.Message}");
+            }
+        }
+
+        private static string ComputeHash(byte[] data)
+        {
+            ulong hash = XxHash64.HashToUInt64(data);
+            return hash.ToString("X16");
+        }
+
+        #endregion
+
+        private void CleanupTempFile()
+        {
+            if (File.Exists(_tempFilePath))
+            {
+                try { File.Delete(_tempFilePath); }
+                catch { /* Ignore cleanup errors */ }
             }
         }
     }

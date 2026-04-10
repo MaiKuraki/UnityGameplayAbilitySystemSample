@@ -1,51 +1,275 @@
 using Cysharp.Threading.Tasks;
+using System;
 using System.Collections.Generic;
+using CycloneGames.Logger;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
     /// <summary>
-    /// Concrete implementation of the IGameObjectPoolManager.
-    /// Manages pools of GameObjects keyed by their AssetReference.
+    /// Statistics for a single pool, useful for profiling and tuning.
+    /// </summary>
+    public struct PoolStatistics
+    {
+        public string AssetKey;
+        public int CurrentPoolSize;
+        public int ActiveCount;
+        public int PeakActive;
+        public long TotalGets;
+        public long TotalReturns;
+        public long TotalCreated;
+        public long TotalDestroyed;
+        public float HitRate => TotalGets > 0 ? (float)(TotalGets - TotalCreated) / TotalGets : 0f;
+    }
+
+    /// <summary>
+    /// Enhanced implementation of the IGameObjectPoolManager with:
+    /// - Per-asset auto-scaling with max/min capacity limits
+    /// - Smart shrinking based on peak usage
+    /// - Pool statistics for profiling
+    /// - Aggressive shrink mode for scene transitions
+    /// - Pre-warming support
+    /// - 0 GC Instance ID tracking
+    /// - Idle-Decay mechanism to work with W-TinyLFU
     /// </summary>
     public class GameObjectPoolManager : IGameObjectPoolManager
     {
-        private class PooledObjectComponent : MonoBehaviour { public string AssetRef; }
+        #region Pool Configuration
+
+        /// <summary>
+        /// Configuration for a specific asset pool.
+        /// </summary>
+        public struct PoolConfig
+        {
+            public int MaxCapacity;
+            public int MinCapacity;
+            public int InitialCapacity;
+
+            /// <summary>
+            /// Time in seconds before an idle pool is fully destroyed to trigger W-TinyLFU eviction.
+            /// Set to -1f (or any value <= 0) to create an "Immortal Pool", which never auto-decays.
+            /// Ideal for persistent hero abilities to guarantee 0-GC access.
+            /// </summary>
+            public float IdleExpirationTime;
+
+            // Platform-adaptive default presets
+#if UNITY_IOS || UNITY_ANDROID || UNITY_SWITCH
+            public static PoolConfig Default => new PoolConfig
+            {
+                MaxCapacity = 32,
+                MinCapacity = 2,
+                InitialCapacity = 0,
+                IdleExpirationTime = 30f
+            };
+            
+            public static PoolConfig HighFrequency => new PoolConfig
+            {
+                MaxCapacity = 128,
+                MinCapacity = 16,
+                InitialCapacity = 16,
+                IdleExpirationTime = 60f
+            };
+            
+            public static PoolConfig LowEnd => new PoolConfig
+            {
+                MaxCapacity = 8,
+                MinCapacity = 1,
+                InitialCapacity = 0,
+                IdleExpirationTime = 15f
+            };
+#elif UNITY_STANDALONE || UNITY_PS4 || UNITY_PS5 || UNITY_XBOXONE || UNITY_GAMECORE
+            public static PoolConfig Default => new PoolConfig
+            {
+                MaxCapacity = 128,
+                MinCapacity = 8,
+                InitialCapacity = 0,
+                IdleExpirationTime = 60f
+            };
+
+            public static PoolConfig HighFrequency => new PoolConfig
+            {
+                MaxCapacity = 512,
+                MinCapacity = 64,
+                InitialCapacity = 64,
+                IdleExpirationTime = 120f
+            };
+
+            public static PoolConfig LowEnd => new PoolConfig
+            {
+                MaxCapacity = 32,
+                MinCapacity = 4,
+                InitialCapacity = 0,
+                IdleExpirationTime = 30f
+            };
+#else
+            public static PoolConfig Default => new PoolConfig
+            {
+                MaxCapacity = 64,
+                MinCapacity = 4,
+                InitialCapacity = 0,
+                IdleExpirationTime = 30f
+            };
+            
+            public static PoolConfig HighFrequency => new PoolConfig
+            {
+                MaxCapacity = 256,
+                MinCapacity = 32,
+                InitialCapacity = 32,
+                IdleExpirationTime = 60f
+            };
+            
+            public static PoolConfig LowEnd => new PoolConfig
+            {
+                MaxCapacity = 16,
+                MinCapacity = 2,
+                InitialCapacity = 0,
+                IdleExpirationTime = 15f
+            };
+#endif
+        }
+
+        private static PoolConfig s_DefaultConfig = PoolConfig.Default;
+
+        /// <summary>
+        /// Sets the default configuration for all new pools.
+        /// </summary>
+        public static void SetDefaultConfig(PoolConfig config) => s_DefaultConfig = config;
+
+        #endregion
+
+        #region Internal Types
+
+        private class PoolData
+        {
+            public IResourceHandle<GameObject> Handle;
+            public Stack<GameObject> Pool = new Stack<GameObject>();
+            public PoolConfig Config;
+            public int ActiveCount;
+            public int PeakActiveSinceLastCheck;
+            public int ReturnCounter;
+            public float LastAccessTime;
+            public long TotalGets;
+            public long TotalReturns;
+            public long TotalCreated;
+            public long TotalDestroyed;
+        }
+
+        #endregion
+
+        #region Constants
+
+        private const int kShrinkCheckInterval = 32;
+        private const int kMaxShrinkPerCheck = 4;
+        private const float kBufferRatio = 1.5f;
+        private const float kPeakDecayFactor = 0.6f;
+
+        #endregion
+
+        #region Fields
 
         private readonly IResourceLocator resourceLocator;
-        private readonly Dictionary<string, Stack<GameObject>> poolRegistry = new Dictionary<string, Stack<GameObject>>();
+        private readonly Dictionary<string, PoolData> poolRegistry = new Dictionary<string, PoolData>();
+        private readonly Dictionary<string, PoolConfig> customConfigs = new Dictionary<string, PoolConfig>();
+        // InstanceID -> AssetKey tracking for 0GC lookups
+        private readonly Dictionary<int, string> instanceToAssetKey = new Dictionary<int, string>(10000);
         private readonly Transform poolRoot;
+
+        private float lastTickTime;
+
+        #endregion
+
+        #region Constructor
 
         public GameObjectPoolManager(IResourceLocator locator)
         {
             this.resourceLocator = locator;
             poolRoot = new GameObject("GameObjectPool_Root").transform;
-            Object.DontDestroyOnLoad(poolRoot.gameObject);
+            UnityEngine.Object.DontDestroyOnLoad(poolRoot.gameObject);
+            lastTickTime = Time.time;
         }
 
-        public async UniTask<GameObject> GetAsync(object assetRef, Vector3 position, Quaternion rotation, Transform parent = null)
+        #endregion
+
+        #region Configuration API
+
+        /// <summary>
+        /// Sets custom configuration for a specific asset.
+        /// Call before the asset is first used.
+        /// </summary>
+        public void SetPoolConfig(string assetKey, PoolConfig config)
         {
+            customConfigs[assetKey] = config;
+
+            // Update existing pool if it exists
+            if (poolRegistry.TryGetValue(assetKey, out var poolData))
+            {
+                poolData.Config = config;
+            }
+        }
+
+        /// <summary>
+        /// Configures a pool for high-frequency usage (e.g., bullets, particles).
+        /// </summary>
+        public void ConfigureForHighFrequency(string assetKey, int maxCapacity = 256, int minCapacity = 32)
+        {
+            SetPoolConfig(assetKey, new PoolConfig
+            {
+                MaxCapacity = maxCapacity,
+                MinCapacity = minCapacity,
+                InitialCapacity = minCapacity,
+                IdleExpirationTime = s_DefaultConfig.IdleExpirationTime * 2
+            });
+        }
+
+        #endregion
+
+        #region Core Pool Operations
+
+        public async UniTask<GameObject> GetAsync(object assetRef, Vector3 position, Quaternion rotation, Transform parent = null, string bucket = null, string cacheTag = null, string cacheOwner = null)
+        {
+            TickDecay();
+
             if (assetRef is not string assetKey || string.IsNullOrEmpty(assetKey)) return null;
 
-            if (!poolRegistry.TryGetValue(assetKey, out var pool))
-            {
-                pool = new Stack<GameObject>();
-                poolRegistry[assetKey] = pool;
-            }
+            var poolData = GetOrCreatePoolData(assetKey);
+            poolData.LastAccessTime = Time.time;
 
             GameObject instance;
-            if (pool.Count > 0)
+
+            if (poolData.Pool.Count > 0)
             {
-                instance = pool.Pop();
+                // Pool hit - reuse existing instance
+                instance = poolData.Pool.Pop();
+
+                // Validate instance (Unity may have destroyed it)
+                if (instance == null)
+                {
+                    return await GetAsync(assetRef, position, rotation, parent, bucket, cacheTag, cacheOwner);
+                }
+
                 instance.transform.SetParent(parent, false);
                 instance.transform.SetPositionAndRotation(position, rotation);
             }
             else
             {
-                var prefab = await resourceLocator.LoadAssetAsync<GameObject>(assetKey);
-                if (prefab == null) return null;
-                instance = Object.Instantiate(prefab, position, rotation, parent);
-                instance.AddComponent<PooledObjectComponent>().AssetRef = assetKey;
+                // Pool miss - create new instance
+                if (poolData.Handle == null)
+                {
+                    poolData.Handle = await resourceLocator.LoadAssetAsync<GameObject>(assetKey, bucket, cacheTag, cacheOwner);
+                    if (poolData.Handle == null || poolData.Handle.Asset == null) return null;
+                }
+
+                instance = UnityEngine.Object.Instantiate(poolData.Handle.Asset, position, rotation, parent);
+                instanceToAssetKey[instance.GetInstanceID()] = assetKey;
+                poolData.TotalCreated++;
+            }
+
+            // Track statistics
+            poolData.ActiveCount++;
+            poolData.TotalGets++;
+            if (poolData.ActiveCount > poolData.PeakActiveSinceLastCheck)
+            {
+                poolData.PeakActiveSinceLastCheck = poolData.ActiveCount;
             }
 
             instance.SetActive(true);
@@ -55,48 +279,354 @@ namespace CycloneGames.GameplayAbilities.Runtime
         public void Release(GameObject instance)
         {
             if (instance == null) return;
-            var poolComponent = instance.GetComponent<PooledObjectComponent>();
 
-            if (poolComponent == null || !poolRegistry.TryGetValue(poolComponent.AssetRef, out var pool))
+            int instanceId = instance.GetInstanceID();
+
+            if (!instanceToAssetKey.TryGetValue(instanceId, out var assetKey) || !poolRegistry.TryGetValue(assetKey, out var poolData))
             {
-                Object.Destroy(instance);
+                UnityEngine.Object.Destroy(instance);
+                return;
+            }
+
+            poolData.LastAccessTime = Time.time;
+            poolData.ActiveCount = Math.Max(0, poolData.ActiveCount - 1);
+            poolData.TotalReturns++;
+
+            // Check max capacity - destroy excess instances
+            if (poolData.Config.MaxCapacity > 0 && poolData.Pool.Count >= poolData.Config.MaxCapacity)
+            {
+                instanceToAssetKey.Remove(instanceId);
+                UnityEngine.Object.Destroy(instance);
+                poolData.TotalDestroyed++;
                 return;
             }
 
             instance.SetActive(false);
             instance.transform.SetParent(poolRoot);
-            pool.Push(instance);
+            poolData.Pool.Push(instance);
+
+            // Periodic shrink check
+            poolData.ReturnCounter++;
+            if (poolData.ReturnCounter >= kShrinkCheckInterval)
+            {
+                poolData.ReturnCounter = 0;
+                PerformSmartShrink(poolData);
+            }
         }
 
-        public async UniTask PrewarmPoolAsync(object assetRef, int count)
+        #endregion
+
+        #region Pre-warming
+
+        public async UniTask PrewarmPoolAsync(object assetRef, int count, string bucket = null, string cacheTag = null, string cacheOwner = null)
         {
             if (assetRef is not string assetKey || string.IsNullOrEmpty(assetKey)) return;
-            var prefab = await resourceLocator.LoadAssetAsync<GameObject>(assetKey);
-            if (prefab == null) return;
 
-            if (!poolRegistry.TryGetValue(assetKey, out var pool))
+            var poolData = GetOrCreatePoolData(assetKey);
+            poolData.LastAccessTime = Time.time;
+
+            if (poolData.Handle == null)
             {
-                pool = new Stack<GameObject>();
-                poolRegistry[assetKey] = pool;
+                poolData.Handle = await resourceLocator.LoadAssetAsync<GameObject>(assetKey, bucket, cacheTag, cacheOwner);
+                if (poolData.Handle == null || poolData.Handle.Asset == null) return;
             }
 
-            while (pool.Count < count)
+            int maxToCreate = poolData.Config.MaxCapacity > 0
+                ? Math.Min(count, poolData.Config.MaxCapacity)
+                : count;
+
+            while (poolData.Pool.Count < maxToCreate)
             {
-                var instance = Object.Instantiate(prefab, poolRoot);
-                instance.AddComponent<PooledObjectComponent>().AssetRef = assetKey;
+                var instance = UnityEngine.Object.Instantiate(poolData.Handle.Asset, poolRoot);
+                instanceToAssetKey[instance.GetInstanceID()] = assetKey;
                 instance.SetActive(false);
-                pool.Push(instance);
+                poolData.Pool.Push(instance);
+                poolData.TotalCreated++;
             }
         }
+
+        #endregion
+
+        #region Shrinking & Cleanup
+
+        private void PerformSmartShrink(PoolData poolData)
+        {
+            // Calculate target capacity based on peak usage with buffer
+            int targetCapacity = (int)(poolData.PeakActiveSinceLastCheck * kBufferRatio);
+            targetCapacity = Math.Max(targetCapacity, poolData.Config.MinCapacity);
+
+            int currentTotal = poolData.ActiveCount + poolData.Pool.Count;
+            if (currentTotal > targetCapacity && poolData.Pool.Count > poolData.Config.MinCapacity)
+            {
+                int excess = currentTotal - targetCapacity;
+                int toRemove = Math.Min(excess, kMaxShrinkPerCheck);
+                toRemove = Math.Min(toRemove, poolData.Pool.Count - poolData.Config.MinCapacity);
+
+                for (int i = 0; i < toRemove && poolData.Pool.Count > poolData.Config.MinCapacity; i++)
+                {
+                    var instance = poolData.Pool.Pop();
+                    if (instance != null)
+                    {
+                        instanceToAssetKey.Remove(instance.GetInstanceID());
+                        UnityEngine.Object.Destroy(instance);
+                        poolData.TotalDestroyed++;
+                    }
+                }
+            }
+
+            // Decay peak tracker
+            poolData.PeakActiveSinceLastCheck = Math.Max(
+                poolData.ActiveCount,
+                (int)(poolData.PeakActiveSinceLastCheck * kPeakDecayFactor)
+            );
+        }
+
+        /// <summary>
+        /// Checks all pools and force-drains those that have been completely idle for too long,
+        /// passing them back to W-TinyLFU cache service for active tracking/eviction.
+        /// </summary>
+        private void TickDecay()
+        {
+            float now = Time.time;
+            if (now - lastTickTime < 5f) return;
+            lastTickTime = now;
+
+            foreach (var kvp in poolRegistry)
+            {
+                var poolData = kvp.Value;
+                // If IdleExpirationTime <= 0, this pool is persistent (Immortal Pool) and never auto-decays.
+                if (poolData.Config.IdleExpirationTime <= 0f) continue;
+
+                if (poolData.ActiveCount == 0 && poolData.Handle != null)
+                {
+                    if (now - poolData.LastAccessTime > poolData.Config.IdleExpirationTime)
+                    {
+                        // Completely idle and expired: Destroy ALL pool contents to release handle
+                        // Ignore MinCapacity so W-TinyLFU gets a chance to clean it up.
+                        while (poolData.Pool.Count > 0)
+                        {
+                            var instance = poolData.Pool.Pop();
+                            if (instance != null)
+                            {
+                                instanceToAssetKey.Remove(instance.GetInstanceID());
+                                UnityEngine.Object.Destroy(instance);
+                                poolData.TotalDestroyed++;
+                            }
+                        }
+
+                        // Let go of reference to notify W-TinyLFU
+                        poolData.Handle.Dispose();
+                        poolData.Handle = null;
+                        poolData.PeakActiveSinceLastCheck = 0;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Aggressively shrinks all pools to their minimum capacity.
+        /// Call during scene transitions or loading screens to free memory.
+        /// </summary>
+        public void AggressiveShrink()
+        {
+            foreach (var kvp in poolRegistry)
+            {
+                var poolData = kvp.Value;
+                int targetSize = poolData.Config.MinCapacity;
+
+                while (poolData.Pool.Count > targetSize)
+                {
+                    var instance = poolData.Pool.Pop();
+                    if (instance != null)
+                    {
+                        instanceToAssetKey.Remove(instance.GetInstanceID());
+                        UnityEngine.Object.Destroy(instance);
+                        poolData.TotalDestroyed++;
+                    }
+                }
+
+                // Reset peak tracker
+                poolData.PeakActiveSinceLastCheck = poolData.ActiveCount;
+
+                // If completely idle, allow zero capacity on aggressive shrink
+                if (poolData.ActiveCount == 0 && poolData.Pool.Count == 0 && poolData.Handle != null)
+                {
+                    poolData.Handle.Dispose();
+                    poolData.Handle = null;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Shrinks a specific pool to its minimum capacity.
+        /// </summary>
+        public void AggressiveShrink(string assetKey)
+        {
+            if (!poolRegistry.TryGetValue(assetKey, out var poolData)) return;
+
+            int targetSize = poolData.Config.MinCapacity;
+            while (poolData.Pool.Count > targetSize)
+            {
+                var instance = poolData.Pool.Pop();
+                if (instance != null)
+                {
+                    instanceToAssetKey.Remove(instance.GetInstanceID());
+                    UnityEngine.Object.Destroy(instance);
+                    poolData.TotalDestroyed++;
+                }
+            }
+            poolData.PeakActiveSinceLastCheck = poolData.ActiveCount;
+
+            if (poolData.ActiveCount == 0 && poolData.Pool.Count == 0 && poolData.Handle != null)
+            {
+                poolData.Handle.Dispose();
+                poolData.Handle = null;
+            }
+        }
+
+        /// <summary>
+        /// Clears a specific pool completely, destroying all pooled instances.
+        /// Active instances are not affected.
+        /// </summary>
+        public void ClearPool(string assetKey)
+        {
+            if (!poolRegistry.TryGetValue(assetKey, out var poolData)) return;
+
+            while (poolData.Pool.Count > 0)
+            {
+                var instance = poolData.Pool.Pop();
+                if (instance != null)
+                {
+                    instanceToAssetKey.Remove(instance.GetInstanceID());
+                    UnityEngine.Object.Destroy(instance);
+                    poolData.TotalDestroyed++;
+                }
+            }
+
+            if (poolData.ActiveCount == 0 && poolData.Handle != null)
+            {
+                poolData.Handle.Dispose();
+                poolData.Handle = null;
+            }
+        }
+
+        #endregion
+
+        #region Statistics API
+
+        /// <summary>
+        /// Gets statistics for a specific pool.
+        /// </summary>
+        public PoolStatistics GetStatistics(string assetKey)
+        {
+            if (!poolRegistry.TryGetValue(assetKey, out var poolData))
+            {
+                return new PoolStatistics { AssetKey = assetKey };
+            }
+
+            return new PoolStatistics
+            {
+                AssetKey = assetKey,
+                CurrentPoolSize = poolData.Pool.Count,
+                ActiveCount = poolData.ActiveCount,
+                PeakActive = poolData.PeakActiveSinceLastCheck,
+                TotalGets = poolData.TotalGets,
+                TotalReturns = poolData.TotalReturns,
+                TotalCreated = poolData.TotalCreated,
+                TotalDestroyed = poolData.TotalDestroyed
+            };
+        }
+
+        /// <summary>
+        /// Gets statistics for all pools.
+        /// </summary>
+        public List<PoolStatistics> GetAllStatistics()
+        {
+            var result = new List<PoolStatistics>(poolRegistry.Count);
+            foreach (var kvp in poolRegistry)
+            {
+                result.Add(GetStatistics(kvp.Key));
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Logs pool statistics to console (Editor/Development only).
+        /// </summary>
+        [System.Diagnostics.Conditional("UNITY_EDITOR"), System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        public void LogStatistics()
+        {
+            var stats = GetAllStatistics();
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("=== GameObjectPool Statistics ===");
+
+            foreach (var stat in stats)
+            {
+                sb.AppendLine($"[{stat.AssetKey}] Pool:{stat.CurrentPoolSize} Active:{stat.ActiveCount} Peak:{stat.PeakActive} HitRate:{stat.HitRate:P1} Gets:{stat.TotalGets} Created:{stat.TotalCreated}");
+            }
+
+            GASLog.Info(sb.ToString());
+        }
+
+        /// <summary>
+        /// Resets statistics for all pools.
+        /// </summary>
+        public void ResetStatistics()
+        {
+            foreach (var poolData in poolRegistry.Values)
+            {
+                poolData.TotalGets = 0;
+                poolData.TotalReturns = 0;
+                poolData.TotalCreated = 0;
+                poolData.TotalDestroyed = 0;
+                poolData.PeakActiveSinceLastCheck = poolData.ActiveCount;
+            }
+        }
+
+        #endregion
+
+        #region Lifecycle
 
         public void Shutdown()
         {
-            foreach (var pool in poolRegistry.Values)
+            foreach (var poolData in poolRegistry.Values)
             {
-                foreach (var item in pool) Object.Destroy(item);
+                foreach (var item in poolData.Pool)
+                {
+                    if (item != null) UnityEngine.Object.Destroy(item);
+                }
+                poolData.Handle?.Dispose();
+                poolData.Handle = null;
             }
             poolRegistry.Clear();
-            if (poolRoot) Object.Destroy(poolRoot.gameObject);
+            customConfigs.Clear();
+            instanceToAssetKey.Clear();
+            if (poolRoot) UnityEngine.Object.Destroy(poolRoot.gameObject);
         }
+
+        #endregion
+
+        #region Helpers
+
+        private PoolData GetOrCreatePoolData(string assetKey)
+        {
+            if (!poolRegistry.TryGetValue(assetKey, out var poolData))
+            {
+                var config = customConfigs.TryGetValue(assetKey, out var customConfig)
+                    ? customConfig
+                    : s_DefaultConfig;
+
+                poolData = new PoolData
+                {
+                    Config = config,
+                    Pool = new Stack<GameObject>(config.InitialCapacity > 0 ? config.InitialCapacity : 8),
+                    LastAccessTime = Time.time
+                };
+                poolRegistry[assetKey] = poolData;
+            }
+            return poolData;
+        }
+
+        #endregion
     }
 }

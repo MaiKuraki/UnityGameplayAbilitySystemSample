@@ -1,32 +1,37 @@
 using System;
 using System.Collections.Concurrent;
 using System.Threading;
-using System.Threading.Tasks;
 
 namespace CycloneGames.Logger
 {
     /// <summary>
     /// Background-thread processing strategy using BlockingCollection.
-    /// Guarantees FIFO semantics per-queue and amortizes contention under load.
+    /// Uses dedicated Thread (instead of Task) for better IL2CPP compatibility.
     /// </summary>
     internal sealed class ThreadedLogProcessor : ILogProcessor
     {
         private readonly CLogger _owner;
         private readonly BlockingCollection<LogMessage> _queue = new(new ConcurrentQueue<LogMessage>());
-        private readonly CancellationTokenSource _cts = new();
-        private readonly Task _worker;
+        private readonly Thread _workerThread;
 
         public ThreadedLogProcessor(CLogger owner)
         {
             _owner = owner ?? throw new ArgumentNullException(nameof(owner));
-            _worker = Task.Factory.StartNew(ProcessLoop, _cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            _workerThread = new Thread(ProcessLoop)
+            {
+                Name = "CLogger.Worker",
+                IsBackground = true,
+                Priority = ThreadPriority.BelowNormal
+            };
+            _workerThread.Start();
         }
 
         public void Enqueue(LogMessage message)
         {
             if (!_queue.IsAddingCompleted)
             {
-                try { _queue.Add(message); } catch (InvalidOperationException) { /* shutting down */ }
+                try { _queue.Add(message); }
+                catch (InvalidOperationException) { /* shutting down */ }
             }
         }
 
@@ -36,7 +41,8 @@ namespace CycloneGames.Logger
         {
             try
             {
-                foreach (var msg in _queue.GetConsumingEnumerable(_cts.Token))
+                // GetConsumingEnumerable blocks when empty, completes when CompleteAdding() is called and queue is drained.
+                foreach (var msg in _queue.GetConsumingEnumerable())
                 {
                     _owner.DispatchToLoggers(msg);
                     LogMessagePool.Return(msg);
@@ -51,10 +57,14 @@ namespace CycloneGames.Logger
 
         public void Dispose()
         {
+            // Signal no more items; worker will drain remaining messages then exit naturally.
             _queue.CompleteAdding();
-            _cts.Cancel();
-            try { _worker.Wait(TimeSpan.FromSeconds(2)); } catch { }
-            _cts.Dispose();
+
+            if (!_workerThread.Join(TimeSpan.FromSeconds(5)))
+            {
+                Console.Error.WriteLine("[WARNING] ThreadedLogProcessor: Worker thread did not exit gracefully.");
+            }
+
             _queue.Dispose();
         }
     }

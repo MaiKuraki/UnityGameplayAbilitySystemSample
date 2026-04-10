@@ -1,60 +1,108 @@
 using System;
-using System.Collections.Generic;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
     /// <summary>
-    /// Represents a stateful instance of a GameplayEffect that is currently active on an AbilitySystemComponent.
-    /// It tracks state such as remaining time and stack count.
-    /// Instances of this class should be acquired from an object pool.
+    /// Represents a stateful instance of a GameplayEffect currently active on an ASC.
+    /// Tracks state such as remaining time and stack count.
+    /// Pooled via GASPool for zero-allocation runtime.
     /// </summary>
-    public class ActiveGameplayEffect
+    public class ActiveGameplayEffect : IGASPoolable
     {
-        private static readonly Stack<ActiveGameplayEffect> pool = new Stack<ActiveGameplayEffect>(64);
-
         public GameplayEffectSpec Spec { get; private set; }
         public float TimeRemaining { get; private set; }
         public int StackCount { get; private set; }
         public bool IsExpired { get; private set; }
 
+        /// <summary>
+        /// True when the effect's OngoingTagRequirements are not met and its modifiers are temporarily suppressed.
+        /// UE5: bIsInhibited / OnInhibitionChanged.
+        /// </summary>
+        public bool IsInhibited { get; internal set; }
+
+        /// <summary>
+        /// Fired when the inhibition state changes (true = now inhibited, false = no longer inhibited).
+        /// UE5: OnInhibitionChanged delegate.
+        /// </summary>
+        public event Action<bool> OnInhibitionChanged;
+
+        internal void NotifyInhibitionChanged(bool inhibited)
+        {
+            OnInhibitionChanged?.Invoke(inhibited);
+        }
+
         private float periodTimer;
         private float cachedPeriod;
         private EDurationPolicy cachedDurationPolicy;
 
-        private ActiveGameplayEffect() { }
+        public ActiveGameplayEffect() { }
 
-        public static ActiveGameplayEffect Create(GameplayEffectSpec spec)
+        #region IGASPoolable Implementation
+
+        void IGASPoolable.OnGetFromPool()
         {
-            var activeEffect = pool.Count > 0 ? pool.Pop() : new ActiveGameplayEffect();
-            activeEffect.Spec = spec;
-            activeEffect.TimeRemaining = spec.Duration;
-            activeEffect.StackCount = 1;
-            activeEffect.IsExpired = false;
-
-            // Cache high-frequency data
-            activeEffect.cachedPeriod = spec.Def.Period;
-            activeEffect.cachedDurationPolicy = spec.Def.DurationPolicy;
-
-            // If the effect is periodic, set the timer to 0 to ensure the first tick executes on the very next AbilitySystemComponent update.
-            // This implements the common behavior where a periodic effect's first tick is applied immediately upon application.
-            activeEffect.periodTimer = activeEffect.cachedPeriod > 0 ? 0f : -1f;
-
-            return activeEffect;
+            // Initialization happens in Initialize()
         }
 
-        public void ReturnToPool()
+        void IGASPoolable.OnReturnToPool()
         {
             Spec?.ReturnToPool();
             Spec = null;
             TimeRemaining = 0;
             StackCount = 0;
             IsExpired = false;
+            IsInhibited = false;
+            OnInhibitionChanged = null;
             periodTimer = -1f;
-            pool.Push(this);
+            cachedPeriod = 0;
+            cachedDurationPolicy = default;
         }
 
+        #endregion
+
+        #region Factory
+
+        public static ActiveGameplayEffect Create(GameplayEffectSpec spec)
+        {
+            var activeEffect = GASPool<ActiveGameplayEffect>.Shared.Get();
+            activeEffect.Initialize(spec);
+            return activeEffect;
+        }
+
+        private void Initialize(GameplayEffectSpec spec)
+        {
+            Spec = spec;
+            TimeRemaining = spec.Duration;
+            StackCount = 1;
+            IsExpired = false;
+
+            cachedPeriod = spec.Def.Period;
+            cachedDurationPolicy = spec.Def.DurationPolicy;
+
+            // UE5: bExecutePeriodicEffectOnApplication
+            // If true (default), first tick fires immediately (periodTimer = 0).
+            // If false, first tick waits for the full period interval.
+            if (cachedPeriod > 0)
+            {
+                periodTimer = spec.Def.ExecutePeriodicEffectOnApplication ? 0f : cachedPeriod;
+            }
+            else
+            {
+                periodTimer = -1f;
+            }
+        }
+
+        public void ReturnToPool()
+        {
+            GASPool<ActiveGameplayEffect>.Shared.Return(this);
+        }
+
+        #endregion
+
+        #region Stacking
+
         /// <summary>
-        /// Called when a new stack is successfully applied to this existing effect.
+        /// Called when a new stack is successfully applied.
         /// </summary>
         public void OnStackApplied()
         {
@@ -72,8 +120,26 @@ namespace CycloneGames.GameplayAbilities.Runtime
         }
 
         /// <summary>
-        /// Refreshes this effect's remaining time and period timer without modifying the stack count.
-        /// Useful when a new application occurs while already at max stacks and the policy requires a refresh.
+        /// Removes a single stack. Used by EGameplayEffectStackingExpirationPolicy.RemoveSingleStackAndRefreshDuration.
+        /// </summary>
+        public void RemoveStack()
+        {
+            if (StackCount > 0)
+            {
+                StackCount--;
+            }
+        }
+
+        /// <summary>
+        /// Clears the expired flag so the effect can continue living (used after removing a single stack).
+        /// </summary>
+        public void ClearExpired()
+        {
+            IsExpired = false;
+        }
+
+        /// <summary>
+        /// Refreshes duration without modifying stack count.
         /// </summary>
         public void RefreshDurationAndPeriod()
         {
@@ -89,14 +155,28 @@ namespace CycloneGames.GameplayAbilities.Runtime
         }
 
         /// <summary>
+        /// Sets the remaining duration to a specific value.
+        /// UE5: Section 4.5.16 - Changing Active Gameplay Effect Duration.
+        /// </summary>
+        public void SetRemainingDuration(float newDuration)
+        {
+            if (cachedDurationPolicy == EDurationPolicy.HasDuration)
+            {
+                TimeRemaining = System.Math.Max(0f, newDuration);
+            }
+        }
+
+        #endregion
+
+        #region Tick
+
+        /// <summary>
         /// Ticks the effect's duration and period timer.
         /// </summary>
-        /// <param name="deltaTime">The time since the last frame.</param>
-        /// <param name="asc">The owning AbilitySystemComponent to execute periodic effects on.</param>
-        /// <returns>True if the effect expired this tick, false otherwise.</returns>
+        /// <returns>True if the effect expired this tick.</returns>
         public bool Tick(float deltaTime, AbilitySystemComponent asc)
         {
-            // --- Duration Handling ---
+            // Duration handling
             if (!IsExpired && cachedDurationPolicy == EDurationPolicy.HasDuration)
             {
                 TimeRemaining -= deltaTime;
@@ -106,23 +186,21 @@ namespace CycloneGames.GameplayAbilities.Runtime
                 }
             }
 
-            // --- Periodic Effect Handling ---
+            // Periodic effect handling
             if (!IsExpired && periodTimer >= 0)
             {
                 periodTimer -= deltaTime;
                 if (periodTimer <= 0)
                 {
-                    // Period has elapsed, execute the effect's instant logic.
-                    // Note: Periodic effect executions are not predicted in this model.
                     asc.ExecuteInstantEffect(this.Spec);
-
-                    // Reset the timer for the next period, carrying over any leftover time.
-                    // This prevents timer drift due to frame rate fluctuations.
+                    // Carry over leftover time to prevent drift
                     periodTimer += cachedPeriod;
                 }
             }
 
             return IsExpired;
         }
+
+        #endregion
     }
 }

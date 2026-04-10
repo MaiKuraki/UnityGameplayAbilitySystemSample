@@ -3,53 +3,95 @@ using CycloneGames.Logger;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using Unity.Profiling;
 
 public class LoggerBenchmark : MonoBehaviour
 {
     private const int TestIterations = 10000;
+    private const int WarmupIterations = 512;
     private Stopwatch stopwatch = new Stopwatch();
     private string reportPath;
-    float unityLoggerTimespan = -1;
-    float customLoggerTimespan = -1;
+
+    private float unityLoggerTimespan = -1;
+    private float customLoggerStringTimespan = -1;
+    private float customLoggerBuilderTimespan = -1;
+    private float customLoggerBuilderGenericTimespan = -1;
+    private long unityLoggerGC = 0;
+    private long customLoggerStringGC = 0;
+    private long customLoggerBuilderGC = 0;
+    private long customLoggerBuilderGenericGC = 0;
+
+    private ProfilerRecorder gcAllocRecorder;
 
     void Start()
     {
-        // Remove if centralized bootstrap is used.
-#if UNITY_WEBGL && !UNITY_EDITOR
+        // Single-threaded mode: Pump() processes all messages synchronously within the measurement window.
+        // This ensures GC from both enqueue and dispatch is captured accurately.
         CLogger.ConfigureSingleThreadedProcessing();
-#else
-        CLogger.ConfigureThreadedProcessing();
-#endif
-        // Per-script registration (remove if centralized bootstrap registers loggers).
-        // Avoid adding ConsoleLogger in the Unity Editor to prevent duplicate console entries
-        // (Unity may surface stdout and Debug.Log in the same Console view).
+
 #if !UNITY_EDITOR
         CLogger.Instance.AddLoggerUnique(new ConsoleLogger());
 #endif
-        // Use AddLogger (not Unique) so a dedicated file sink is always added even if a global FileLogger exists.
-        CLogger.Instance.AddLogger(new FileLogger(Application.dataPath + "/Logs/Benchmark.log"));
         CLogger.Instance.AddLoggerUnique(new UnityLogger());
         CLogger.Instance.SetLogLevel(LogLevel.Trace);
 
-        // Prepare report file 
         reportPath = Path.Combine(Application.dataPath, "Logs/LoggerBenchmarkReport.txt");
         Directory.CreateDirectory(Path.GetDirectoryName(reportPath));
 
-        // Run tests 
+        StartCoroutine(RunBenchmarks());
+    }
+
+    System.Collections.IEnumerator RunBenchmarks()
+    {
+        gcAllocRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "GC.Alloc");
+
+        // ---------- Phase 1: Warm all pools ----------
+        for (int i = 0; i < WarmupIterations; i++)
+        {
+            CLogger.LogInfo(i, static (state, sb) => sb.Append("Warmup ").Append(state), "Benchmark");
+        }
+        CLogger.Instance.Pump(WarmupIterations * 2);
+        yield return null;
+
+        // Force GC to clean up warmup transients
+        System.GC.Collect();
+        System.GC.WaitForPendingFinalizers();
+        System.GC.Collect();
+        yield return null;
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        LogMessagePool.ResetStatistics();
+        CycloneGames.Logger.Util.StringBuilderPool.ResetStatistics();
+#endif
+
+        // ---------- Phase 2: Unity Debug.Log baseline ----------
         TestUnityLogger();
-        TestCustomLogger();
+        yield return new WaitForSeconds(0.1f);
 
-        // Output final report 
-        string finalReport = $"\n{TestIterations} Interactions\nFinal Comparison ({System.DateTime.Now}):\n" +
-                    "======================================\n" +
-                    "| Logger Type            | Time (ms) |\n" +
-                    "|------------------------|-----------|\n" +
-                    $"| Unity Debug.Log        | {FormatFloat(unityLoggerTimespan)} |\n" +
-                    $"| CLogger LogInfo        | {FormatFloat(customLoggerTimespan)} |\n" +
-                    "======================================\n";
+        // ---------- Phase 3: CLogger String API ----------
+        TestCustomLoggerString();
+        CLogger.Instance.Pump(TestIterations * 2);
+        yield return new WaitForSeconds(0.1f);
 
+        // ---------- Phase 4: CLogger Builder API (closure lambda) ----------
+        TestCustomLoggerBuilder();
+        CLogger.Instance.Pump(TestIterations * 2);
+        yield return new WaitForSeconds(0.1f);
+
+        // ---------- Phase 5: CLogger Builder API (generic state, zero-closure) ----------
+        TestCustomLoggerBuilderGeneric();
+        CLogger.Instance.Pump(TestIterations * 2);
+        yield return new WaitForSeconds(0.5f);
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        ShowPoolStatistics();
+#endif
+
+        string finalReport = BuildFinalReport();
         File.AppendAllText(reportPath, finalReport, System.Text.Encoding.UTF8);
         UnityEngine.Debug.Log(finalReport);
+
+        gcAllocRecorder.Dispose();
     }
 
     void OnDestroy()
@@ -59,78 +101,167 @@ public class LoggerBenchmark : MonoBehaviour
 
     void Update()
     {
-        // Pump drains the queue in single-threaded mode; no-op when threaded.
         CLogger.Instance.Pump(4096);
     }
 
-    float TestUnityLogger()
+    void TestUnityLogger()
     {
-        // Warm up 
         UnityEngine.Debug.Log("Unity Logger Warmup");
 
+        long gcBefore = gcAllocRecorder.CurrentValue;
         stopwatch.Restart();
+
         for (int i = 0; i < TestIterations; i++)
         {
             UnityEngine.Debug.Log($"Unity test message {i}");
         }
-        stopwatch.Stop();
 
-        float elapsedMs = stopwatch.ElapsedMilliseconds;
-        string report = $"Unity   Debug.Log - {TestIterations} iterations: {elapsedMs} ms";
+        stopwatch.Stop();
+        long gcAfter = gcAllocRecorder.CurrentValue;
+        unityLoggerGC = gcAfter - gcBefore;
+        unityLoggerTimespan = stopwatch.ElapsedMilliseconds;
+
+        string report = $"Unity Debug.Log - {TestIterations} iterations: {unityLoggerTimespan} ms, GC Alloc: {unityLoggerGC / 1024.0:F2} KB";
         File.AppendAllText(reportPath, report + "\n", System.Text.Encoding.UTF8);
         UnityEngine.Debug.Log(report);
-        unityLoggerTimespan = elapsedMs;
-        return elapsedMs;
     }
 
-    float TestCustomLogger()
+    void TestCustomLoggerString()
     {
-        // Warm up 
-        CLogger.LogInfo("Custom Logger Warmup");
-
+        // String API: caller allocates the interpolated string, logger pools everything else.
+        long gcBefore = gcAllocRecorder.CurrentValue;
         stopwatch.Restart();
+
         for (int i = 0; i < TestIterations; i++)
         {
             CLogger.LogInfo($"Custom test message {i}", "Benchmark");
         }
-        stopwatch.Stop();
+        // Pump inside measurement to capture dispatch + output GC
+        CLogger.Instance.Pump(TestIterations * 2);
 
-        float elapsedMs = stopwatch.ElapsedMilliseconds;
-        string report = $"CLogger LogInfo   - {TestIterations} iterations: {elapsedMs} ms";
+        stopwatch.Stop();
+        long gcAfter = gcAllocRecorder.CurrentValue;
+        customLoggerStringGC = gcAfter - gcBefore;
+        customLoggerStringTimespan = stopwatch.ElapsedMilliseconds;
+
+        string report = $"CLogger String API - {TestIterations} iterations: {customLoggerStringTimespan} ms, GC Alloc: {customLoggerStringGC / 1024.0:F2} KB";
         File.AppendAllText(reportPath, report + "\n");
         UnityEngine.Debug.Log(report);
-        customLoggerTimespan = elapsedMs;
-        return elapsedMs;
     }
 
-    public static string FormatFloat(float number, int length = 6)
+    void TestCustomLoggerBuilder()
     {
-        try
+        // Builder API with closure: lambda captures loop variable i, causing closure allocation.
+        long gcBefore = gcAllocRecorder.CurrentValue;
+        stopwatch.Restart();
+
+        for (int i = 0; i < TestIterations; i++)
         {
-            int integerPart = (int)System.Math.Truncate(number);
-            float decimalPart = System.Math.Abs(number - integerPart);
-
-            string integerStr = integerPart.ToString();
-            if (integerStr.Length > length)
-            {
-                integerStr = integerStr.Substring(0, length);
-            }
-            string paddedInteger = integerStr.PadLeft(length, ' ');
-
-            string decimalStr = decimalPart.ToString("0.00").Substring(1);
-
-            return paddedInteger + decimalStr;
+            CLogger.LogInfo(sb => sb.Append("Custom test message ").Append(i), "Benchmark");
         }
-        catch (System.Exception ex)
+        CLogger.Instance.Pump(TestIterations * 2);
+
+        stopwatch.Stop();
+        long gcAfter = gcAllocRecorder.CurrentValue;
+        customLoggerBuilderGC = gcAfter - gcBefore;
+        customLoggerBuilderTimespan = stopwatch.ElapsedMilliseconds;
+
+        string report = $"CLogger Builder (closure) - {TestIterations} iterations: {customLoggerBuilderTimespan} ms, GC Alloc: {customLoggerBuilderGC / 1024.0:F2} KB";
+        File.AppendAllText(reportPath, report + "\n");
+        UnityEngine.Debug.Log(report);
+    }
+
+    void TestCustomLoggerBuilderGeneric()
+    {
+        // Generic state API: static lambda, zero closure allocation. This is the recommended hot-path API.
+        long gcBefore = gcAllocRecorder.CurrentValue;
+        stopwatch.Restart();
+
+        for (int i = 0; i < TestIterations; i++)
         {
-            UnityEngine.Debug.LogError($"Format float failed. Error: {ex.Message}");
-            StringBuilder prefix = new StringBuilder();
-            for (int i = 0; i < length - 1; i++)
-            {
-                prefix.Append(" ");
-            }
-            prefix.Append("0.00");
-            return prefix.ToString();
+            CLogger.LogInfo(i, static (state, sb) => sb.Append("Custom test message ").Append(state), "Benchmark");
         }
+        CLogger.Instance.Pump(TestIterations * 2);
+
+        stopwatch.Stop();
+        long gcAfter = gcAllocRecorder.CurrentValue;
+        customLoggerBuilderGenericGC = gcAfter - gcBefore;
+        customLoggerBuilderGenericTimespan = stopwatch.ElapsedMilliseconds;
+
+        string report = $"CLogger Builder (generic) - {TestIterations} iterations: {customLoggerBuilderGenericTimespan} ms, GC Alloc: {customLoggerBuilderGenericGC / 1024.0:F2} KB";
+        File.AppendAllText(reportPath, report + "\n");
+        UnityEngine.Debug.Log(report);
+    }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+    void ShowPoolStatistics()
+    {
+        var sbStats = CycloneGames.Logger.Util.StringBuilderPool.GetStatistics();
+        var msgStats = LogMessagePool.GetStatistics();
+
+        string statsReport = $@"
+========================================
+Object Pool Statistics
+========================================
+StringBuilder Pool:
+  - Current Size: {sbStats.CurrentSize}
+  - Peak Size: {sbStats.PeakSize}
+  - Total Gets: {sbStats.TotalGets}
+  - Total Returns: {sbStats.TotalReturns}
+  - Pool Misses: {sbStats.TotalMisses} (new allocations)
+  - Total Discards: {sbStats.TotalDiscards}
+  - Trim Count: {sbStats.TrimCount}
+  - Hit Rate: {sbStats.HitRate:P2}
+  - Discard Rate: {sbStats.DiscardRate:P2}
+
+LogMessage Pool:
+  - Current Size: {msgStats.CurrentSize}
+  - Peak Size: {msgStats.PeakSize}
+  - Total Gets: {msgStats.TotalGets}
+  - Total Returns: {msgStats.TotalReturns}
+  - Pool Misses: {msgStats.TotalMisses} (new allocations)
+  - Total Discards: {msgStats.TotalDiscards}
+  - Trim Count: {msgStats.TrimCount}
+  - Hit Rate: {msgStats.HitRate:P2}
+  - Discard Rate: {msgStats.DiscardRate:P2}
+========================================
+";
+        File.AppendAllText(reportPath, statsReport);
+        UnityEngine.Debug.Log(statsReport);
+    }
+#endif
+
+    string BuildFinalReport()
+    {
+        return $@"
+{TestIterations} Iterations (Single-Threaded, Pools Pre-Warmed)
+Final Comparison ({System.DateTime.Now}):
+==========================================================================
+| Logger Type                   | Time (ms) | GC (KB)    | Notes        |
+|-------------------------------|-----------|------------|--------------|
+| Unity Debug.Log               | {FormatFloat(unityLoggerTimespan)} | {FormatGC(unityLoggerGC)} | Baseline     |
+| CLogger String API            | {FormatFloat(customLoggerStringTimespan)} | {FormatGC(customLoggerStringGC)} | Caller alloc |
+| CLogger Builder (closure)     | {FormatFloat(customLoggerBuilderTimespan)} | {FormatGC(customLoggerBuilderGC)} | Has closure  |
+| CLogger Builder (generic)     | {FormatFloat(customLoggerBuilderGenericTimespan)} | {FormatGC(customLoggerBuilderGenericGC)} | Zero closure |
+==========================================================================
+
+NOTES:
+- Single-threaded mode ensures all GC (enqueue + dispatch) is measured deterministically.
+- String API GC = caller's string interpolation + UnityLogger sb.ToString().
+- Builder (closure): lambda captures loop variable => closure + delegate allocation.
+- Builder (generic): static lambda with state parameter => zero closure, zero delegate allocation.
+- Remaining GC in generic path = UnityLogger sb.ToString() (unavoidable for Unity Console output).
+- In production without UnityLogger (file-only), generic API achieves true zero-GC.
+";
+    }
+
+    static string FormatFloat(float number, int length = 9)
+    {
+        return number.ToString("F2").PadLeft(length);
+    }
+
+    static string FormatGC(long bytes)
+    {
+        return (bytes / 1024.0).ToString("F2").PadLeft(10);
     }
 }

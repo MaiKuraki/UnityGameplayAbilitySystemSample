@@ -1,13 +1,34 @@
 using UnityEngine;
 using Cysharp.Threading.Tasks;
 using System.Threading;
+using CycloneGames.Logger;
 
 namespace CycloneGames.UIFramework.Runtime
 {
     public class UIWindow : MonoBehaviour
     {
-        [SerializeField, Header("Priority Override"), Range(-100, 400)] private int priority = 0; // Default priority
-        public int Priority => priority;
+        // [NOTE] localPriority is commented out as we currently prefer to set Priority only in UIWindowConfiguration.
+        // However, in some special cases, developers may want to place UI prefabs directly in the scene hierarchy
+        // (as children under the UIFramework's layer objects) without creating them via code (UIManager.OpenWindow).
+        // In such cases, these scene-placed windows won't have a UIWindowConfiguration, and localPriority would be needed.
+        // To re-enable: uncomment the field below and update the Priority property to fallback to _localPriority.
+        // 
+        // [SerializeField, Header("Local Priority (used when no Configuration)"), Range(-100, 400)] 
+        // private int _localPriority = 0;
+        
+        private UIWindowConfiguration _configuration;
+        
+        /// <summary>
+        /// Priority from Configuration. Returns 0 if no Configuration is set.
+        /// Note: If you need to support scene-placed windows without Configuration,
+        /// uncomment _localPriority above and change this to: _configuration != null ? _configuration.Priority : _localPriority
+        /// </summary>
+        public int Priority => _configuration?.Priority ?? 0;
+        
+        /// <summary>
+        /// Sets the UIWindowConfiguration for this window (called by UIManager).
+        /// </summary>
+        public void SetConfiguration(UIWindowConfiguration config) => _configuration = config;
 
         private string windowNameInternal;
         public string WindowName => windowNameInternal;
@@ -16,6 +37,7 @@ namespace CycloneGames.UIFramework.Runtime
         private CancellationTokenSource openCts;
         private CancellationTokenSource closeCts;
         private IUIWindowTransitionDriver _transitionDriver; // Optional external transition driver
+        internal IUIWindowBinder[] _binders; // Injected by UIManager for lifecycle hooks
 
         // Shared state instances to avoid per-open allocations
         private static readonly OpeningState OpeningStateShared = new OpeningState();
@@ -34,6 +56,11 @@ namespace CycloneGames.UIFramework.Runtime
         private bool _isDestroying = false; // Flag to prevent multiple destruction logic paths
 
         /// <summary>
+        /// The current window state. Used by UIManager to check if the window is closing/closed.
+        /// </summary>
+        public IUIWindowState CurrentState => currentState;
+
+        /// <summary>
         /// Sets the logical name for this UI window.
         /// This name is used by UIManager and UILayer for identification.
         /// </summary>
@@ -41,7 +68,7 @@ namespace CycloneGames.UIFramework.Runtime
         {
             if (string.IsNullOrEmpty(newWindowName))
             {
-                Debug.LogError("[UIWindow] Window name cannot be null or empty.", this);
+                CLogger.LogError("[UIWindow] Window name cannot be null or empty.");
                 // Fallback to GameObject name if newWindowName is invalid, though this should be avoided.
                 windowNameInternal = gameObject.name;
                 return;
@@ -63,20 +90,14 @@ namespace CycloneGames.UIFramework.Runtime
         /// </summary>
         internal void Close()
         {
-            if (_isDestroying) return; // Already in the process of closing/destroying
+            if (_isDestroying) return;
 
             if (currentState is ClosingState || currentState is ClosedState)
             {
                 return;
             }
 
-            // Transition to ClosingState, which might trigger animations.
             OnStartClose();
-
-            // TODO: Implement actual closing animation.
-            // For now, immediately "finish" closing.
-            // In a real scenario, OnFinishedClose would be called by an animation event, a timer, or UniTask.Delay.
-            // If using animations, ensure OnFinishedClose is reliably called.
             OnFinishedClose();
         }
 
@@ -86,20 +107,17 @@ namespace CycloneGames.UIFramework.Runtime
         public async UniTask CloseAsync(CancellationToken externalToken)
         {
             if (_isDestroying) return;
+            if (currentState is ClosingState || currentState is ClosedState) return;
+
             // cancel any ongoing open
             openCts?.Cancel();
             openCts?.Dispose();
             openCts = null;
 
             closeCts?.Dispose();
-            if (externalToken == CancellationToken.None)
-            {
-                closeCts = new CancellationTokenSource();
-            }
-            else
-            {
-                closeCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
-            }
+            closeCts = externalToken == CancellationToken.None
+                ? new CancellationTokenSource()
+                : CancellationTokenSource.CreateLinkedTokenSource(externalToken);
             var ct = closeCts.Token;
 
             OnStartClose();
@@ -133,12 +151,20 @@ namespace CycloneGames.UIFramework.Runtime
         {
             if (_isDestroying) return;
             ChangeState(OpeningStateShared);
+            if (_binders != null)
+            {
+                for (int i = 0; i < _binders.Length; i++) _binders[i].OnWindowStateChanged(this, WindowStateCallbackType.OnStartOpen);
+            }
         }
 
         protected virtual void OnFinishedOpen()
         {
             if (_isDestroying) return;
             ChangeState(OpenedStateShared);
+            if (_binders != null)
+            {
+                for (int i = 0; i < _binders.Length; i++) _binders[i].OnWindowStateChanged(this, WindowStateCallbackType.OnFinishedOpen);
+            }
         }
 
         protected virtual void OnStartClose()
@@ -150,19 +176,24 @@ namespace CycloneGames.UIFramework.Runtime
                 return;
             }
             ChangeState(ClosingStateShared);
+            if (_binders != null)
+            {
+                for (int i = 0; i < _binders.Length; i++) _binders[i].OnWindowStateChanged(this, WindowStateCallbackType.OnStartClose);
+            }
         }
 
         protected virtual void OnFinishedClose()
         {
-            if (_isDestroying && currentState is ClosedState) return; // Already fully closed and processed by OnDestroy
-            if (_isDestroying && !(currentState is ClosingState)) return; // If already destroying by other means and not in closing state
-
-            _isDestroying = true; // Mark that destruction process has started from logical close
+            if (_isDestroying && currentState is ClosedState) return;
+            if (_isDestroying && !(currentState is ClosingState)) return;
 
             ChangeState(ClosedStateShared);
+            if (_binders != null)
+            {
+                for (int i = 0; i < _binders.Length; i++) _binders[i].OnWindowStateChanged(this, WindowStateCallbackType.OnFinishedClose);
+            }
 
-            // The window is responsible for destroying its GameObject.
-            // UILayer will be notified via this window's OnDestroy method.
+            _isDestroying = true;
             if (gameObject) Destroy(gameObject);
         }
 
@@ -252,9 +283,6 @@ namespace CycloneGames.UIFramework.Runtime
             // Allow derived classes to await custom animations; here it's immediate
             if (ct.IsCancellationRequested) return;
             OnFinishedOpen();
-
-            // The task is completed, signaling that the window is fully open.
-            await Cysharp.Threading.Tasks.UniTask.CompletedTask;
         }
 
         /// <summary>
@@ -285,7 +313,25 @@ namespace CycloneGames.UIFramework.Runtime
             }
             if (ct.IsCancellationRequested) return;
             OnFinishedOpen();
-            await UniTask.CompletedTask;
+        }
+
+        // Opens the window through its full state lifecycle and notifies binders, but skips
+        // any transition driver animation. Used by the coordinated transition path so the
+        // entering window is ready and positioned before both animations fire simultaneously.
+        internal UniTask OpenSilentAsync(CancellationToken ct)
+        {
+            closeCts?.Cancel();
+            closeCts?.Dispose();
+            closeCts = null;
+            openCts?.Dispose();
+            openCts = ct == CancellationToken.None
+                ? new CancellationTokenSource()
+                : CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+            OnStartOpen();
+            if (openCts.Token.IsCancellationRequested) return UniTask.CompletedTask;
+            OnFinishedOpen(); // Immediately mark as open — animator will take over from coordinator
+            return UniTask.CompletedTask;
         }
 
         protected virtual void Update()

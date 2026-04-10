@@ -12,25 +12,10 @@ namespace CycloneGames.InputSystem.Sample
     {
         public enum StartupMode
         {
-            /// <summary>
-            /// Auto-joins Player 0 with all its required devices (e.g., Keyboard and Mouse) locked.
-            /// </summary>
             AutoJoinLockedSinglePlayer,
-            /// <summary>
-            /// Auto-joins two players on a shared keyboard. Requires different keybindings in YAML.
-            /// </summary>
             AutoJoinSharedKeyboard,
-            /// <summary>
-            /// Listens for any device to press 'Join', locking each device to the joining player.
-            /// </summary>
             LobbyWithDeviceLocking,
-            /// <summary>
-            /// Listens for any device to press 'Join', allowing multiple players to use one device.
-            /// </summary>
             LobbyWithSharedDevices,
-            /// <summary>
-            /// Explicitly locks Keyboard to Player 0 and Mouse to Player 1 for asymmetrical co-op.
-            /// </summary>
             AsymmetricalKeyboardMouse
         }
 
@@ -48,7 +33,6 @@ namespace CycloneGames.InputSystem.Sample
 
         private static bool isInitialized = false;
 
-        // Use async UniTaskVoid for a fire-and-forget async Start method.
         private async void Start()
         {
             if (isInitialized)
@@ -63,12 +47,11 @@ namespace CycloneGames.InputSystem.Sample
             string userConfigUri = FilePathUtility.GetUnityWebRequestUri(_userConfigName, UnityPathSource.PersistentData);
             await InputSystemLoader.InitializeAsync(defaultConfigUri, userConfigUri);
 
-            InputManager.Instance.OnPlayerJoined += HandlePlayerJoined;
+            InputManager.Instance.OnPlayerInputReady += HandlePlayerInputReady;
 
             switch (startupMode)
             {
                 case StartupMode.AutoJoinLockedSinglePlayer:
-                    // Await the new patient, asynchronous join method.
                     InputManager.Instance.JoinSinglePlayer(0);
                     break;
 
@@ -96,14 +79,14 @@ namespace CycloneGames.InputSystem.Sample
         {
             if (isInitialized && InputManager.Instance != null)
             {
-                InputManager.Instance.OnPlayerJoined -= HandlePlayerJoined;
+                InputManager.Instance.OnPlayerInputReady -= HandlePlayerInputReady;
                 InputManager.Instance.Dispose();
             }
         }
 
-        private void HandlePlayerJoined(IInputService playerInput)
+        private void HandlePlayerInputReady(IInputPlayer inputPlayer)
         {
-            int playerId = (playerInput as InputService).PlayerId;
+            int playerId = (inputPlayer as InputPlayer).PlayerId;
 
             if (_playerPrefab == null)
             {
@@ -125,32 +108,26 @@ namespace CycloneGames.InputSystem.Sample
                 Color playerColor = _playerColors.Length > playerId ? _playerColors[playerId] : Color.white;
                 controller.Initialize(playerId, playerColor);
 
-                // --- Context and Command setup using the new Zero-GC API ---
-                
-                // Create commands that link input events to controller methods
                 var moveCommand = new MoveCommand(controller.OnMove);
                 var confirmCommand = new ActionCommand(controller.OnConfirm);
                 var confirmLongPressCommand = new ActionCommand(controller.OnConfirmLongPress);
 
-                // Create an input context for gameplay
-                var gameplayContext = new InputContext("Gameplay", "PlayerActions")
-                    // Bind the 'Move' action using the generated constant ID. The name is Context_Action.
-                    .AddBinding(playerInput.GetVector2Observable(InputActions.Actions.Gameplay_Move), moveCommand)
-                    // Bind the 'Confirm' action's short press event
-                    .AddBinding(playerInput.GetButtonObservable(InputActions.Actions.Gameplay_Confirm), confirmCommand)
-                    // Bind the 'Confirm' action's long press event
-                    .AddBinding(playerInput.GetLongPressObservable(InputActions.Actions.Gameplay_Confirm), confirmLongPressCommand);
-
-                // Register the context with the service and push it to the top of the stack to activate it.
-                playerInput.RegisterContext(gameplayContext);
-                playerInput.PushContext("Gameplay");
+                // Create context (name parameter is optional, defaults to actionMapName)
+                var gameplayContext = new InputContext(InputActions.ActionMaps.PlayerActions, InputActions.Contexts.Gameplay)
+                    .AddBinding(inputPlayer.GetVector2Observable(InputActions.Actions.Gameplay_Move), moveCommand)
+                    .AddBinding(inputPlayer.GetButtonObservable(InputActions.Actions.Gameplay_Confirm), confirmCommand)
+                    .AddBinding(inputPlayer.GetLongPressObservable(InputActions.Actions.Gameplay_Confirm), confirmLongPressCommand);
                 
-                // --- Example of subscribing to device changes ---
-                playerInput.ActiveDeviceKind.Subscribe(kind =>
+                // Bind lifecycle to the controller
+                gameplayContext.AddTo(controller.destroyCancellationToken);
+
+                // Push the context object directly
+                inputPlayer.PushContext(gameplayContext);
+
+                inputPlayer.ActiveDeviceKind.Subscribe(kind =>
                 {
                     Debug.Log($"Player {playerId} active device changed to: {kind}");
-                    // Here you could update UI prompts, e.g., show "Press [A]" vs "Press [Space]"
-                }).AddTo(controller.destroyCancellationToken); // Manage subscription lifetime on the MonoBehaviour component, not the GameObject.
+                }).AddTo(controller.destroyCancellationToken);
             }
         }
     }
