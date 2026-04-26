@@ -2,7 +2,7 @@ using System;
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayFramework;
 using CycloneGames.GameplayFramework.Runtime;
-using CycloneGames.GameplayTags.Runtime;
+using CycloneGames.GameplayTags.Core;
 using CycloneGames.Logger;
 using CycloneGames.Utility.Runtime;
 using UnityEngine;

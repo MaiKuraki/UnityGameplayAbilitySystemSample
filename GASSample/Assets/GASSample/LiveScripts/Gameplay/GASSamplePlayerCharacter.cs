@@ -1,7 +1,7 @@
 using System.Linq;
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayFramework.Runtime;
-using CycloneGames.GameplayTags.Runtime;
+using CycloneGames.GameplayTags.Core;
 using GASSample.Message;
 using GASSample.UI;
 using RPGSample.Message;
@@ -16,6 +16,8 @@ namespace GASSample.Gameplay
 
         [SerializeField] private Transform CameraFocusTF;
         [SerializeField] private GameplayTag comboEntryAbilityTag = GASSampleTags.Skill_Definition_Attack_1;
+        [Header("Debug")]
+        [SerializeField] private bool enableGasDebugLogs = false;
 
         protected override void Awake()
         {
@@ -185,7 +187,13 @@ namespace GASSample.Gameplay
             {
                 if (abilitySpec.Ability != null && abilitySpec.Ability.AbilityTags.HasTag(tag))
                 {
-                    AbilitySystemComponent.CombinedTags.RemoveTag(GASSampleTags.Skill_Cooldown_Attack);
+                    if (enableGasDebugLogs)
+                    {
+                        bool isOnCooldown = AbilitySystemComponent.IsAbilityOnCooldown(abilitySpec.Ability);
+                        AbilitySystemComponent.GetCooldownInfo(abilitySpec.Ability, out float cooldownRemaining, out float cooldownTotal);
+                        Debug.Log($"[GASDebug] TryActivate ability={abilitySpec.Ability.Name} tag={tag} onCooldown={isOnCooldown} cooldown={cooldownRemaining:0.00}/{cooldownTotal:0.00}");
+                    }
+
                     return AbilitySystemComponent.TryActivateAbility(abilitySpec);
                 }
             }

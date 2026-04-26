@@ -2,7 +2,7 @@
     "name": "CycloneGames.GameplayTags.SourceGenerator",
     "rootNamespace": "CycloneGames.GameplayTags.SourceGenerator",
     "references": [
-        "CycloneGames.GameplayTags.Runtime"
+        "CycloneGames.GameplayTags.Core"
     ],
     "includePlatforms": [
         "Editor"

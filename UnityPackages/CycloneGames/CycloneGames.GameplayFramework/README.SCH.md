@@ -43,6 +43,7 @@ CycloneGames.GameplayFramework 是一个面向 Unity 的 Gameplay 基础框架�
     - [DamageType 伤害系统](#damagetype-伤害系统)
     - [World 与 WorldSettings](#world-与-worldsettings)
     - [CameraManager](#cameramanager)
+    - [GameplayAbility 与技能镜头集成](#gameplayability-与技能镜头集成)
     - [PlayerStart](#playerstart)
     - [SpectatorPawn](#spectatorpawn)
     - [KillZVolume](#killzvolume)
@@ -1111,7 +1112,7 @@ public sealed class PowerStrikeAbility : GameplayAbility
 
     private AbilityCinematicMode cameraModeInstance = new AbilityCinematicMode();
     private bool isSkillCameraActive;
-    
+
     protected override void OnActivate()
     {
         base.OnActivate();
@@ -1205,6 +1206,7 @@ public sealed class PowerStrikeAbility : GameplayAbility
 - 如果你**完全不想改变 FOV**，那就只写 `localOffsetY/Z` 曲线即可。对于当前第三人称 basePose，`localOffsetZ > 0` 表示沿镜头前方向目标拉近，`localOffsetZ < 0` 表示向后拉远。若技能结束时要移除该模式，请确保最终曲线回到 `0`，使镜头自然回到默认跟随位。
 
 如需在具体事件点（如伤害命中）触发额外镜头反馈，可以：
+
 - 在 AnimationEvent 中调用 Ability 上的方法（如 `OnDamageHit()`）
 - 该方法通过 `RegisterPostProcessor()` 临时加入屏幕抖动或其他 `ICameraPostProcessor`
 

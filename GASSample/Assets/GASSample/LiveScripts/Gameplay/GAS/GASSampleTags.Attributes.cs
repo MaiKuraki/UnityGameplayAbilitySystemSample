@@ -1,4 +1,4 @@
-[assembly: CycloneGames.GameplayTags.Runtime.RegisterGameplayTagsFrom(typeof(GASSample.Gameplay.GASSampleTags))]
+[assembly: CycloneGames.GameplayTags.Core.RegisterGameplayTagsFrom(typeof(GASSample.Gameplay.GASSampleTags))]
 
 namespace GASSample.Gameplay
 {

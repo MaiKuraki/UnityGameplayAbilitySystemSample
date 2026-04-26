@@ -2,7 +2,8 @@
     "name": "CycloneGames.GameplayTags.Editor",
     "rootNamespace": "",
     "references": [
-        "CycloneGames.GameplayTags.Runtime"
+        "CycloneGames.GameplayTags.Core",
+        "CycloneGames.GameplayTags.Unity"
     ],
     "includePlatforms": [
         "Editor"

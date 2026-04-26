@@ -1,5 +1,5 @@
 using CycloneGames.GameplayAbilities.Runtime;
-using CycloneGames.GameplayTags.Runtime;
+using CycloneGames.GameplayTags.Core;
 using CycloneGames.Logger;
 using UnityEngine;
 using System.Collections.Generic;
@@ -45,7 +45,7 @@ namespace CycloneGames.GameplayAbilities.Sample
 
             var charactersToProcess = new HashSet<Character>();
 
-            var casterCharacter = (ActorInfo.AvatarActor as GameObject)?.GetComponent<Character>();
+            var casterCharacter = ActorInfo.AvatarGameObject?.GetComponent<Character>();
             if (casterCharacter != null)
             {
                 charactersToProcess.Add(casterCharacter);

@@ -43,6 +43,7 @@ The package is intended for projects that need a reusable gameplay architecture 
     - [DamageType System](#damagetype-system)
     - [World \& WorldSettings](#world--worldsettings)
     - [CameraManager](#cameramanager)
+    - [GameplayAbility Integration with Skill Camera](#gameplayability-integration-with-skill-camera)
     - [PlayerStart](#playerstart)
     - [SpectatorPawn](#spectatorpawn)
     - [KillZVolume](#killzvolume)
@@ -1112,7 +1113,7 @@ public sealed class PowerStrikeAbility : GameplayAbility
 
     private AbilityCinematicMode cameraModeInstance = new AbilityCinematicMode();
     private bool isSkillCameraActive;
-    
+
     protected override void OnActivate()
     {
         base.OnActivate();
@@ -1205,6 +1206,7 @@ Align the **animation montage length** with **total stage durations**. For examp
 - If you want a pure dolly-in without changing FOV, animate only `localOffsetY/Z`. For the current third-person basePose, `localOffsetZ > 0` moves the camera forward toward the target, while `localOffsetZ < 0` moves it backward away from the target. If the mode will be removed at skill end, make sure the final curve returns to `0` so the camera naturally settles back to the default follow pose.
 
 For event-driven camera feedback at specific points (e.g., damage hit), you can:
+
 - Use AnimationEvent to call a method on the Ability (e.g., `OnDamageHit()`)
 - That method can temporarily register an `ICameraPostProcessor` for screen shake or other effects
 

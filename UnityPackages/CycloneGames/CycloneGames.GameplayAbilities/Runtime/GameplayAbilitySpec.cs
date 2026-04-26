@@ -8,6 +8,14 @@ namespace CycloneGames.GameplayAbilities.Runtime
     public class GameplayAbilitySpec : IGASPoolable
     {
         /// <summary>
+        /// Globally-unique handle assigned at pool-get time.
+        /// Stable across the spec's entire lifetime; reset on ReturnToPool.
+        /// Used by IGASNetworkBridge to address ability activations by ID rather than list index.
+        /// </summary>
+        public int Handle { get; private set; }
+
+        private static int s_NextHandle; // Interlocked increment for thread safety
+        /// <summary>
         /// The stateless definition of the ability (template).
         /// </summary>
         public GameplayAbility Ability { get; private set; }
@@ -60,13 +68,14 @@ namespace CycloneGames.GameplayAbilities.Runtime
             GrantingEffect = null;
             Level = 0;
             IsActive = false;
+            Handle = 0;
         }
 
         #endregion
 
         #region Factory
 
-        public static GameplayAbilitySpec Create(GameplayAbility ability, int level = 1)
+        public static GameplayAbilitySpec Create(GameplayAbility ability, int level = 1, int replicatedHandle = 0)
         {
             var spec = GASPool<GameplayAbilitySpec>.Shared.Get();
             spec.Ability = ability;
@@ -74,12 +83,41 @@ namespace CycloneGames.GameplayAbilities.Runtime
             spec.IsActive = false;
             spec.AbilityInstance = null;
             spec.Owner = null;
+            spec.Handle = replicatedHandle > 0
+                ? replicatedHandle
+                : System.Threading.Interlocked.Increment(ref s_NextHandle);
+            EnsureNextHandleAtLeast(spec.Handle);
             return spec;
+        }
+
+        private static void EnsureNextHandleAtLeast(int handle)
+        {
+            int current;
+            do
+            {
+                current = System.Threading.Volatile.Read(ref s_NextHandle);
+                if (current >= handle)
+                {
+                    return;
+                }
+            }
+            while (System.Threading.Interlocked.CompareExchange(ref s_NextHandle, handle, current) != current);
         }
 
         internal void Init(AbilitySystemComponent owner)
         {
             this.Owner = owner;
+        }
+
+        internal void AssignReplicatedHandle(int replicatedHandle)
+        {
+            if (replicatedHandle <= 0 || Handle == replicatedHandle)
+            {
+                return;
+            }
+
+            Handle = replicatedHandle;
+            EnsureNextHandleAtLeast(replicatedHandle);
         }
 
         #endregion
@@ -125,16 +163,23 @@ namespace CycloneGames.GameplayAbilities.Runtime
         {
             if (AbilityInstance != null)
             {
-                if (IsActive) AbilityInstance.CancelAbility();
-                if (Ability.InstancingPolicy != EGameplayAbilityInstancingPolicy.NonInstanced)
+                if (IsActive)
                 {
-                    PoolManager.ReturnAbility(AbilityInstance);
+                    AbilityInstance.CancelAbility();
+                }
+
+                var instanceToReturn = AbilityInstance;
+                if (instanceToReturn != null && Ability.InstancingPolicy != EGameplayAbilityInstancingPolicy.NonInstanced)
+                {
+                    PoolManager.ReturnAbility(instanceToReturn);
                 }
                 AbilityInstance = null;
             }
             AbilityCDO?.OnRemoveAbility();
+        }
 
-            // Return self to pool
+        internal void ReturnToPool()
+        {
             GASPool<GameplayAbilitySpec>.Shared.Return(this);
         }
     }

@@ -27,7 +27,7 @@ MonoBehaviour:
     m_SerializedExplicitTags: []
   GrantedTags:
     m_SerializedExplicitTags:
-    - Skill.Cooldown.Attack
+    - Skill.Cooldown.Attack_1
   ApplicationTagRequirements:
     m_ForbiddenTags:
       m_SerializedExplicitTags: []

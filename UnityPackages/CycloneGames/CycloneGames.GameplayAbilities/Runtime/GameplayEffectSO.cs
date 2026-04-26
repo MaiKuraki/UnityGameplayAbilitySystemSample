@@ -1,5 +1,5 @@
 using System.Collections.Generic;
-using CycloneGames.GameplayTags.Runtime;
+using CycloneGames.GameplayTags.Core;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Runtime
@@ -73,11 +73,10 @@ namespace CycloneGames.GameplayAbilities.Runtime
         private GameplayEffect _runtimeCache;
         public GameplayEffect GetGameplayEffect()
         {
-            if (_runtimeCache == null)
-            {
-                _runtimeCache = CreateGameplayEffect();
-            }
-            return _runtimeCache;
+            //  Thread-safe lazy initialization prevents concurrent calls from creating
+            // two different GameplayEffect instances, which would break the stacking index
+            // (Dictionary keyed on GameplayEffect reference identity).
+            return System.Threading.LazyInitializer.EnsureInitialized(ref _runtimeCache, CreateGameplayEffect);
         }
 
         /// <summary>

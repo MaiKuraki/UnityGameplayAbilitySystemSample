@@ -3,7 +3,8 @@
     "rootNamespace": "CycloneGames.GameplayFramework.Runtime.Integrations.GameplayTags",
     "references": [
         "CycloneGames.GameplayFramework.Runtime",
-        "CycloneGames.GameplayTags.Runtime"
+        "CycloneGames.GameplayTags.Core",
+        "CycloneGames.GameplayTags.Unity"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

@@ -28,9 +28,23 @@ MonoBehaviour:
     m_SerializedExplicitTags: []
   BlockAbilitiesWithTag:
     m_SerializedExplicitTags: []
-  DmgEffect: {fileID: 11400000, guid: 736ec0e0786df2c4dad9b8926a823887, type: 2}
-  Anim_Character: {fileID: -203655887218126122, guid: f4be754ef31faf349a6cc00863d34151,
+  ActivationOwnedTags:
+    m_SerializedExplicitTags: []
+  SourceRequiredTags:
+    m_SerializedExplicitTags: []
+  SourceBlockedTags:
+    m_SerializedExplicitTags: []
+  TargetRequiredTags:
+    m_SerializedExplicitTags: []
+  TargetBlockedTags:
+    m_SerializedExplicitTags: []
+  ActivateAbilityOnGranted: 0
+  AbilityTriggerDataList: []
+  animCharacter: {fileID: -203655887218126122, guid: f4be754ef31faf349a6cc00863d34151,
     type: 3}
-  Anim_Camera: {fileID: 0}
-  NextComboAbility: {fileID: 11400000, guid: 9b5951874022ec542b894e859e7e45e6, type: 2}
-  ComboWindowDuration: 0.5
+  useRootMotion: 1
+  damageEffect: {fileID: 11400000, guid: 736ec0e0786df2c4dad9b8926a823887, type: 2}
+  comboWindowDuration: 0.5
+  nextComboAbility: {fileID: 11400000, guid: 9b5951874022ec542b894e859e7e45e6, type: 2}
+  cameraClip: {fileID: 0}
+  cameraPolicy: {fileID: 0}

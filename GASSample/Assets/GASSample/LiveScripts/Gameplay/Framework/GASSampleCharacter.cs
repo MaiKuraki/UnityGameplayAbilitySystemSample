@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayFramework.Runtime;
-using CycloneGames.GameplayTags.Runtime;
+using CycloneGames.GameplayTags.Core;
 using CycloneGames.Logger;
 using CycloneGames.RPGFoundation;
 using CycloneGames.Utility.Runtime;
