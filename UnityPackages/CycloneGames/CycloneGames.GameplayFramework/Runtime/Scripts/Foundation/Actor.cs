@@ -83,7 +83,12 @@ namespace CycloneGames.GameplayFramework.Runtime
         public bool IsHidden() => bHidden;
         public virtual void SetActorHiddenInGame(bool bNewHidden)
         {
-            if (bHidden == bNewHidden) return;
+            ApplyActorHiddenInGame(bNewHidden, false);
+        }
+
+        private void ApplyActorHiddenInGame(bool bNewHidden, bool forceRendererSync)
+        {
+            if (bHidden == bNewHidden && !forceRendererSync) return;
             bHidden = bNewHidden;
             s_rendererBuffer.Clear();
             GetComponentsInChildren(true, s_rendererBuffer);
@@ -266,6 +271,103 @@ namespace CycloneGames.GameplayFramework.Runtime
         /// Default returns true (standalone/single-player).
         /// </summary>
         public virtual bool HasAuthority() => true;
+        #endregion
+
+        #region Migration
+        /// <summary>
+        /// Returns the prefab asset path used to re-instantiate this actor on a
+        /// target process during migration. Override for dynamic or pooled actors.
+        /// </summary>
+        /// <remarks>
+        /// The default returns <c>gameObject.name</c>. Override to return a stable
+        /// asset path (e.g., "Prefabs/Characters/PlayerPawn") for production use.
+        /// </remarks>
+        public virtual string GetMigrationPrefabAssetPath() => gameObject.name;
+
+        /// <summary>
+        /// Captures all mutable state needed to reconstruct this actor on another process.
+        /// Reference-typed fields (owner, instigator) are stored as integer identifiers
+        /// because UnityEngine.Object references are not valid across processes.
+        /// </summary>
+        /// <param name="ownerConnectionId">
+        /// The network connection ID to use for the owner field in the migration state.
+        /// Callers must resolve the owner Actor reference to a connection ID before calling.
+        /// </param>
+        /// <param name="instigatorActorId">
+        /// The globally unique actor ID to use for the instigator field, or 0 if none.
+        /// </param>
+        public virtual ActorMigrationState CaptureMigrationState(int ownerConnectionId, int instigatorActorId)
+        {
+            string[] tagCopy = tags != null && tags.Count > 0
+                ? tags.ToArray()
+                : System.Array.Empty<string>();
+
+            return new ActorMigrationState(
+                position: transform.position,
+                rotation: transform.rotation,
+                scale: transform.localScale,
+                prefabAssetPath: GetMigrationPrefabAssetPath(),
+                remainingLifeSpan: initialLifeSpanSec,
+                canBeDamaged: bCanBeDamaged,
+                hidden: bHidden,
+                tags: tagCopy,
+                ownerConnectionId: ownerConnectionId,
+                instigatorActorId: instigatorActorId,
+                actorName: actorName,
+                hasBegunPlay: hasBegunPlay
+            );
+        }
+
+        /// <summary>
+        /// Restores actor state from a migration snapshot received from another process.
+        /// Override to restore subclass-specific state, always calling the base implementation.
+        /// </summary>
+        public virtual void RestoreMigrationState(in ActorMigrationState state)
+        {
+            transform.SetPositionAndRotation(state.Position, state.Rotation);
+            transform.localScale = state.Scale;
+            initialLifeSpanSec = state.RemainingLifeSpan;
+            bCanBeDamaged = state.CanBeDamaged;
+            actorName = state.ActorName;
+
+            tags?.Clear();
+            if (state.Tags != null && state.Tags.Length > 0)
+            {
+                tags ??= new System.Collections.Generic.List<string>(state.Tags.Length);
+                for (int i = 0; i < state.Tags.Length; i++)
+                {
+                    tags.Add(state.Tags[i]);
+                }
+            }
+
+            ApplyActorHiddenInGame(state.Hidden, true);
+
+            if (state.RemainingLifeSpan > 0.001f && hasBegunPlay)
+            {
+                Destroy(gameObject, state.RemainingLifeSpan);
+            }
+        }
+
+        /// <summary>
+        /// Called on the source process immediately before migration transfer.
+        /// Override to detach references, stop behavior trees, or serialize custom state.
+        /// Default implementation is a no-op.
+        /// </summary>
+        public virtual void PreMigration() { }
+
+        /// <summary>
+        /// Called on the target process after <see cref="RestoreMigrationState"/>
+        /// completes. Override to reinitialize subsystems, restart behavior trees,
+        /// or re-establish runtime references. Always call base.
+        /// </summary>
+        public virtual void PostMigration()
+        {
+            if (!hasBegunPlay)
+            {
+                hasBegunPlay = true;
+                BeginPlay();
+            }
+        }
         #endregion
     }
 }

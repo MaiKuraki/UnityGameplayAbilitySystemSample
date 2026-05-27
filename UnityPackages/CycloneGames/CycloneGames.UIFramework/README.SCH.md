@@ -50,6 +50,10 @@
 | **页数与 Mipmap 控制** | 可配置 `maxPages` 限制防止无限 VRAM 增长；可选 mipmap 生成支持 LOD 友好的世界空间 UI                                  |
 | **线程安全原子操作**   | 像素面积跟踪和引用计数使用 `Interlocked` 原子操作，消除并发场景下的 TOCTOU 竞态条件                                   |
 | **原生异步设计**       | 所有加载、实例化、打开操作均基于 `UniTask`，永不阻塞主线程                                                            |
+| **运行时监控器**       | Play 模式实时编辑器面板（`UIRuntimeMonitorWindow`）显示活动窗口、进行中的打开操作、句柄计数和逐层明细                 |
+| **性能审计器**         | 静态分析工具（`UIPerformanceAuditWindow`）扫描 UI 预制体，检测布局报废、冗余射线、材质膨胀等问题                      |
+| **嵌入式上下文快照**   | `UIAssetContextProvider` 内联缓存序列化元数据 — 首帧零延迟解析，无需等待异步加载                                      |
+| **上下文预加载预热**   | `BeginWarmup(IAssetPackage)` 在场景初始化期间后台启动异步上下文解析                                                   |
 
 ### 🔒 可靠性与安全性
 
@@ -176,6 +180,8 @@ stateDiagram-v2
 
 定义预制体来源、目标层级及可选覆盖参数的 `ScriptableObject`。设计师无需修改代码即可配置窗口行为。
 
+配置还包含 **`SubCanvasPolicy`**（`InheritLayerCanvas` / `ForceOwnSubCanvas` / `AutoDetect`），控制窗口是否获得独立子 Canvas 以隔离重建开销。
+
 支持的预制体来源模式：
 
 | 模式              | 序列化字段                                 | 典型后端                                      | 说明                                                  |
@@ -202,7 +208,7 @@ stateDiagram-v2
 ## 依赖项
 
 - `com.cysharp.unitask`
-- `com.cyclone-games.assetmanagement`
+- `com.cyclone-games.asset-management`
 - `com.cyclone-games.factory`
 - `com.cyclone-games.logger`
 - `com.cyclone-games.service`
@@ -268,6 +274,139 @@ public class UIDebugBootstrap : MonoBehaviour
         manager.EnableAssetLifecycleDebugLog = Debug.isDebugBuild && enableAssetLifecycleLogsInDev;
     }
 }
+```
+
+## 资产加载上下文（逐窗口资产元数据）
+
+**`UIAssetLoadContext`** 允许你为每个 UI 资产加载附加自定义元数据（bucket、tag、owner），从而精细控制 `AssetCacheService` 如何跟踪、分析和驱逐 UI 资源。
+
+### 为什么需要它？
+
+- **按功能模块隔离**：将主菜单资产标记为 `"MainMenu"`，战斗 HUD 标记为 `"Battle"`，Cache Debugger 中一目了然。
+- **基于 Owner 的驱逐**：分配 `Owner` 值（如关卡 ID），场景卸载时可批量释放该 Owner 下的所有 UI 资产。
+- **Config 与 Prefab 分离管理**：给配置资产分配长生命周期 bucket，预制体资产放入更激进的驱逐池。
+
+### 结构体
+
+`UIAssetLoadContext` 是 `readonly struct`（零堆分配）：
+
+```csharp
+// Config 和 Prefab 共用同一组 bucket/tag/owner
+var ctx = new UIAssetLoadContext(
+    sharedBucket: "Battle",
+    sharedTag:    "hud",
+    sharedOwner:  "level_3"
+);
+
+// 或者为 Config 和 Prefab 分别指定不同的元数据
+var ctx = new UIAssetLoadContext(
+    configBucket: "ui_configs",  configTag: "menu",  configOwner: "global",
+    prefabBucket: "ui_prefabs",  prefabTag: "menu",  prefabOwner: "level_1"
+);
+
+// 从 AssetBucketScope 构造
+var ctx = UIAssetLoadContext.FromScope(myScope);
+var ctx = UIAssetLoadContext.FromScopes(configScope, prefabScope);
+
+// 检查是否设置了任何字段
+if (ctx.HasAnyMetadata) { /* ... */ }
+```
+
+### 两级合并层级
+
+调用 `OpenUI` / `OpenUIAsync` 时，最终元数据按以下两层合并（每个字段优先取首个非空值）：
+
+1. **调用点参数** — 直接传给 `OpenUI("Window", assetLoadContext: ctx)`
+2. **UIAssetContextProvider** — 从 `UIRoot` 上的 `UIAssetContextProvider` 组件解析的默认上下文
+
+```csharp
+// Provider 会自动从 UIRoot（或其父级）上查找
+// 所有未显式传入 context 的 OpenUI 调用都会回退到 Provider 提供的元数据。
+
+// 按调用覆盖
+await uiService.OpenUIAsync("UIWindow_Shop", assetLoadContext: new UIAssetLoadContext(
+    sharedBucket: "Shop",
+    sharedOwner:  "shop_v2"
+));
+```
+
+### UIAssetContextProvider（场景级默认）
+
+`UIAssetContextProvider` 是一个 `sealed MonoBehaviour`，挂载在与 `UIRoot` 相同的 `GameObject` 上（或其父级）。它为所有未在调用点指定上下文的窗口提供**框架全局默认**的 `UIAssetLoadContext`。
+
+支持三种来源模式：
+
+| 模式              | 序列化字段             | 说明                                                          |
+| ----------------- | ---------------------- | ------------------------------------------------------------- |
+| `DirectReference` | `contextAsset`         | 直接引用一个 `UIAssetContextAsset` ScriptableObject           |
+| `AssetReference`  | `contextAssetRef`      | 使用 `AssetRef<UIAssetContextAsset>`（Addressables / 热更新） |
+| `PathLocation`    | `contextAssetLocation` | 通过 `IAssetPackage` 按字符串路径加载                         |
+
+- **Direct 模式**同步返回上下文 — 适用于本地/静态配置。
+- **异步模式**（`AssetReference` / `PathLocation`）通过 `ResolveLoadContextAsync()` 解析一次后缓存，后续调用直接使用缓存。
+- `OnValidate()` 在非 Direct 模式下会清除 `contextAsset` 字段，防止产生意外的内存引用。
+
+#### 嵌入式快照（首帧零延迟）
+
+在 Inspector 中启用 `useEmbeddedSnapshot`，可将元数据字段（`configBucket`、`configTag` 等）直接缓存在组件上。同步方法 `GetLoadContext()` 会立即返回该快照 — 首帧无需异步等待。
+
+```csharp
+// 同步路径 — 使用嵌入式快照，永不阻塞
+UIAssetLoadContext ctx = provider.GetLoadContext();
+```
+
+快照通过 Inspector 中的 **Sync Embedded Snapshot** 按钮（或代码中调用 `SyncEmbeddedSnapshotFromAsset()`）从关联的 `UIAssetContextAsset` 填充。使用 `ClearEmbeddedSnapshot()` 清除。
+
+#### 预加载预热
+
+对于 `AssetReference` 或 `PathLocation` 模式，在场景初始化时调用 `BeginWarmup(IAssetPackage)` 即可在后台开始解析资产。当第一次 `OpenUI` 调用到来时，上下文已缓存就绪：
+
+```csharp
+// 场景启动时
+provider.BeginWarmup(assetPackage);
+
+// 稍后 — 从缓存立即解析
+await uiService.OpenUIAsync("MyWindow");
+```
+
+也可以在 Inspector 中勾选 `preloadPackageBackedContext`，框架会在 `IAssetPackage` 可用时自动调用 `BeginWarmup`。
+
+#### 公开 API
+
+| 方法 / 属性                       | 说明                                                  |
+| --------------------------------- | ----------------------------------------------------- |
+| `GetLoadContext()`                | 同步 — 立即返回嵌入式快照或 Direct 引用的上下文       |
+| `ResolveLoadContextAsync()`       | 异步 — 通过 package 解析并缓存结果；自动去重并发调用  |
+| `BeginWarmup(IAssetPackage)`      | fire-and-forget 后台解析，适用于 package 模式         |
+| `SyncEmbeddedSnapshotFromAsset()` | 将当前资产字段复制到嵌入式快照                        |
+| `ClearEmbeddedSnapshot()`         | 将所有嵌入字段重置为 `null`                           |
+| `HasConfiguredSource`             | 任一来源模式具有有效引用/路径时为 `true`              |
+| `HasResolvedAssetReference`       | 异步解析已完成并已缓存时为 `true`                     |
+| `HasEmbeddedSnapshot`             | 至少一个嵌入字段非空时为 `true`                       |
+| `HasEffectiveMetadata`            | 任一路径（直接、已解析、快照）可提供元数据时为 `true` |
+
+### UIAssetContextAsset（设计师友好配置）
+
+对于偏好 Inspector 操作的设计师，可创建 `UIAssetContextAsset` ScriptableObject：
+
+**创建路径** → `CycloneGames > UIFramework > UI Asset Context Asset`
+
+该资产在 Inspector 中暴露 `configBucket / configTag / configOwner` 和 `prefabBucket / prefabTag / prefabOwner` 字段。运行时通过 `asset.ToLoadContext()` 转换为结构体。
+
+### 解析流程图
+
+```
+OpenUI("MyWindow", assetLoadContext: callSiteCtx)
+  │
+  ├─ 1. callSiteCtx（显式的逐调用覆盖）
+  │
+  └─ 2. UIRoot.AssetContextProvider.ResolveLoadContextAsync()
+       ├─ DirectReference  → contextAsset.ToLoadContext()            (同步)
+       ├─ AssetReference   → package.LoadAsync(ref).ToLoadContext()  (异步，已缓存)
+       └─ PathLocation     → package.LoadAssetAsync(path).ToLoadContext() (异步，已缓存)
+  │
+  └─ 合并：callSiteCtx.Merge(providerCtx)  →  resolvedContext
+       └─ 每个字段：callSite ?? provider
 ```
 
 ## 快速上手指南
@@ -823,6 +962,39 @@ uiService.SetTransitionCoordinator(new ZoomFadeCoordinator());
 
 > **注意**：如果没有注册协调器，`NavigateToAsync` 会自动退化为与 `NavigateTo` 相同的串行行为，不会影响任何现有代码。
 
+### 协调导航策略
+
+当用户在动画进行中快速触发连续导航（例如在第一个过渡动画播放时快速点击两个 Tab），框架需要一种策略处理重叠。`CoordinatedNavStrategy` 控制此行为：
+
+```csharp
+// 启动时设置（默认为 DirectJump）
+uiService.SetCoordinatedNavStrategy(CoordinatedNavStrategy.DirectJump);
+```
+
+| 策略         | 行为                                                                                          | 适用场景                     |
+| ------------ | --------------------------------------------------------------------------------------------- | ---------------------------- |
+| `DirectJump` | 取消进行中的过渡，从**原始**源直接跳转到**最新**目标。A→B 动画中 + B→C 请求 = 直接播放 A→C。  | Tab 栏、扁平导航、底部导航   |
+| `CardStack`  | 允许多个过渡**独立重叠**运行，产生层叠式卡片堆叠视觉效果。A→B 继续播放的同时 B→C 在上层开始。 | 钻取流程、设置页面、详情页面 |
+
+**DirectJump 示例：**
+
+```
+用户点击 Tab1 → Tab2（A→B 开始播放动画）
+用户快速点击 Tab3（A→B 尚未完成）
+  └─ 框架取消 A→B，销毁 B
+  └─ 直接开始 A→C（平滑跳过）
+```
+
+**CardStack 示例：**
+
+```
+用户打开 设置 → 音频（A→B 开始播放动画）
+用户快速点击 EQ 详情（A→B 尚未完成）
+  └─ B→C 立即开始，与 A→B 重叠
+  └─ 两个过渡独立运行
+  └─ A→B 完成时销毁 A；B→C 完成时销毁 B
+```
+
 ## 动态图集系统教程
 
 在掌握了创建和打开 UI 窗口的基础知识后，您可以使用**动态图集系统**来优化 UI 性能。该系统通过在运行时将多个 UI 纹理合并到单个图集中来减少 Draw Call。
@@ -1219,6 +1391,77 @@ public class GameInitializer : MonoBehaviour
 
 > **异步加载**: 配置 `loadFuncAsync` 后，可使用 `GetSpriteAsync()`（参见[步骤 9](#步骤-9-异步加载)）实现非阻塞纹理加载。磁盘 I/O 在后台线程运行，图集插入仍在主线程执行。
 
+### 步骤 3b: 平台层级配置
+
+无需手动设置每个字段，使用内置的 `PlatformTier` 预设即可获取目标硬件的推荐默认值：
+
+```csharp
+// 根据当前运行时平台自动检测
+var config = DynamicAtlasConfig.CreateForCurrentPlatform(
+    loadFunc:  path => assetPackage.LoadAssetSync<Texture2D>(path).Asset,
+    unloadFunc: (path, tex) => assetPackage.ReleaseAsset(path),
+    useCompression: true,              // 使用 ASTC/ETC2/BC7 替代 RGBA32
+    preferLowMemoryProfile: false      // true = 更小页面、更严格限制
+);
+DynamicAtlasManager.Instance.Configure(config);
+```
+
+**可选层级：**
+
+| 层级                          | 页面大小 | 最大页数 | 出血 | Mipmap | 说明                         |
+| ----------------------------- | -------- | -------- | ---- | ------ | ---------------------------- |
+| `PlatformTier.DesktopHighEnd` | 4096     | 无限制   | ✅   | ❌     | PC / Mac / 主机              |
+| `PlatformTier.MobileHighEnd`  | 2048     | 8        | ✅   | ❌     | 现代手机 / 平板              |
+| `PlatformTier.MobileLowEnd`   | 1024     | 4        | ❌   | ❌     | 低端设备，强制使用未压缩格式 |
+| `PlatformTier.WebGL`          | 1024     | 2        | ❌   | ❌     | 无 CopyTexture，仅 RGBA32    |
+
+也可以直接指定特定层级：
+
+```csharp
+// 指定硬件层级
+var config = DynamicAtlasConfig.CreateForTier(
+    DynamicAtlasConfig.PlatformTier.MobileHighEnd,
+    loadFunc:  path => Resources.Load<Texture2D>(path),
+    unloadFunc: (path, tex) => Resources.UnloadAsset(tex),
+    useCompression: true
+);
+DynamicAtlasManager.Instance.Configure(config);
+
+// DynamicAtlasManager 上的一行式便捷方法
+DynamicAtlasManager.Instance.ConfigurePlatformOptimized(
+    load: path => Resources.Load<Texture2D>(path),
+    unload: (path, tex) => Resources.UnloadAsset(tex),
+    useCompression: true
+);
+```
+
+### 步骤 3c: 配置验证
+
+`DynamicAtlasConfig` 包含 `Validate()` 方法，可在运行时问题出现之前捕获常见的错误配置：
+
+```csharp
+var config = new DynamicAtlasConfig
+{
+    pageSize = 8192,
+    padding = 1,
+    enableBleed = true,
+};
+
+if (!config.Validate(out string error))
+{
+    Debug.LogWarning($"图集配置问题: {error}");
+    // 回退到安全默认值
+}
+```
+
+验证检查项：
+
+- 当前平台是否支持指定纹理格式
+- 页面大小 vs. `SystemInfo.maxTextureSize`
+- Padding 范围（0–16）
+- 出血像素要求 `padding >= 2`（未压缩格式）
+- `maxPages` 不可为负值
+
 ### 步骤 4: 最佳实践和技巧
 
 1. **始终释放精灵**: 当精灵不再需要时，调用 `ReleaseSprite()` 来减少引用计数。这允许图集在计数达到零时释放空间。
@@ -1396,17 +1639,54 @@ public class CompressedAtlasExample : MonoBehaviour
 | Nintendo Switch   | ASTC 4×4 或 ETC2                      |
 | WebGL             | 不支持（使用未压缩格式）              |
 
+### CompressedDynamicAtlasFactory
+
+相比直接构造 `CompressedDynamicAtlasService`，可以使用 `CompressedDynamicAtlasFactory` 简化创建和管理共享实例：
+
+```csharp
+var factory = new CompressedDynamicAtlasFactory();
+
+// 1. 指定格式创建新实例
+var atlas = factory.Create(TextureFormat.ASTC_4x4, pageSize: 2048);
+
+// 2. 共享单例 — 相同格式复用同一个实例（线程安全）
+var shared = factory.GetSharedInstance(TextureFormat.ASTC_4x4);
+
+// 3. 自动检测当前平台最佳格式
+var optimized = factory.CreatePlatformOptimized(pageSize: 2048);
+// 当没有合适的压缩格式时返回 null（例如 WebGL）。
+
+// 不再需要时释放共享实例
+CompressedDynamicAtlasFactory.ClearSharedInstance();
+```
+
+| 方法                        | 说明                                                                                   |
+| --------------------------- | -------------------------------------------------------------------------------------- |
+| `Create()`                  | 按指定 `TextureFormat` 创建新图集                                                      |
+| `GetSharedInstance()`       | 线程安全单例；如果请求的格式改变则重新创建                                             |
+| `CreatePlatformOptimized()` | 通过 `TextureFormatHelper` 自动选择推荐压缩格式并创建图集。平台无合适格式时返回 `null` |
+| `ClearSharedInstance()`     | 释放并清除共享单例（静态方法）                                                         |
+
 ### 步骤 8: 编辑器工具
 
-框架包含一个编辑器工具来验证 SpriteAtlas 格式兼容性：
+框架提供了多个编辑器窗口用于诊断和验证：
+
+#### 图集格式验证器
 
 **菜单**: `Tools > CycloneGames > Dynamic Atlas > Atlas Format Validator`
 
-此工具扫描您的 SpriteAtlas 资源并显示：
+扫描 `SpriteAtlas` 资产，验证压缩格式与 `CompressedDynamicAtlasService` 的兼容性。显示逐平台格式、有效性状态和推荐建议。
 
-- 每个平台的当前纹理格式
-- 与 CompressedDynamicAtlasService 的兼容性
-- 最佳格式设置建议
+#### 动态图集调试器
+
+**菜单**: `Tools > CycloneGames > Dynamic Atlas > Dynamic Atlas Debugger`
+
+Play 模式下的可视化调试器：
+
+- 侧边栏列出所有图集页面，显示 VRAM 使用量和填充率进度条
+- 主区域渲染图集纹理，支持缩放滚动视图
+- 叠加层绘制精灵矩形和名称
+- 逐页精灵项目列表用于详细检查
 
 ### 步骤 9: 异步加载
 
@@ -1750,6 +2030,81 @@ gameObject.SetActive(false);
 // 使用：
 SetVisible(false);
 ```
+
+### 运行时监控器
+
+**菜单**: `Tools > CycloneGames > UI Framework > Runtime Monitor`
+
+Play 模式下的实时编辑器面板，每帧自动刷新。显示完整的 `UIPerformanceStats` 快照：
+
+| 指标                        | 说明                                |
+| --------------------------- | ----------------------------------- |
+| `ActiveWindowCount`         | 当前打开的窗口总数                  |
+| `SceneBoundWindowCount`     | 绑定到当前场景的窗口数              |
+| `InFlightOpenCount`         | 正在进行中的打开操作（加载 / 动画） |
+| `CachedConfigHandleCount`   | UIManager 持有的配置资产句柄数      |
+| `CachedPrefabHandleCount`   | UIManager 持有的预制体资产句柄数    |
+| `LayerCount`                | 活动 UI 层数                        |
+| `TotalLayerWindowCount`     | 所有层的窗口总和                    |
+| `IsolatedWindowCanvasCount` | 拥有独立子 Canvas 的窗口数          |
+| `HasPendingSceneSweep`      | 是否有待处理的场景绑定清扫          |
+
+摘要下方还有**层级明细**表格，显示每个层的名称、排序顺序和窗口数。
+
+```csharp
+// 也可以在代码中查询这些统计数据：
+UIPerformanceStats stats = uiManager.GetPerformanceStats();
+
+var layerStats = new List<UILayerRuntimeStats>();
+uiManager.CopyLayerRuntimeStats(layerStats);
+```
+
+### 性能审计器（静态分析）
+
+**菜单**: `Tools > CycloneGames > UI Framework > Performance Auditor`
+
+离线工具，扫描所有 `UIWindowConfiguration` 资产（或选中项）并生成逐窗口审计报告。特性：
+
+- **全部扫描 / 扫描选中项** 支持定向或全项目分析
+- **严重级过滤**: Info、Warning、Error
+- **排序模式**: 按警告数、名称、图形数量、材质变体排序
+- **彩色编码摘要栏** 显示计数芯片
+
+每个窗口采集的指标：
+
+| 指标              | 说明                                                                |
+| ----------------- | ------------------------------------------------------------------- |
+| 图形数量          | 预制体中 `Graphic` 组件总数                                         |
+| 射线目标          | 启用 `RaycastTarget` 的数量                                         |
+| 非交互射线        | 无 `Selectable` / 事件处理器但启用了射线的元素                      |
+| 布局组            | `HorizontalLayoutGroup` / `VerticalLayoutGroup` / `GridLayoutGroup` |
+| ContentSizeFitter | `ContentSizeFitter` 组件（布局重建开销）                            |
+| Mask / RectMask   | `Mask` 和 `RectMask2D` 组件                                         |
+| Canvas 数量       | 嵌套的 `Canvas` 组件                                                |
+| 材质 / 纹理变体   | 不同的材质和纹理数（影响 DrawCall）                                 |
+| ScrollRect        | `ScrollRect` 组件                                                   |
+
+自动标记的问题：
+
+- `LayoutGroup` + `ContentSizeFitter` 在同一对象上（Warning）
+- ≥3 个布局组件（Warning — 可能过度嵌套）
+- ≥2 个 `Mask` 组件（Warning — 模板开销）
+- ≥3 种不同材质（Warning — DrawCall 膨胀）
+- ≥6 个非交互射线目标（Warning）
+- `ScrollRect` 无嵌套子 Canvas（Info）
+- ≥80 个 `Graphic` 组件（Info — 建议拆分）
+
+### SubCanvasPolicy
+
+`UIWindowConfiguration` 暴露了 `SubCanvasPolicy` 枚举，控制每个窗口是否获得独立的子 Canvas：
+
+| 策略                 | 行为                                                                |
+| -------------------- | ------------------------------------------------------------------- |
+| `InheritLayerCanvas` | 共享层级的 Canvas — 最大化合批，适合静态窗口                        |
+| `ForceOwnSubCanvas`  | 始终创建独立子 Canvas — 将重建开销限制在本窗口内                    |
+| `AutoDetect`         | 框架自动为包含高频变化标记（动画、ScrollRect）的窗口创建独立 Canvas |
+
+性能审计器会根据窗口的组件组成建议最优策略。
 
 ---
 

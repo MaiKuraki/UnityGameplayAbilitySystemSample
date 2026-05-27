@@ -407,6 +407,27 @@ await sceneHandle.Task;
 await package.UnloadSceneAsync(sceneHandle);
 ```
 
+Manual activation is also supported when the provider can defer scene entry:
+
+```csharp
+var sceneHandle = package.LoadSceneAsync(
+    "Assets/Scenes/Gameplay.unity",
+    LoadSceneMode.Single,
+    SceneActivationMode.Manual);
+
+// Wait for the provider-controlled preload phase.
+await sceneHandle.Task;
+
+// Complete the final activation step when your fade-out is finished.
+await sceneHandle.ActivateAsync();
+```
+
+Notes:
+
+- `SceneActivationState` is a normalized cross-provider status, not a promise that every provider exposes the same intermediate state.
+- Addressables can report `WaitingForActivation` after load completion.
+- YooAsset deferred entry is implemented by suspended loading, so the handle may remain in `Loading` until `ActivateAsync()` resumes and completes the load.
+
 ### Batch Loading
 
 Load multiple assets with progress tracking:
@@ -453,8 +474,58 @@ using (var handle = package.LoadAssetAsync<GameObject>("Prefabs/MainMenu", bucke
     // ...
 }
 
-// Later, clear only assets in the "UI" bucket to forcefully free memory
-package.UnloadUnusedAssets(bucket: "UI");
+// Later, clear only idle assets in the "UI" bucket to forcefully free memory
+package.ClearBucket("UI");
+```
+
+> [!NOTE]
+> `ClearBucket` / `ClearBucketsByPrefix` only evict handles whose `RefCount` has already reached 0 (idle in Trial or Main pools). Active handles (still in use) are **never** evicted — this prevents dangling references by design.
+
+#### Hierarchical Bucket Paths
+
+Bucket names support a **hierarchical dot-separated** convention (e.g. `"UI.Scene.MainCity"`). Use `AssetBucketPath` to compose and match paths safely:
+
+```csharp
+using CycloneGames.AssetManagement.Runtime;
+
+// Compose hierarchical bucket names (zero-alloc when segments are non-empty)
+string bucket = AssetBucketPath.Combine("UI", "Scene");           // → "UI.Scene"
+string sub    = AssetBucketPath.Combine("UI", "Scene", "MainCity"); // → "UI.Scene.MainCity"
+
+// Clear a single exact bucket
+package.ClearBucket("UI.Scene.MainCity");
+
+// Clear a bucket and ALL its descendants in one call
+package.ClearBucketsByPrefix("UI");
+// → clears "UI", "UI.Scene", "UI.Scene.MainCity", etc.
+```
+
+#### AssetBucketScope (Scoped Loading)
+
+`AssetBucketScope` is a lightweight wrapper that **pre-fills** `bucket`, `tag`, and `owner` for every loading call, eliminating repetitive parameter passing:
+
+```csharp
+// Create a scope — all loads inherit its bucket/tag/owner
+var uiScope = package.CreateBucketScope("UI", tag: "UIAsset", owner: "UIManager");
+
+// Load through the scope — no need to repeat bucket/tag/owner
+using (var handle = uiScope.LoadAssetAsync<GameObject>("Prefabs/MainMenu"))
+{
+    await handle.Task;
+    var menu = uiScope.Package.InstantiateSync(handle);
+}
+
+// Create a child scope for a sub-system (bucket becomes "UI.Shop")
+var shopScope = uiScope.CreateChild("Shop", owner: "ShopUI");
+using (var handle = shopScope.LoadAssetAsync<Sprite>("Icons/Coin"))
+{
+    await handle.Task;
+}
+
+// When leaving the UI, clear only this scope's bucket hierarchy
+uiScope.ClearHierarchy();  // clears "UI" and all descendants
+// Or clear only the exact bucket:
+shopScope.Clear();          // clears "UI.Shop" only
 ```
 
 ### Resource Tracking & Metadata
@@ -668,19 +739,21 @@ Integrate this into your CI/CD pipeline by calling `AssetRefValidator.ValidateAl
 
 ### IAssetPackage
 
-| Method                       | Description                                           |
-| ---------------------------- | ----------------------------------------------------- |
-| `InitializeAsync(options)`   | Initialize the package                                |
-| `DestroyAsync()`             | Destroy the package                                   |
-| `LoadAssetAsync<T>(...)`     | Load an asset asynchronously (supports `tag`/`owner`) |
-| `LoadAssetSync<T>(...)`      | Load an asset synchronously (supports `tag`/`owner`)  |
-| `LoadAllAssetsAsync<T>(...)` | Load all assets at location (supports `tag`/`owner`)  |
-| `InstantiateAsync(handle)`   | Instantiate a loaded prefab                           |
-| `InstantiateSync(handle)`    | Sync instantiate (zero-GC)                            |
-| `LoadSceneAsync(location)`   | Load a scene                                          |
-| `UnloadSceneAsync(handle)`   | Unload a scene                                        |
-| `LoadRawFileAsync(location)` | Load a raw file                                       |
-| `UnloadUnusedAssets()`       | Unload unused assets                                  |
+| Method                         | Description                                                         |
+| ------------------------------ | ------------------------------------------------------------------- |
+| `InitializeAsync(options)`     | Initialize the package                                              |
+| `DestroyAsync()`               | Destroy the package                                                 |
+| `LoadAssetAsync<T>(...)`       | Load an asset asynchronously (supports `bucket`/`tag`/`owner`)      |
+| `LoadAssetSync<T>(...)`        | Load an asset synchronously (supports `bucket`/`tag`/`owner`)       |
+| `LoadAllAssetsAsync<T>(...)`   | Load all assets at location (supports `bucket`/`tag`/`owner`)       |
+| `InstantiateAsync(handle)`     | Instantiate a loaded prefab                                         |
+| `InstantiateSync(handle)`      | Sync instantiate (zero-GC)                                          |
+| `LoadSceneAsync(location)`     | Load a scene                                                        |
+| `UnloadSceneAsync(handle)`     | Unload a scene                                                      |
+| `LoadRawFileAsync(location)`   | Load a raw file                                                     |
+| `UnloadUnusedAssetsAsync()`    | Global sweep of all unused assets                                   |
+| `ClearBucket(bucket)`          | Evict idle handles matching an exact bucket name                    |
+| `ClearBucketsByPrefix(prefix)` | Evict idle handles matching a bucket prefix and all its descendants |
 
 ### Scripting Define Symbols
 

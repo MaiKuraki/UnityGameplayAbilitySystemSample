@@ -34,6 +34,7 @@ namespace CycloneGames.UIFramework.Runtime
         public string WindowName => windowNameInternal;
 
         private IUIWindowState currentState;
+        private bool _stateRequiresUpdate;
         private CancellationTokenSource openCts;
         private CancellationTokenSource closeCts;
         private IUIWindowTransitionDriver _transitionDriver; // Optional external transition driver
@@ -50,8 +51,18 @@ namespace CycloneGames.UIFramework.Runtime
         private CanvasGroup canvasGroup;
         private string sourceAssetPath;
         public System.Action<string> OnReleaseAssetReference;
+        private bool isSceneBound;
+        private int boundSceneHandle = -1;
 
         public void SetSourceAssetPath(string path) => sourceAssetPath = path;
+        public bool IsSceneBound => isSceneBound;
+        public int BoundSceneHandle => boundSceneHandle;
+
+        public void ConfigureSceneBinding(bool sceneBound, int sceneHandle)
+        {
+            isSceneBound = sceneBound;
+            boundSceneHandle = sceneBound ? sceneHandle : -1;
+        }
 
         private bool _isDestroying = false; // Flag to prevent multiple destruction logic paths
 
@@ -143,6 +154,7 @@ namespace CycloneGames.UIFramework.Runtime
 
             currentState?.OnExit(this);
             currentState = newState;
+            _stateRequiresUpdate = newState != null && newState.RequiresUpdate;
             // Debug.Log($"[UIWindow] {WindowName} changing state to {newState?.GetType().Name ?? "null"}", this);
             currentState?.OnEnter(this);
         }
@@ -336,10 +348,8 @@ namespace CycloneGames.UIFramework.Runtime
 
         protected virtual void Update()
         {
-            if (!_isDestroying) // Don't update if being destroyed
-            {
-                currentState?.Update(this);
-            }
+            if (_isDestroying || !_stateRequiresUpdate) return;
+            currentState?.Update(this);
         }
 
         protected virtual void OnDestroy()
@@ -374,6 +384,7 @@ namespace CycloneGames.UIFramework.Runtime
                 currentState.OnExit(this); // Graceful exit for the current state
             }
             currentState = null; // Nullify state
+            _stateRequiresUpdate = false;
         }
     }
 }

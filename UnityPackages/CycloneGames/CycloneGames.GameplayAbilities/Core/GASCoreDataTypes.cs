@@ -31,15 +31,22 @@ namespace CycloneGames.GameplayAbilities.Core
     public readonly struct GASAttributeValueData
     {
         public readonly GASAttributeId AttributeId;
-        public readonly float BaseValue;
-        public readonly float CurrentValue;
+        public readonly long BaseValueRaw;
+        public readonly long CurrentValueRaw;
         public readonly uint AggregatorVersion;
+        public GASFixedValue BaseValue => GASFixedValue.FromRaw(BaseValueRaw);
+        public GASFixedValue CurrentValue => GASFixedValue.FromRaw(CurrentValueRaw);
 
-        public GASAttributeValueData(GASAttributeId attributeId, float baseValue, float currentValue, uint aggregatorVersion)
+        public GASAttributeValueData(GASAttributeId attributeId, GASFixedValue baseValue, GASFixedValue currentValue, uint aggregatorVersion)
+            : this(attributeId, baseValue.RawValue, currentValue.RawValue, aggregatorVersion)
+        {
+        }
+
+        public GASAttributeValueData(GASAttributeId attributeId, long baseValueRaw, long currentValueRaw, uint aggregatorVersion)
         {
             AttributeId = attributeId;
-            BaseValue = baseValue;
-            CurrentValue = currentValue;
+            BaseValueRaw = baseValueRaw;
+            CurrentValueRaw = currentValueRaw;
             AggregatorVersion = aggregatorVersion;
         }
     }
@@ -48,13 +55,19 @@ namespace CycloneGames.GameplayAbilities.Core
     {
         public readonly GASAttributeId AttributeId;
         public readonly GASModifierOp Op;
-        public readonly float Magnitude;
+        public readonly long MagnitudeRaw;
+        public GASFixedValue Magnitude => GASFixedValue.FromRaw(MagnitudeRaw);
 
-        public GASModifierData(GASAttributeId attributeId, GASModifierOp op, float magnitude)
+        public GASModifierData(GASAttributeId attributeId, GASModifierOp op, GASFixedValue magnitude)
+            : this(attributeId, op, magnitude.RawValue)
+        {
+        }
+
+        public GASModifierData(GASAttributeId attributeId, GASModifierOp op, long magnitudeRaw)
         {
             AttributeId = attributeId;
             Op = op;
-            Magnitude = magnitude;
+            MagnitudeRaw = magnitudeRaw;
         }
     }
 
@@ -148,13 +161,14 @@ namespace CycloneGames.GameplayAbilities.Core
     {
         public readonly GASPredictionKey PredictionKey;
         public readonly GASAttributeId AttributeId;
-        public readonly float OldBaseValue;
+        public readonly long OldBaseValueRaw;
+        public GASFixedValue OldBaseValue => GASFixedValue.FromRaw(OldBaseValueRaw);
 
-        public GASPredictedAttributeChange(GASPredictionKey predictionKey, GASAttributeId attributeId, float oldBaseValue)
+        public GASPredictedAttributeChange(GASPredictionKey predictionKey, GASAttributeId attributeId, long oldBaseValueRaw)
         {
             PredictionKey = predictionKey;
             AttributeId = attributeId;
-            OldBaseValue = oldBaseValue;
+            OldBaseValueRaw = oldBaseValueRaw;
         }
     }
 

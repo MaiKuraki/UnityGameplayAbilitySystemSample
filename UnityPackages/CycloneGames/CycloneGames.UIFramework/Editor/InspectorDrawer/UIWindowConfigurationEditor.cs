@@ -3,6 +3,7 @@
 
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.UI;
 using CycloneGames.UIFramework.Runtime;
 using CycloneGames.AssetManagement.Runtime;
 
@@ -16,13 +17,15 @@ namespace CycloneGames.UIFramework.Editor
         private static bool hasCheckedForDuplicates;
 
         // ── Colors ────────────────────────────────────────────────────────────────────────
-        private static readonly Color headerColor    = new Color(0.3f, 0.5f,  0.8f);
-        private static readonly Color prefabRefColor = new Color(0.4f, 0.7f,  0.4f);   // green  direct / built-in
-        private static readonly Color assetRefColor  = new Color(0.35f, 0.55f, 0.85f); // blue   AssetManagement
-        private static readonly Color locationColor  = new Color(0.8f, 0.6f,  0.3f);   // orange raw path
-        private static readonly Color warningColor   = new Color(0.95f, 0.7f, 0.2f);
-        private static readonly Color errorColor     = new Color(0.9f, 0.3f,  0.3f);
-        private static readonly Color successColor   = new Color(0.3f, 0.8f,  0.4f);
+        private static readonly Color headerColor        = new Color(0.3f, 0.5f,  0.8f);
+        private static readonly Color prefabRefColor     = new Color(0.4f, 0.7f,  0.4f);   // green  direct / built-in
+        private static readonly Color assetRefColor      = new Color(0.35f, 0.55f, 0.85f); // blue   AssetManagement
+        private static readonly Color locationColor      = new Color(0.8f, 0.6f,  0.3f);   // orange raw path
+        private static readonly Color warningColor       = new Color(0.95f, 0.7f, 0.2f);
+        private static readonly Color errorColor         = new Color(0.9f, 0.3f,  0.3f);
+        private static readonly Color successColor       = new Color(0.3f, 0.8f,  0.4f);
+        private static readonly Color sceneBoundOnColor  = new Color(0.25f, 0.65f, 0.45f); // teal-green (scene-bound)
+        private static readonly Color sceneBoundOffColor = new Color(0.45f, 0.45f, 0.45f); // grey       (persistent)
         private const float SourceFieldLabelWidth = 72f;
 
         // ── Serialized properties ─────────────────────────────────────────────────────────
@@ -32,10 +35,13 @@ namespace CycloneGames.UIFramework.Editor
         private SerializedProperty prefabLocationProp;
         private SerializedProperty layerProp;
         private SerializedProperty priorityProp;
+        private SerializedProperty isSceneBoundProp;
+        private SerializedProperty subCanvasPolicyProp;
 
         // ── Foldout states ────────────────────────────────────────────────────────────────
-        private bool showPrefabSource  = true;
-        private bool showLayerSettings = true;
+        private bool showPrefabSource        = true;
+        private bool showLayerSettings       = true;
+        private bool showSceneBindingSection = true;
 
         // ── Cached GUIStyles (avoid per-frame allocation) ─────────────────────────────────
         private GUIStyle _titleStyle;
@@ -57,6 +63,8 @@ namespace CycloneGames.UIFramework.Editor
             prefabLocationProp = serializedObject.FindProperty("prefabLocation");
             layerProp          = serializedObject.FindProperty("layer");
             priorityProp       = serializedObject.FindProperty("priority");
+            isSceneBoundProp   = serializedObject.FindProperty("isSceneBound");
+            subCanvasPolicyProp = serializedObject.FindProperty("subCanvasPolicy");
 
             hasCheckedForDuplicates = false;
             _stylesInitialized      = false;
@@ -115,6 +123,12 @@ namespace CycloneGames.UIFramework.Editor
 
             showLayerSettings = DrawFoldoutHeader("Layer & Priority", showLayerSettings, headerColor);
             if (showLayerSettings) DrawLayerSection(config);
+
+            EditorGUILayout.Space(3);
+
+            Color sceneBindingColor = config.IsSceneBound ? sceneBoundOnColor : sceneBoundOffColor;
+            showSceneBindingSection = DrawFoldoutHeader("Scene Binding", showSceneBindingSection, sceneBindingColor);
+            if (showSceneBindingSection) DrawSceneBindingSection(config);
 
             EditorGUILayout.Space(3);
 
@@ -180,6 +194,73 @@ namespace CycloneGames.UIFramework.Editor
             EditorGUILayout.EndVertical();
         }
 
+        // ── Scene Binding section ─────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Draws the Scene Binding toggle that controls <see cref="UIWindowConfiguration.IsSceneBound"/>.
+        /// When enabled the window is automatically closed by UIManager whenever the active scene changes.
+        /// Persistent windows (HUD, global overlays) should keep this disabled.
+        /// </summary>
+        private void DrawSceneBindingSection(UIWindowConfiguration config)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+            // ── Status badge ─────────────────────────────────────────────────
+            if (config.IsSceneBound)
+                DrawStatusBox("[Scene Bound]  Auto-closes on scene change", sceneBoundOnColor);
+            else
+                DrawStatusBox("[Persistent]  Survives scene transitions", sceneBoundOffColor);
+
+            EditorGUILayout.Space(4);
+
+            // ── Toggle row ───────────────────────────────────────────────────
+            var label = new GUIContent(
+                "Is Scene Bound",
+                "When ENABLED:\n" +
+                "  • UIManager records the scene handle at the moment OpenUI() is called.\n" +
+                "  • Whenever the active scene changes, UIManager automatically closes\n" +
+                "    all windows whose bound scene handle no longer matches.\n" +
+                "  • Safe against rapid repeated scene switches and mid-open transitions:\n" +
+                "    the bound scene is frozen at request-time, so even if the scene\n" +
+                "    changes before the prefab finishes loading, the window will be\n" +
+                "    closed once it opens.\n\n" +
+                "When DISABLED (Persistent):\n" +
+                "  • The window is never auto-closed by scene changes.\n" +
+                "  • Use for global UI that must survive scene transitions\n" +
+                "    (main menu, global HUD, loading screen, etc.).\n" +
+                "  • You are responsible for explicitly calling CloseUI().");
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(label, GUILayout.Width(120));
+            EditorGUILayout.PropertyField(isSceneBoundProp, GUIContent.none);
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.Space(4);
+
+            // ── Contextual help text ─────────────────────────────────────────
+            if (config.IsSceneBound)
+            {
+                EditorGUILayout.HelpBox(
+                    "SCENE BOUND — This window will be closed automatically when the active scene changes.\n\n" +
+                    "✔ In-game HUD, score screen, level-specific popups\n" +
+                    "✔ Any UI that should NOT survive a scene load\n\n" +
+                    "Note: you can still override per-call via\n" +
+                    "OpenUI(name, ..., isSceneBoundOverride: false).",
+                    MessageType.Info);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "PERSISTENT — This window survives scene transitions.\n\n" +
+                    "✔ Main menu, loading screen, global persistent HUD\n" +
+                    "✔ Overlay UI managed by the root scene\n\n" +
+                    "Remember to call CloseUI() explicitly when no longer needed.",
+                    MessageType.None);
+            }
+
+            EditorGUILayout.EndVertical();
+        }
+
         // ── Layer section ─────────────────────────────────────────────────────────────────
 
         private void DrawLayerSection(UIWindowConfiguration config)
@@ -211,6 +292,35 @@ namespace CycloneGames.UIFramework.Editor
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.LabelField(GetPriorityHint(priority), EditorStyles.centeredGreyMiniLabel);
+            EditorGUILayout.Space(5);
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(new GUIContent("Sub Canvas", "Add a nested Canvas on the window root to isolate UGUI rebuild cost for this window."), GUILayout.Width(80));
+            EditorGUILayout.PropertyField(subCanvasPolicyProp, GUIContent.none);
+            EditorGUILayout.EndHorizontal();
+
+            UIWindowConfiguration.SubCanvasPolicy policy = (UIWindowConfiguration.SubCanvasPolicy)subCanvasPolicyProp.enumValueIndex;
+            if (policy == UIWindowConfiguration.SubCanvasPolicy.ForceOwnSubCanvas)
+            {
+                EditorGUILayout.HelpBox(
+                    "FORCE OWN SUB CANVAS: improves rebuild isolation for high-churn windows, but may reduce batching and increase draw call fragmentation.",
+                    MessageType.Info);
+            }
+            else if (policy == UIWindowConfiguration.SubCanvasPolicy.AutoDetect)
+            {
+                EditorGUILayout.HelpBox(
+                    "AUTO DETECT: UIManager inspects the instantiated window and adds a nested Canvas only when it finds high-churn markers such as Animator, ScrollRect, LayoutGroup, ContentSizeFitter or Mask components.",
+                    MessageType.Info);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "INHERIT LAYER CANVAS: best batching behaviour, but rebuilds from this window can affect the whole UILayer canvas.",
+                    MessageType.None);
+            }
+
+            DrawCanvasIsolationAudit(config, policy);
+
             EditorGUILayout.Space(3);
             EditorGUILayout.HelpBox(
                 "Priority determines render order within the same Layer.\n" +
@@ -220,6 +330,47 @@ namespace CycloneGames.UIFramework.Editor
                 MessageType.None);
 
             EditorGUILayout.EndVertical();
+        }
+
+        private void DrawCanvasIsolationAudit(UIWindowConfiguration config, UIWindowConfiguration.SubCanvasPolicy policy)
+        {
+            var report = UIPerformanceAuditUtility.AuditWindowConfiguration(config);
+            if (report == null || report.Prefab == null)
+            {
+                return;
+            }
+
+            if (!report.HasIssues && report.SuggestedSubCanvasPolicy == UIWindowConfiguration.SubCanvasPolicy.InheritLayerCanvas)
+            {
+                return;
+            }
+
+            if (policy == UIWindowConfiguration.SubCanvasPolicy.InheritLayerCanvas &&
+                report.SuggestedSubCanvasPolicy != UIWindowConfiguration.SubCanvasPolicy.InheritLayerCanvas)
+            {
+                EditorGUILayout.HelpBox(
+                    $"Prefab audit suggests {report.SuggestedSubCanvasPolicy} for better rebuild isolation.\n" +
+                    "This window contains high-churn UI markers that can expand LayoutRebuild / Graphic rebuild cost across the whole UILayer.",
+                    MessageType.Warning);
+            }
+
+            for (int i = 0; i < report.Issues.Count; i++)
+            {
+                MessageType type = report.Issues[i].Severity == UIPerformanceAuditUtility.AuditSeverity.Warning
+                    ? MessageType.Warning
+                    : report.Issues[i].Severity == UIPerformanceAuditUtility.AuditSeverity.Error
+                        ? MessageType.Error
+                        : MessageType.None;
+                EditorGUILayout.HelpBox(report.Issues[i].Message, type);
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("Open Performance Auditor", GUILayout.Width(170)))
+            {
+                UIPerformanceAuditWindow.ShowWindow();
+            }
+            EditorGUILayout.EndHorizontal();
         }
 
         // ── Prefab source section ─────────────────────────────────────────────────────────
@@ -563,6 +714,11 @@ namespace CycloneGames.UIFramework.Editor
                 case UIWindowConfiguration.PrefabSource.PathLocation: return "Path";
                 default: return source.ToString();
             }
+        }
+
+        private static string GetDisplayValue(string value)
+        {
+            return string.IsNullOrEmpty(value) ? "<empty>" : value;
         }
 
         private void SetAssetRefFromPath(string assetPath)

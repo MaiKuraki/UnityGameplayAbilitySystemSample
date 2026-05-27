@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
+using System.Text;
 using System.Threading;
 using CycloneGames.Logger;
 using Cysharp.Threading.Tasks;
@@ -30,11 +30,31 @@ namespace CycloneGames.InputSystem.Runtime
         private InputAction _joinAction;
         private string _userConfigUri;
         private bool _isInitialized = false;
+        private bool _isDisposed = false;
         private bool _isDeviceLockingOnJoinEnabled = false;
         private IDisposable _cursorSubscription;
 
         public bool ManageCursorVisibility { get; set; } = true;
         public bool ResetCursorToCenter { get; set; } = false;
+
+        private static bool ValidateMainThread(string operationName)
+        {
+            if (Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread)
+            {
+                return true;
+            }
+
+            CLogger.LogError($"{DEBUG_FLAG} {operationName} must be called on Unity main thread. Use the async API or await UniTask.SwitchToMainThread before calling it.");
+            return false;
+        }
+
+        private static async UniTask SwitchToUnityMainThreadAsync(CancellationToken cancellationToken = default)
+        {
+            if (!Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread)
+            {
+                await UniTask.SwitchToMainThread(PlayerLoopTiming.Update, cancellationToken);
+            }
+        }
 
         public void Initialize(string yamlContent, string userConfigUri)
         {
@@ -137,6 +157,7 @@ namespace CycloneGames.InputSystem.Runtime
         public List<IInputPlayer> JoinPlayersBatch(List<int> playerIds)
         {
             if (playerIds == null || playerIds.Count == 0) return new List<IInputPlayer>();
+            if (!ValidateMainThread(nameof(JoinPlayersBatch))) return new List<IInputPlayer>();
 
             using (InputPerformanceProfiler.BeginScope("JoinPlayersBatch"))
             {
@@ -159,11 +180,12 @@ namespace CycloneGames.InputSystem.Runtime
         public async UniTask<List<IInputPlayer>> JoinPlayersBatchAsync(List<int> playerIds, int timeoutPerPlayerInSeconds = 5)
         {
             if (playerIds == null || playerIds.Count == 0) return new List<IInputPlayer>();
+            await SwitchToUnityMainThreadAsync();
 
             using (InputPerformanceProfiler.BeginScope("JoinPlayersBatchAsync"))
             {
                 var results = new List<IInputPlayer>(playerIds.Count);
-                var tasks = new List<UniTask<IInputPlayer>>();
+                var tasks = new List<UniTask<IInputPlayer>>(playerIds.Count);
 
                 foreach (int playerId in playerIds)
                 {
@@ -226,6 +248,8 @@ namespace CycloneGames.InputSystem.Runtime
         public void StartListeningForPlayers(bool lockDeviceOnJoin)
         {
             if (!_isInitialized) return;
+            if (!ValidateMainThread(nameof(StartListeningForPlayers))) return;
+
             _isDeviceLockingOnJoinEnabled = lockDeviceOnJoin;
             if (_joinAction != null) _joinAction.Dispose();
 
@@ -265,6 +289,8 @@ namespace CycloneGames.InputSystem.Runtime
         /// </summary>
         public IInputPlayer JoinSinglePlayer(int playerIdToJoin = 0)
         {
+            if (!ValidateMainThread(nameof(JoinSinglePlayer))) return null;
+
             if (_registerPlayers.TryGetValue(playerIdToJoin, out var existingService))
             {
                 CLogger.LogInfo($"{DEBUG_FLAG} Player {playerIdToJoin} already joined. Returning existing service.");
@@ -288,8 +314,8 @@ namespace CycloneGames.InputSystem.Runtime
                 }
             }
 
-            bool hasKeyboard = devicesToPair.Any(d => d is Keyboard);
-            bool hasMouse = devicesToPair.Any(d => d is Mouse);
+            bool hasKeyboard = ContainsKeyboard(devicesToPair);
+            bool hasMouse = ContainsMouse(devicesToPair);
 
             if (hasKeyboard && !hasMouse)
             {
@@ -313,6 +339,8 @@ namespace CycloneGames.InputSystem.Runtime
 
         public async UniTask<IInputPlayer> JoinSinglePlayerAsync(int playerIdToJoin = 0, int timeoutInSeconds = 5)
         {
+            await SwitchToUnityMainThreadAsync();
+
             var playerConfig = GetPlayerConfig(playerIdToJoin);
             if (playerConfig == null) return null;
 
@@ -347,8 +375,15 @@ namespace CycloneGames.InputSystem.Runtime
                 };
 
                 UnityEngine.InputSystem.InputSystem.onDeviceChange += deviceChangeHandler;
-                bool success = await tcs.Task;
-                UnityEngine.InputSystem.InputSystem.onDeviceChange -= deviceChangeHandler;
+                bool success;
+                try
+                {
+                    success = await tcs.Task;
+                }
+                finally
+                {
+                    UnityEngine.InputSystem.InputSystem.onDeviceChange -= deviceChangeHandler;
+                }
 
                 if (!success)
                 {
@@ -368,6 +403,8 @@ namespace CycloneGames.InputSystem.Runtime
 
         public IInputPlayer JoinPlayerOnSharedDevice(int playerIdToJoin)
         {
+            if (!ValidateMainThread(nameof(JoinPlayerOnSharedDevice))) return null;
+
             var playerConfig = GetPlayerConfig(playerIdToJoin);
             if (playerConfig == null) return null;
 
@@ -387,8 +424,16 @@ namespace CycloneGames.InputSystem.Runtime
             return CreatePlayerService(playerIdToJoin, user, playerConfig, keyboard);
         }
 
+        public async UniTask<IInputPlayer> JoinPlayerOnSharedDeviceAsync(int playerIdToJoin)
+        {
+            await SwitchToUnityMainThreadAsync();
+            return JoinPlayerOnSharedDevice(playerIdToJoin);
+        }
+
         public IInputPlayer JoinPlayerAndLockDevice(int playerIdToJoin, InputDevice deviceToLock)
         {
+            if (!ValidateMainThread(nameof(JoinPlayerAndLockDevice))) return null;
+
             if (!_isInitialized)
             {
                 CLogger.LogError($"{DEBUG_FLAG} Cannot join player, manager is not initialized.");
@@ -413,7 +458,7 @@ namespace CycloneGames.InputSystem.Runtime
             int userCount = allUsers.Count;
             for (int i = 0; i < userCount; i++)
             {
-                if (allUsers[i].pairedDevices.Contains(deviceToLock))
+                if (IsDevicePairedToUser(allUsers[i], deviceToLock))
                 {
                     CLogger.LogWarning($"{DEBUG_FLAG} Device '{deviceToLock.displayName}' already in use.");
                     return null;
@@ -424,6 +469,12 @@ namespace CycloneGames.InputSystem.Runtime
             return CreatePlayerService(playerIdToJoin, user, playerConfig, deviceToLock);
         }
 
+        public async UniTask<IInputPlayer> JoinPlayerAndLockDeviceAsync(int playerIdToJoin, InputDevice deviceToLock)
+        {
+            await SwitchToUnityMainThreadAsync();
+            return JoinPlayerAndLockDevice(playerIdToJoin, deviceToLock);
+        }
+
         private void OnJoinAction(InputAction.CallbackContext context)
         {
             var joiningDevice = context.control.device;
@@ -432,7 +483,7 @@ namespace CycloneGames.InputSystem.Runtime
             int userCount = allUsers.Count;
             for (int i = 0; i < userCount; i++)
             {
-                if (allUsers[i].pairedDevices.Contains(joiningDevice))
+                if (IsDevicePairedToUser(allUsers[i], joiningDevice))
                 {
                     CLogger.LogWarning($"{DEBUG_FLAG} Device '{joiningDevice.displayName}' already paired.");
                     return;
@@ -470,10 +521,7 @@ namespace CycloneGames.InputSystem.Runtime
                     {
                         var slotConfig = _configuration.PlayerSlots[i];
                         if (slotConfig.JoinAction != null &&
-                            slotConfig.JoinAction.DeviceBindings.Any(binding =>
-                                binding.Contains(joiningDevice.layout) ||
-                                (joiningDevice is Keyboard && binding.Contains("Keyboard")) ||
-                                (joiningDevice is Mouse && binding.Contains("Mouse"))))
+                            MatchesAnyJoinBinding(slotConfig.JoinAction.DeviceBindings, joiningDevice))
                         {
                             playerIdToJoin = i;
                             break;
@@ -514,7 +562,18 @@ namespace CycloneGames.InputSystem.Runtime
         {
             if (!_isInitialized) return null;
             if (checkIfAlreadyJoined && _registerPlayers.ContainsKey(playerId)) return null;
-            return _configuration.PlayerSlots.FirstOrDefault(p => p.PlayerId == playerId);
+            var playerSlots = _configuration.PlayerSlots;
+            int playerSlotCount = playerSlots.Count;
+            for (int i = 0; i < playerSlotCount; i++)
+            {
+                var playerSlot = playerSlots[i];
+                if (playerSlot.PlayerId == playerId)
+                {
+                    return playerSlot;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -546,7 +605,7 @@ namespace CycloneGames.InputSystem.Runtime
             {
                 var inputPlayer = new InputPlayer(playerId, user, config, initialDevice);
                 _registerPlayers[playerId] = inputPlayer;
-                string devices = user.pairedDevices.Count > 0 ? string.Join(", ", user.pairedDevices.Select(d => d.displayName)) : "All (Shared)";
+                string devices = FormatPairedDeviceNames(user);
                 CLogger.LogInfo($"{DEBUG_FLAG} Player {playerId} created with devices: [{devices}].");
                 
                 if (playerId == 0)
@@ -651,7 +710,7 @@ namespace CycloneGames.InputSystem.Runtime
                     bool isPaired = false;
                     for (int j = 0; j < userCount; j++)
                     {
-                        if (allUsers[j].pairedDevices.Contains(device))
+                        if (IsDevicePairedToUser(allUsers[j], device))
                         {
                             isPaired = true;
                             break;
@@ -663,12 +722,108 @@ namespace CycloneGames.InputSystem.Runtime
             return null;
         }
 
+        private static bool ContainsKeyboard(List<InputDevice> devices)
+        {
+            int count = devices.Count;
+            for (int i = 0; i < count; i++)
+            {
+                if (devices[i] is Keyboard)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsDevicePairedToUser(InputUser user, InputDevice device)
+        {
+            var pairedDevices = user.pairedDevices;
+            int deviceCount = pairedDevices.Count;
+            for (int i = 0; i < deviceCount; i++)
+            {
+                if (ReferenceEquals(pairedDevices[i], device))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool ContainsMouse(List<InputDevice> devices)
+        {
+            int count = devices.Count;
+            for (int i = 0; i < count; i++)
+            {
+                if (devices[i] is Mouse)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool MatchesAnyJoinBinding(List<string> bindings, InputDevice joiningDevice)
+        {
+            int count = bindings.Count;
+            for (int i = 0; i < count; i++)
+            {
+                string binding = bindings[i];
+                if (binding.Contains(joiningDevice.layout) ||
+                    (joiningDevice is Keyboard && binding.Contains("Keyboard")) ||
+                    (joiningDevice is Mouse && binding.Contains("Mouse")))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string FormatPairedDeviceNames(InputUser user)
+        {
+            var pairedDevices = user.pairedDevices;
+            int deviceCount = pairedDevices.Count;
+            if (deviceCount == 0)
+            {
+                return "All (Shared)";
+            }
+
+            var builder = new StringBuilder(64);
+            for (int i = 0; i < deviceCount; i++)
+            {
+                if (i > 0)
+                {
+                    builder.Append(", ");
+                }
+
+                builder.Append(pairedDevices[i].displayName);
+            }
+
+            return builder.ToString();
+        }
+
         /// <summary>
         /// Gets an existing input player for the specified player ID, or null if not joined.
         /// </summary>
         public IInputPlayer GetInputPlayer(int playerId)
         {
             return _registerPlayers.TryGetValue(playerId, out var service) ? service : null;
+        }
+
+        /// <summary>
+        /// Gets an existing input player or joins it on the Unity main thread.
+        /// </summary>
+        public async UniTask<IInputPlayer> GetOrJoinInputPlayerAsync(int playerId, int timeoutInSeconds = 5)
+        {
+            if (_registerPlayers.TryGetValue(playerId, out var service))
+            {
+                return service;
+            }
+
+            return await JoinSinglePlayerAsync(playerId, timeoutInSeconds);
         }
 
         /// <summary>
@@ -707,6 +862,9 @@ namespace CycloneGames.InputSystem.Runtime
 
         public void Dispose()
         {
+            if (_isDisposed) return;
+            _isDisposed = true;
+
             _cursorSubscription?.Dispose();
             _cursorSubscription = null;
             StopListeningForPlayers();
@@ -716,6 +874,71 @@ namespace CycloneGames.InputSystem.Runtime
             }
             _registerPlayers.Clear();
             _isInitialized = false;
+        }
+
+        /// <summary>
+        /// Overrides a specific device binding for an action on the given player.
+        /// Returns true if the old binding was found and overridden.
+        /// </summary>
+        public bool RebindAction(int playerId, string actionMapName, string actionName, string oldBinding, string newBinding)
+        {
+            if (!_registerPlayers.TryGetValue(playerId, out var service)) return false;
+            return service.RebindAction(actionMapName, actionName, oldBinding, newBinding);
+        }
+
+        /// <summary>
+        /// Resets a specific action's bindings to their original configuration for the given player.
+        /// </summary>
+        public bool ResetActionBinding(int playerId, string actionMapName, string actionName)
+        {
+            if (!_registerPlayers.TryGetValue(playerId, out var service)) return false;
+            return service.ResetActionBinding(actionMapName, actionName);
+        }
+
+        /// <summary>
+        /// Resets all actions' bindings for the given player to their original configuration.
+        /// </summary>
+        public void ResetAllActionBindings(int playerId)
+        {
+            if (_registerPlayers.TryGetValue(playerId, out var service))
+            {
+                service.ResetAllActionBindings();
+            }
+        }
+
+        /// <summary>
+        /// Returns the current effective binding paths for an action on the given player.
+        /// </summary>
+        public string[] GetActionBindings(int playerId, string actionMapName, string actionName)
+        {
+            if (!_registerPlayers.TryGetValue(playerId, out var service)) return System.Array.Empty<string>();
+            return service.GetActionBindings(actionMapName, actionName);
+        }
+
+        /// <summary>
+        /// Returns a chord observable for two button actions on the given player.
+        /// </summary>
+        public Observable<Unit> GetChordObservable(int playerId, string actionMapName, string actionName1, string actionName2, float windowMs = 300f)
+        {
+            if (!_registerPlayers.TryGetValue(playerId, out var service)) return EmptyObservables.Unit;
+            return service.GetChordObservable(actionMapName, actionName1, actionName2, windowMs);
+        }
+
+        public List<BindingConflict> CheckBindingConflicts(int playerId)
+        {
+            var config = GetPlayerConfig(playerId, false);
+            return InputBindingValidator.DetectConflicts(config);
+        }
+
+        public List<BindingConflict> CheckBindingConflicts(int playerId, string contextName)
+        {
+            var config = GetPlayerConfig(playerId, false);
+            return InputBindingValidator.DetectConflicts(config, contextName);
+        }
+
+        public static string FormatConflictsReport(List<BindingConflict> conflicts)
+        {
+            return InputBindingValidator.FormatConflictsReport(conflicts);
         }
     }
 }

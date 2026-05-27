@@ -50,12 +50,18 @@ namespace CycloneGames.GameplayAbilities.Core
     public readonly struct GASSetByCallerTagStateData
     {
         public readonly GameplayTags.Core.GameplayTag Tag;
-        public readonly float Value;
+        public readonly long ValueRaw;
+        public GASFixedValue Value => GASFixedValue.FromRaw(ValueRaw);
 
-        public GASSetByCallerTagStateData(GameplayTags.Core.GameplayTag tag, float value)
+        private GASSetByCallerTagStateData(GameplayTags.Core.GameplayTag tag, long valueRaw)
         {
             Tag = tag;
-            Value = value;
+            ValueRaw = valueRaw;
+        }
+
+        public static GASSetByCallerTagStateData FromRaw(GameplayTags.Core.GameplayTag tag, long valueRaw)
+        {
+            return new GASSetByCallerTagStateData(tag, valueRaw);
         }
     }
 
@@ -69,48 +75,25 @@ namespace CycloneGames.GameplayAbilities.Core
         public readonly object SourceComponent;
         public readonly int Level;
         public readonly int StackCount;
-        public readonly float Duration;
-        public readonly float TimeRemaining;
-        public readonly float PeriodTimeRemaining;
+        public readonly long DurationRaw;
+        public readonly long TimeRemainingRaw;
+        public readonly long PeriodTimeRemainingRaw;
         public readonly GASPredictionKey PredictionKey;
         public readonly GASSetByCallerTagStateData[] SetByCallerTagMagnitudes;
         public readonly int SetByCallerTagMagnitudeCount;
+        public GASFixedValue Duration => GASFixedValue.FromRaw(DurationRaw);
+        public GASFixedValue TimeRemaining => GASFixedValue.FromRaw(TimeRemainingRaw);
+        public GASFixedValue PeriodTimeRemaining => GASFixedValue.FromRaw(PeriodTimeRemainingRaw);
 
-        public GASActiveEffectStateData(
+        private GASActiveEffectStateData(
             int instanceId,
             object effectDefinition,
             object sourceComponent,
             int level,
             int stackCount,
-            float duration,
-            float timeRemaining,
-            float periodTimeRemaining,
-            GASPredictionKey predictionKey,
-            GASSetByCallerTagStateData[] setByCallerTagMagnitudes)
-            : this(
-                instanceId,
-                effectDefinition,
-                sourceComponent,
-                level,
-                stackCount,
-                duration,
-                timeRemaining,
-                periodTimeRemaining,
-                predictionKey,
-                setByCallerTagMagnitudes,
-                setByCallerTagMagnitudes != null ? setByCallerTagMagnitudes.Length : 0)
-        {
-        }
-
-        public GASActiveEffectStateData(
-            int instanceId,
-            object effectDefinition,
-            object sourceComponent,
-            int level,
-            int stackCount,
-            float duration,
-            float timeRemaining,
-            float periodTimeRemaining,
+            long durationRaw,
+            long timeRemainingRaw,
+            long periodTimeRemainingRaw,
             GASPredictionKey predictionKey,
             GASSetByCallerTagStateData[] setByCallerTagMagnitudes,
             int setByCallerTagMagnitudeCount)
@@ -120,12 +103,39 @@ namespace CycloneGames.GameplayAbilities.Core
             SourceComponent = sourceComponent;
             Level = level;
             StackCount = stackCount;
-            Duration = duration;
-            TimeRemaining = timeRemaining;
-            PeriodTimeRemaining = periodTimeRemaining;
+            DurationRaw = durationRaw;
+            TimeRemainingRaw = timeRemainingRaw;
+            PeriodTimeRemainingRaw = periodTimeRemainingRaw;
             PredictionKey = predictionKey;
             SetByCallerTagMagnitudes = setByCallerTagMagnitudes;
             SetByCallerTagMagnitudeCount = setByCallerTagMagnitudeCount < 0 ? 0 : setByCallerTagMagnitudeCount;
+        }
+
+        public static GASActiveEffectStateData FromRaw(
+            int instanceId,
+            object effectDefinition,
+            object sourceComponent,
+            int level,
+            int stackCount,
+            long durationRaw,
+            long timeRemainingRaw,
+            long periodTimeRemainingRaw,
+            GASPredictionKey predictionKey,
+            GASSetByCallerTagStateData[] setByCallerTagMagnitudes,
+            int setByCallerTagMagnitudeCount)
+        {
+            return new GASActiveEffectStateData(
+                instanceId,
+                effectDefinition,
+                sourceComponent,
+                level,
+                stackCount,
+                durationRaw,
+                timeRemainingRaw,
+                periodTimeRemainingRaw,
+                predictionKey,
+                setByCallerTagMagnitudes,
+                setByCallerTagMagnitudeCount);
         }
     }
 
@@ -135,14 +145,21 @@ namespace CycloneGames.GameplayAbilities.Core
     public readonly struct GASAttributeStateData
     {
         public readonly string AttributeName;
-        public readonly float BaseValue;
-        public readonly float CurrentValue;
+        public readonly long BaseValueRaw;
+        public readonly long CurrentValueRaw;
+        public GASFixedValue BaseValue => GASFixedValue.FromRaw(BaseValueRaw);
+        public GASFixedValue CurrentValue => GASFixedValue.FromRaw(CurrentValueRaw);
 
-        public GASAttributeStateData(string attributeName, float baseValue, float currentValue)
+        private GASAttributeStateData(string attributeName, long baseValueRaw, long currentValueRaw)
         {
             AttributeName = attributeName;
-            BaseValue = baseValue;
-            CurrentValue = currentValue;
+            BaseValueRaw = baseValueRaw;
+            CurrentValueRaw = currentValueRaw;
+        }
+
+        public static GASAttributeStateData FromRaw(string attributeName, long baseValueRaw, long currentValueRaw)
+        {
+            return new GASAttributeStateData(attributeName, baseValueRaw, currentValueRaw);
         }
     }
 }

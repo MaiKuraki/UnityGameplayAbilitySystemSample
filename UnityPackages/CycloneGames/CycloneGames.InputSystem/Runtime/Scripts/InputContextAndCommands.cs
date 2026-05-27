@@ -1,7 +1,6 @@
 using R3;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using UnityEngine;
 
 namespace CycloneGames.InputSystem.Runtime
@@ -44,25 +43,29 @@ namespace CycloneGames.InputSystem.Runtime
 
         public InputContext AddBinding(Observable<Unit> source, IActionCommand command)
         {
-            ActionBindings[source] = command;
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            ActionBindings[source] = command ?? NullCommand.Instance;
             return this;
         }
 
         public InputContext AddBinding(Observable<Vector2> source, IMoveCommand command)
         {
-            MoveBindings[source] = command;
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            MoveBindings[source] = command ?? NullCommand.Instance;
             return this;
         }
 
         public InputContext AddBinding(Observable<float> source, IScalarCommand command)
         {
-            ScalarBindings[source] = command;
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            ScalarBindings[source] = command ?? NullCommand.Instance;
             return this;
         }
 
         public InputContext AddBinding(Observable<bool> source, IBoolCommand command)
         {
-            BoolBindings[source] = command;
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            BoolBindings[source] = command ?? NullCommand.Instance;
             return this;
         }
 
@@ -92,15 +95,17 @@ namespace CycloneGames.InputSystem.Runtime
             IInputPlayer[] ownersCopy;
             lock (_owners)
             {
-                if (_owners.Count == 0) return;
-                ownersCopy = _owners.ToArray();
+                int count = _owners.Count;
+                if (count == 0) return;
+                ownersCopy = new IInputPlayer[count];
+                _owners.CopyTo(ownersCopy);
                 _owners.Clear();
             }
 
             // Iterate copy to avoid "Collection modified" exception during callbacks
-            foreach (var owner in ownersCopy)
+            for (int i = 0; i < ownersCopy.Length; i++)
             {
-                owner.RemoveContext(this);
+                ownersCopy[i].RemoveContext(this);
             }
         }
     }
