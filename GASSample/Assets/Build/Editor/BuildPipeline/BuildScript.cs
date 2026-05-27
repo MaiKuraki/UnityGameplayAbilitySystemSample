@@ -28,26 +28,251 @@ namespace Build.Pipeline.Editor
 
         private static BuildData buildData;
 
-        private static VersionControlType DefaultVersionControlType = VersionControlType.Git;
+        private static VersionControlType DefaultVersionControlType = VersionControlFactory.Detect();
         private static IVersionControlProvider VersionControlProvider;
         private static void InitializeVersionControl(VersionControlType vcType)
         {
             VersionControlProvider = VersionControlFactory.CreateProvider(vcType);
         }
 
-        [MenuItem("Build/Game(Release)/Print Debug Info", priority = 10)]
+        [MenuItem("Build/Print Debug Info", priority = 10)]
         public static void PrintDebugInfo()
         {
-            var sceneList = GetBuildSceneList();
-            if (sceneList == null || sceneList.Length == 0)
+            const string Separator = "-------------------------------------------------------------------------";
+
+            // Load BuildData
+            buildData = TryGetBuildData();
+            if (buildData == null)
             {
-                Debug.LogError($"{DEBUG_FLAG} Invalid scene list, please check BuildData configuration.");
+                Debug.LogError($"{DEBUG_FLAG} BuildData not found. Please create a BuildData asset.");
                 return;
             }
 
-            foreach (var scene_name in sceneList)
+            var sb = new System.Text.StringBuilder(2048);
+            var warnings = new System.Collections.Generic.List<string>();
+
+            sb.AppendLine();
+            sb.AppendLine("=======================================================");
+            sb.AppendLine("                             Build Configuration Debug Info");
+            sb.AppendLine("=======================================================");
+
+            // Basic Build Info
+            sb.AppendLine();
+            sb.AppendLine("[Basic Build Configuration]");
+            sb.AppendLine(Separator);
+            sb.AppendLine($"  Application Version\t\t{buildData.ApplicationVersion}");
+            sb.AppendLine($"  Output Base Path\t\t{buildData.OutputBasePath}");
+            sb.AppendLine($"  Active Build Target\t\t{EditorUserBuildSettings.activeBuildTarget}");
+
+            // Scene Configuration
+            var sceneList = GetBuildSceneList();
+            sb.AppendLine();
+            sb.AppendLine("[Build Scenes]");
+            sb.AppendLine(Separator);
+            if (sceneList == null || sceneList.Length == 0)
             {
-                Debug.Log($"{DEBUG_FLAG} Pre Build Scene: {scene_name}");
+                sb.AppendLine("  [!] No scenes configured");
+                warnings.Add("Invalid scene list, please check BuildData configuration.");
+            }
+            else
+            {
+                for (int i = 0; i < sceneList.Length; i++)
+                {
+                    string sceneName = System.IO.Path.GetFileNameWithoutExtension(sceneList[i]);
+                    sb.AppendLine($"  [{i + 1}] {sceneName}");
+                }
+            }
+
+            // Buildalon Configuration
+            sb.AppendLine();
+            sb.AppendLine("[Buildalon Configuration]");
+            sb.AppendLine(Separator);
+            sb.AppendLine($"  Use Buildalon\t\t\t{(buildData.UseBuildalon ? "[Y] Enabled" : "[N] Disabled")}");
+
+            // HybridCLR Configuration
+            bool hybridCLREnabled = buildData.UseHybridCLR;
+            sb.AppendLine();
+            sb.AppendLine("[HybridCLR Configuration]");
+            sb.AppendLine(Separator);
+            sb.AppendLine($"  Use HybridCLR\t\t{(hybridCLREnabled ? "[Y] Enabled" : "[N] Disabled")}");
+
+            if (hybridCLREnabled)
+            {
+                HybridCLRBuildConfig hybridCLRConfig = BuildConfigHelper.GetHybridCLRConfig();
+                if (hybridCLRConfig != null)
+                {
+                    sb.AppendLine($"  Config Asset\t\t\t[Y] Found");
+                    sb.AppendLine($"  Obfuz in HybridCLR\t\t{(hybridCLRConfig.enableObfuz ? "[Y] Enabled" : "[N] Disabled")}");
+
+                    string aotDllOutputDir = hybridCLRConfig.GetAOTDllOutputDirectoryPath();
+                    if (!string.IsNullOrEmpty(aotDllOutputDir))
+                    {
+                        sb.AppendLine($"  AOT DLL Output Dir\t\t{aotDllOutputDir}");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"  AOT DLL Output Dir\t\t[!] Not configured");
+                        warnings.Add("AOT DLL Output Directory not configured (required for HybridCLR)");
+                    }
+                }
+                else
+                {
+                    sb.AppendLine($"  Config Asset\t\t\t[!] Not found");
+                    warnings.Add("HybridCLR Config Asset not found (please create HybridCLRBuildConfig asset)");
+                }
+            }
+
+            // Obfuz Configuration
+            bool obfuzEnabledInBuildData = buildData.UseObfuz;
+            bool baseObfuzAvailable = ObfuzIntegrator.IsBaseObfuzAvailable();
+            bool hybridCLRObfuzAvailable = ObfuzIntegrator.IsHybridCLRObfuzAvailable();
+
+            sb.AppendLine();
+            sb.AppendLine("[Obfuz Configuration]");
+            sb.AppendLine(Separator);
+            sb.AppendLine($"  Use Obfuz (BuildData)\t\t{(obfuzEnabledInBuildData ? "[Y] Enabled" : "[N] Disabled")}");
+            sb.AppendLine($"  Base Obfuz Package\t\t{(baseObfuzAvailable ? "[Y] Available" : "[N] Not Available")}");
+            sb.AppendLine($"  Obfuz4HybridCLR Pkg\t\t{(hybridCLRObfuzAvailable ? "[Y] Available" : "[N] Not Available")}");
+
+            if (obfuzEnabledInBuildData && !baseObfuzAvailable)
+            {
+                warnings.Add("Obfuz is enabled but base Obfuz package is not available!");
+            }
+
+            if (hybridCLREnabled && obfuzEnabledInBuildData && !hybridCLRObfuzAvailable)
+            {
+                warnings.Add("HybridCLR + Obfuz enabled but Obfuz4HybridCLR package is not available!");
+            }
+
+            // Determine effective Obfuz state
+            bool effectiveObfuzEnabled = obfuzEnabledInBuildData;
+            if (!effectiveObfuzEnabled && hybridCLREnabled)
+            {
+                HybridCLRBuildConfig hybridCLRConfig = BuildConfigHelper.GetHybridCLRConfig();
+                if (hybridCLRConfig != null)
+                {
+                    effectiveObfuzEnabled = hybridCLRConfig.enableObfuz;
+                }
+            }
+            sb.AppendLine($"  Effective Obfuz State\t\t{(effectiveObfuzEnabled ? "[Y] Enabled" : "[N] Disabled")}");
+
+            // Asset Management Configuration
+            AssetManagementType assetManagementType = buildData.AssetManagementType;
+            sb.AppendLine();
+            sb.AppendLine("[Asset Management Configuration]");
+            sb.AppendLine(Separator);
+            sb.AppendLine($"  Asset Management Type\t{assetManagementType}");
+
+            if (assetManagementType == AssetManagementType.YooAsset)
+            {
+                YooAssetBuildConfig yooAssetConfig = BuildConfigHelper.GetYooAssetConfig();
+                sb.AppendLine($"  YooAsset Config\t\t{(yooAssetConfig != null ? "[Y] Found" : "[!] Not found")}");
+                if (yooAssetConfig == null)
+                {
+                    warnings.Add("YooAsset Config Asset not found (please create YooAssetBuildConfig asset)");
+                }
+            }
+            else if (assetManagementType == AssetManagementType.Addressables)
+            {
+                AddressablesBuildConfig addressablesConfig = BuildConfigHelper.GetAddressablesConfig();
+                sb.AppendLine($"  Addressables Config\t\t{(addressablesConfig != null ? "[Y] Found" : "[!] Not found")}");
+                if (addressablesConfig == null)
+                {
+                    warnings.Add("Addressables Config Asset not found (please create AddressablesBuildConfig asset)");
+                }
+            }
+            else
+            {
+                sb.AppendLine($"  Status\t\t\t\t[N] No asset management");
+            }
+
+            // Version Control Configuration
+            string commitHash = INVALID_FLAG;
+            string commitCount = INVALID_FLAG;
+            string commitBranch = INVALID_FLAG;
+            string commitDate = INVALID_FLAG;
+            string fullBuildVersion = INVALID_FLAG;
+            string vcStatus = "[Y] Available";
+
+            try
+            {
+                InitializeVersionControl(DefaultVersionControlType);
+                if (VersionControlProvider != null)
+                {
+                    commitHash = VersionControlProvider.GetCommitHash();
+                    commitCount = VersionControlProvider.GetCommitCount();
+                    commitBranch = VersionControlProvider.GetBranchName();
+                    commitDate = VersionControlProvider.GetCommitDate();
+                    fullBuildVersion = $"{buildData.ApplicationVersion}.{commitCount}";
+                }
+                else
+                {
+                    vcStatus = "[!] Not available";
+                    warnings.Add("Version Control Provider not available");
+                }
+            }
+            catch (Exception ex)
+            {
+                vcStatus = "[!] Error";
+                warnings.Add($"Failed to get version control info: {ex.Message}");
+            }
+
+            sb.AppendLine();
+            sb.AppendLine("[Version Control Configuration]");
+            sb.AppendLine(Separator);
+            sb.AppendLine($"  Version Control Type\t\t{DefaultVersionControlType}");
+            sb.AppendLine($"  VC Status\t\t\t{vcStatus}");
+            sb.AppendLine($"  Current Commit Hash\t\t{commitHash}");
+            sb.AppendLine($"  Commit Count\t\t\t{commitCount}");
+            sb.AppendLine($"  Branch\t\t\t{commitBranch}");
+            sb.AppendLine($"  Commit Date\t\t\t{commitDate}");
+            sb.AppendLine($"  Full Build Version\t\t{fullBuildVersion}");
+
+            // Build Target Configuration
+            BuildTarget currentTarget = EditorUserBuildSettings.activeBuildTarget;
+            NamedBuildTarget namedTarget = GetNamedBuildTargetFromBuildTarget(currentTarget);
+            ScriptingImplementation scriptingBackend = PlayerSettings.GetScriptingBackend(namedTarget);
+
+            sb.AppendLine();
+            sb.AppendLine("[Build Target Configuration]");
+            sb.AppendLine(Separator);
+            sb.AppendLine($"  Current Build Target\t\t{currentTarget}");
+            sb.AppendLine($"  Scripting Backend\t\t{scriptingBackend}");
+            sb.AppendLine($"  API Compatibility\t\t{PlayerSettings.GetApiCompatibilityLevel(namedTarget)}");
+
+            sb.AppendLine();
+            sb.AppendLine("=======================================================");
+
+            // Output single log message
+            Debug.Log($"{DEBUG_FLAG}{sb}");
+
+            // Output warnings separately for visibility
+            foreach (var warning in warnings)
+            {
+                Debug.LogWarning($"{DEBUG_FLAG} [!] {warning}");
+            }
+        }
+
+
+        /// <summary>
+        /// Gets NamedBuildTarget from BuildTarget.
+        /// </summary>
+        private static NamedBuildTarget GetNamedBuildTargetFromBuildTarget(BuildTarget target)
+        {
+            switch (target)
+            {
+                case BuildTarget.Android:
+                    return NamedBuildTarget.Android;
+                case BuildTarget.iOS:
+                    return NamedBuildTarget.iOS;
+                case BuildTarget.WebGL:
+                    return NamedBuildTarget.WebGL;
+                case BuildTarget.StandaloneWindows64:
+                case BuildTarget.StandaloneOSX:
+                case BuildTarget.StandaloneLinux64:
+                    return NamedBuildTarget.Standalone;
+                default:
+                    return NamedBuildTarget.Standalone;
             }
         }
 
@@ -93,7 +318,20 @@ namespace Build.Pipeline.Editor
                 bOutputIsFolderTarget: false);
         }
 
-        [MenuItem("Build/Game(Release)/Build WebGL", priority = 14)]
+        [MenuItem("Build/Game(Release)/Build Linux (IL2CPP)", priority = 14)]
+        public static void PerformBuild_Linux()
+        {
+            PerformBuild(
+                BuildTarget.StandaloneLinux64,
+                NamedBuildTarget.Standalone,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.StandaloneLinux64)}/{ApplicationName}",
+                bCleanBuild: true,
+                bDeleteDebugFiles: true,
+                bOutputIsFolderTarget: false);
+        }
+
+        [MenuItem("Build/Game(Release)/Build WebGL", priority = 15)]
         public static void PerformBuild_WebGL()
         {
             PerformBuild(
@@ -106,7 +344,20 @@ namespace Build.Pipeline.Editor
                 bOutputIsFolderTarget: true);
         }
 
-        [MenuItem("Build/Game(Release)/Export Android Project (IL2CPP)", priority = 15)]
+        [MenuItem("Build/Game(Release)/Build iOS (IL2CPP)", priority = 16)]
+        public static void PerformBuild_iOS()
+        {
+            PerformBuild(
+                BuildTarget.iOS,
+                NamedBuildTarget.iOS,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.iOS)}/{ApplicationName}",
+                bCleanBuild: true,
+                bDeleteDebugFiles: true,
+                bOutputIsFolderTarget: true);
+        }
+
+        [MenuItem("Build/Game(Release)/Export Android Project (IL2CPP)", priority = 17)]
         public static void PerformBuild_AndroidProject()
         {
             EditorUserBuildSettings.exportAsGoogleAndroidProject = true;
@@ -124,7 +375,7 @@ namespace Build.Pipeline.Editor
 
         #region Menu Items - Fast Builds (No Clean)
 
-        [MenuItem("Build/Game(Release)/Fast/Build Android APK (Fast)", priority = 16)]
+        [MenuItem("Build/Game(Release)/Fast/Build Android APK (Fast)", priority = 18)]
         public static void PerformBuild_AndroidAPK_Fast()
         {
             EditorUserBuildSettings.exportAsGoogleAndroidProject = false;
@@ -139,7 +390,7 @@ namespace Build.Pipeline.Editor
                 bIsFastBuild: true);
         }
 
-        [MenuItem("Build/Game(Release)/Fast/Build Windows (Fast)", priority = 17)]
+        [MenuItem("Build/Game(Release)/Fast/Build Windows (Fast)", priority = 19)]
         public static void PerformBuild_Windows_Fast()
         {
             PerformBuild(
@@ -150,6 +401,77 @@ namespace Build.Pipeline.Editor
                 bCleanBuild: false,
                 bDeleteDebugFiles: true,
                 bOutputIsFolderTarget: false,
+                bIsFastBuild: true);
+        }
+
+        [MenuItem("Build/Game(Release)/Fast/Build Mac (Fast)", priority = 20)]
+        public static void PerformBuild_Mac_Fast()
+        {
+            PerformBuild(
+                BuildTarget.StandaloneOSX,
+                NamedBuildTarget.Standalone,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.StandaloneOSX)}/{ApplicationName}.app",
+                bCleanBuild: false,
+                bDeleteDebugFiles: true,
+                bOutputIsFolderTarget: false,
+                bIsFastBuild: true);
+        }
+
+        [MenuItem("Build/Game(Release)/Fast/Build Linux (Fast)", priority = 21)]
+        public static void PerformBuild_Linux_Fast()
+        {
+            PerformBuild(
+                BuildTarget.StandaloneLinux64,
+                NamedBuildTarget.Standalone,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.StandaloneLinux64)}/{ApplicationName}",
+                bCleanBuild: false,
+                bDeleteDebugFiles: true,
+                bOutputIsFolderTarget: false,
+                bIsFastBuild: true);
+        }
+
+        [MenuItem("Build/Game(Release)/Fast/Build iOS (Fast)", priority = 23)]
+        public static void PerformBuild_iOS_Fast()
+        {
+            PerformBuild(
+                BuildTarget.iOS,
+                NamedBuildTarget.iOS,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.iOS)}/{ApplicationName}",
+                bCleanBuild: false,
+                bDeleteDebugFiles: true,
+                bOutputIsFolderTarget: true,
+                bIsFastBuild: true);
+        }
+
+        [MenuItem("Build/Game(Release)/Fast/Build WebGL (Fast)", priority = 24)]
+        public static void PerformBuild_WebGL_Fast()
+        {
+            PerformBuild(
+                BuildTarget.WebGL,
+                NamedBuildTarget.WebGL,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.WebGL)}/{ApplicationName}",
+                bCleanBuild: false,
+                bDeleteDebugFiles: true,
+                bOutputIsFolderTarget: true,
+                bIsFastBuild: true);
+        }
+
+        [MenuItem("Build/Game(Release)/Fast/Export Android Project (Fast)", priority = 25)]
+        public static void PerformBuild_AndroidProject_Fast()
+        {
+            EditorUserBuildSettings.exportAsGoogleAndroidProject = true;
+            PerformBuild(
+                BuildTarget.Android,
+                NamedBuildTarget.Android,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.Android)}/{ApplicationName}",
+                bCleanBuild: false,
+                bDeleteDebugFiles: true,
+                bOutputIsFolderTarget: true,
                 bIsFastBuild: true);
         }
 
@@ -200,22 +522,21 @@ namespace Build.Pipeline.Editor
                 bIsDebugBuild: true);
         }
 
-        [MenuItem("Build/Game(Debug)/Export Android Project (Debug)", priority = 24)]
-        public static void PerformBuild_AndroidProject_Debug()
+        [MenuItem("Build/Game(Debug)/Build Linux (Debug)", priority = 23)]
+        public static void PerformBuild_Linux_Debug()
         {
-            EditorUserBuildSettings.exportAsGoogleAndroidProject = true;
             PerformBuild(
-                BuildTarget.Android,
-                NamedBuildTarget.Android,
+                BuildTarget.StandaloneLinux64,
+                NamedBuildTarget.Standalone,
                 ScriptingImplementation.IL2CPP,
-                $"{GetPlatformFolderName(BuildTarget.Android)}/{ApplicationName}",
+                $"{GetPlatformFolderName(BuildTarget.StandaloneLinux64)}/{ApplicationName}",
                 bCleanBuild: true,
                 bDeleteDebugFiles: false,
-                bOutputIsFolderTarget: true,
+                bOutputIsFolderTarget: false,
                 bIsDebugBuild: true);
         }
 
-        [MenuItem("Build/Game(Debug)/Build WebGL (Debug)", priority = 23)]
+        [MenuItem("Build/Game(Debug)/Build WebGL (Debug)", priority = 24)]
         public static void PerformBuild_WebGL_Debug()
         {
             PerformBuild(
@@ -237,6 +558,21 @@ namespace Build.Pipeline.Editor
                 NamedBuildTarget.iOS,
                 ScriptingImplementation.IL2CPP,
                 $"{GetPlatformFolderName(BuildTarget.iOS)}/{ApplicationName}",
+                bCleanBuild: true,
+                bDeleteDebugFiles: false,
+                bOutputIsFolderTarget: true,
+                bIsDebugBuild: true);
+        }
+
+        [MenuItem("Build/Game(Debug)/Export Android Project (Debug)", priority = 26)]
+        public static void PerformBuild_AndroidProject_Debug()
+        {
+            EditorUserBuildSettings.exportAsGoogleAndroidProject = true;
+            PerformBuild(
+                BuildTarget.Android,
+                NamedBuildTarget.Android,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.Android)}/{ApplicationName}",
                 bCleanBuild: true,
                 bDeleteDebugFiles: false,
                 bOutputIsFolderTarget: true,
@@ -278,13 +614,89 @@ namespace Build.Pipeline.Editor
                 bIsFastBuild: true);
         }
 
+        [MenuItem("Build/Game(Debug)/Fast/Build Mac (Debug Fast)", priority = 28)]
+        public static void PerformBuild_Mac_Debug_Fast()
+        {
+            PerformBuild(
+                BuildTarget.StandaloneOSX,
+                NamedBuildTarget.Standalone,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.StandaloneOSX)}/{ApplicationName}.app",
+                bCleanBuild: false,
+                bDeleteDebugFiles: false,
+                bOutputIsFolderTarget: false,
+                bIsDebugBuild: true,
+                bIsFastBuild: true);
+        }
+
+        [MenuItem("Build/Game(Debug)/Fast/Build Linux (Debug Fast)", priority = 29)]
+        public static void PerformBuild_Linux_Debug_Fast()
+        {
+            PerformBuild(
+                BuildTarget.StandaloneLinux64,
+                NamedBuildTarget.Standalone,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.StandaloneLinux64)}/{ApplicationName}",
+                bCleanBuild: false,
+                bDeleteDebugFiles: false,
+                bOutputIsFolderTarget: false,
+                bIsDebugBuild: true,
+                bIsFastBuild: true);
+        }
+
+        [MenuItem("Build/Game(Debug)/Fast/Build iOS (Debug Fast)", priority = 30)]
+        public static void PerformBuild_iOS_Debug_Fast()
+        {
+            PerformBuild(
+                BuildTarget.iOS,
+                NamedBuildTarget.iOS,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.iOS)}/{ApplicationName}",
+                bCleanBuild: false,
+                bDeleteDebugFiles: false,
+                bOutputIsFolderTarget: true,
+                bIsDebugBuild: true,
+                bIsFastBuild: true);
+        }
+
+        [MenuItem("Build/Game(Debug)/Fast/Build WebGL (Debug Fast)", priority = 31)]
+        public static void PerformBuild_WebGL_Debug_Fast()
+        {
+            PerformBuild(
+                BuildTarget.WebGL,
+                NamedBuildTarget.WebGL,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.WebGL)}/{ApplicationName}",
+                bCleanBuild: false,
+                bDeleteDebugFiles: false,
+                bOutputIsFolderTarget: true,
+                bIsDebugBuild: true,
+                bIsFastBuild: true);
+        }
+
+        [MenuItem("Build/Game(Debug)/Fast/Export Android Project (Debug Fast)", priority = 32)]
+        public static void PerformBuild_AndroidProject_Debug_Fast()
+        {
+            EditorUserBuildSettings.exportAsGoogleAndroidProject = true;
+            PerformBuild(
+                BuildTarget.Android,
+                NamedBuildTarget.Android,
+                ScriptingImplementation.IL2CPP,
+                $"{GetPlatformFolderName(BuildTarget.Android)}/{ApplicationName}",
+                bCleanBuild: false,
+                bDeleteDebugFiles: false,
+                bOutputIsFolderTarget: true,
+                bIsDebugBuild: true,
+                bIsFastBuild: true);
+        }
+
         #endregion
 
         #region CI/CD
 
         /// <summary>
         /// Entry point for CI/CD. Parses command line arguments to configure the build.
-        /// Usage: -executeMethod Build.Pipeline.Editor.BuildScript.PerformBuild_CI -buildTarget <Target> -output <Path> [-clean] [-debug] [-buildHybridCLR] [-buildYooAsset] [-buildAddressables] [-version <Version>] [-outputBasePath <Path>]
+        /// Usage: -executeMethod Build.Pipeline.Editor.BuildScript.PerformBuild_CI -buildTarget <Target> -output <Path> [-clean] [-fast] [-debug] [-buildHybridCLR] [-buildYooAsset] [-buildAddressables] [-version <Version>] [-outputBasePath <Path>]
         /// </summary>
         public static void PerformBuild_CI()
         {
@@ -305,6 +717,7 @@ namespace Build.Pipeline.Editor
             string overrideVersion = null;
             string overrideOutputBasePath = null;
             bool clean = false;
+            bool fast = false;
             bool isDebugBuild = false;
             bool forceHybridCLR = false;
             bool forceYooAsset = false;
@@ -335,6 +748,10 @@ namespace Build.Pipeline.Editor
                 else if (args[i] == "-clean")
                 {
                     clean = true;
+                }
+                else if (args[i] == "-fast")
+                {
+                    fast = true;
                 }
                 else if (args[i] == "-debug")
                 {
@@ -438,6 +855,10 @@ namespace Build.Pipeline.Editor
                     namedTarget = NamedBuildTarget.Standalone;
                     isFolder = false;
                     break;
+                case BuildTarget.StandaloneLinux64:
+                    namedTarget = NamedBuildTarget.Standalone;
+                    isFolder = false;
+                    break;
                 case BuildTarget.WebGL:
                     namedTarget = NamedBuildTarget.WebGL;
                     isFolder = true;
@@ -452,9 +873,10 @@ namespace Build.Pipeline.Editor
             if (string.IsNullOrEmpty(outputPath))
             {
                 string basePath = buildData.OutputBasePath;
-                outputPath = $"{GetPlatformFolderName(buildTarget)}/{ApplicationName}";
+                outputPath = $"{basePath}/{GetPlatformFolderName(buildTarget)}/{ApplicationName}";
                 if (!isFolder && buildTarget == BuildTarget.StandaloneWindows64) outputPath += ".exe";
                 if (!isFolder && buildTarget == BuildTarget.Android) outputPath += ".apk";
+                // Note: Linux executable has no extension by default
             }
 
             PerformBuild(
@@ -465,7 +887,8 @@ namespace Build.Pipeline.Editor
                 bCleanBuild: clean,
                 bDeleteDebugFiles: !isDebugBuild,
                 bOutputIsFolderTarget: isFolder,
-                bIsDebugBuild: isDebugBuild);
+                bIsDebugBuild: isDebugBuild,
+                bIsFastBuild: fast);
         }
 
         #endregion
@@ -480,6 +903,8 @@ namespace Build.Pipeline.Editor
                     return "Windows";
                 case BuildTarget.StandaloneOSX:
                     return "Mac";
+                case BuildTarget.StandaloneLinux64:
+                    return "Linux";
                 case BuildTarget.iOS:
                     return "iOS";
                 case BuildTarget.WebGL:
@@ -537,6 +962,8 @@ namespace Build.Pipeline.Editor
                     return RuntimePlatform.WindowsPlayer;
                 case BuildTarget.StandaloneOSX:
                     return RuntimePlatform.OSXPlayer;
+                case BuildTarget.StandaloneLinux64:
+                    return RuntimePlatform.LinuxPlayer;
                 case BuildTarget.iOS:
                     return RuntimePlatform.IPhonePlayer;
                 case BuildTarget.WebGL:
@@ -670,6 +1097,11 @@ namespace Build.Pipeline.Editor
             // Check if version info asset exists using project-relative path
             bool versionInfoAssetExisted = File.Exists(VersionInfoAssetPath);
 
+            // Track whether the Resources directory was created by this build.
+            // Uses absolute path to avoid CWD dependency.
+            string resourcesAbsolutePath = Path.GetFullPath(Path.Combine(Application.dataPath, "Resources"));
+            bool resourcesDirectoryExistedBeforeBuild = Directory.Exists(resourcesAbsolutePath);
+
             try
             {
                 // Load Build Data
@@ -738,7 +1170,9 @@ namespace Build.Pipeline.Editor
                 InitializeVersionControl(DefaultVersionControlType);
                 string commitHash = VersionControlProvider?.GetCommitHash();
                 string commitCount = VersionControlProvider?.GetCommitCount();
-                VersionControlProvider?.UpdateVersionInfoAsset(VersionInfoAssetPath, commitHash, commitCount);
+                string commitBranch = VersionControlProvider?.GetBranchName();
+                string commitDate = VersionControlProvider?.GetCommitDate();
+                VersionControlProvider?.UpdateVersionInfoAsset(VersionInfoAssetPath, commitHash, commitCount, commitBranch, commitDate);
 
                 string buildNumber = string.IsNullOrEmpty(commitCount) ? "0" : commitCount;
                 string appVersion = buildData != null ? buildData.ApplicationVersion : "v0.1";
@@ -756,8 +1190,12 @@ namespace Build.Pipeline.Editor
                     }
                     else if (buildData.UseAddressables)
                     {
+                        // Clean up StreamingAssets/aa before build to prevent file conflicts
+                        // Unity's Addressables will copy files from Library to StreamingAssets during BuildPlayer,
+                        // so we need to ensure no stale files exist that would cause conflicts
                         AddressablesBuildConfig addressablesConfig = BuildConfigHelper.GetAddressablesConfig();
-                        AddressablesBuilder.Build(TargetPlatform, fullBuildVersion, addressablesConfig);
+                        AddressablesBuilder.CleanupStreamingAssetsAddressables();
+                        AddressablesBuilder.Build(TargetPlatform, fullBuildVersion, addressablesConfig);    
                     }
                 }
 
@@ -818,6 +1256,26 @@ namespace Build.Pipeline.Editor
                         }
 
                         buildPlayerOptions.options |= BuildOptions.CompressWithLz4;
+
+                        if (buildData != null && buildData.UseObfuz && ObfuzIntegrator.IsBaseObfuzAvailable())
+                        {
+                            Debug.Log($"{DEBUG_FLAG} Initializing ObfuzSettings before build...");
+                            ObfuzIntegrator.ForceInitializeObfuzSettings();
+
+                            Debug.Log($"{DEBUG_FLAG} Ensuring Encryption VM is generated and compiled (adaptive timeout)...");
+                            try
+                            {
+                                ObfuzIntegrator.EnsureEncryptionVMGeneratedAndCompiled();
+                                Debug.Log($"{DEBUG_FLAG} Encryption VM is ready for obfuscation.");
+                            }
+                            catch (Exception ex)
+                            {
+                                Debug.LogError($"{DEBUG_FLAG} Failed to ensure Encryption VM is compiled: {ex.Message}");
+                                Debug.LogError($"{DEBUG_FLAG} Build will be cancelled to prevent obfuscation failure.");
+                                throw new BuildFailedException($"Encryption VM is not compiled. Please generate it manually via Obfuz > GenerateEncryptionVM menu and wait for compilation to complete before building. Error: {ex.Message}");
+                            }
+                        }
+
                         buildReport = BuildPipeline.BuildPlayer(buildPlayerOptions);
                     }
 
@@ -828,7 +1286,7 @@ namespace Build.Pipeline.Editor
                         if (bDeleteDebugFiles && !bIsDebugBuild)
                         {
                             string platformNameStr = GetPlatformFolderName(TargetPlatform);
-                            if (platformNameStr == "Windows" || platformNameStr == "Mac") // TODO: May Linux
+                            if (platformNameStr == "Windows" || platformNameStr == "Mac" || platformNameStr == "Linux")
                             {
                                 DeleteDebugFiles(TargetPlatform);
                             }
@@ -861,6 +1319,7 @@ namespace Build.Pipeline.Editor
             }
             finally
             {
+                // Step 1: Clean up VersionInfoData asset
                 if (versionInfoAssetExisted)
                 {
                     VersionControlProvider?.ClearVersionInfoAsset(VersionInfoAssetPath);
@@ -871,6 +1330,13 @@ namespace Build.Pipeline.Editor
                     {
                         AssetDatabase.DeleteAsset(VersionInfoAssetPath);
                     }
+                }
+
+                // Step 2: Clean up Resources directory if auto-created by this build.
+                // Must run AFTER VersionInfoData cleanup (step 1) so the directory is empty.
+                if (!resourcesDirectoryExistedBeforeBuild)
+                {
+                    TryCleanupResourcesDirectory(resourcesAbsolutePath, VersionInfoAssetPath);
                 }
 
                 // Cleanup auto-created Addressables version files
@@ -1055,6 +1521,83 @@ namespace Build.Pipeline.Editor
             catch (Exception ex)
             {
                 Debug.LogWarning($"{DEBUG_FLAG} Addressables clean skipped: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Deletes the Resources directory and its .meta if the directory is empty.
+        /// Called after build to clean up directories auto-created by the build pipeline.
+        /// Only deletes if the directory contains no user files — if the user placed
+        /// other assets in Resources/, it is preserved.
+        /// </summary>
+        private static void TryCleanupResourcesDirectory(string resourcesAbsolutePath, string versionInfoAssetPath)
+        {
+            try
+            {
+                if (!Directory.Exists(resourcesAbsolutePath))
+                {
+                    return;
+                }
+
+                // AssetDatabase.DeleteAsset is synchronous but Unity may defer
+                // actual filesystem deletion; verify the file is gone.
+                string assetAbsolutePath = Path.GetFullPath(versionInfoAssetPath);
+                if (File.Exists(assetAbsolutePath))
+                {
+                    AssetDatabase.DeleteAsset(versionInfoAssetPath);
+                }
+
+                AssetDatabase.Refresh();
+
+                if (!Directory.Exists(resourcesAbsolutePath))
+                {
+                    return;
+                }
+
+                string[] entries = Directory.GetFileSystemEntries(resourcesAbsolutePath);
+                bool hasOnlyIgnorableFiles = true;
+                foreach (string entry in entries)
+                {
+                    string name = Path.GetFileName(entry);
+                    if (name == ".DS_Store" || name == "Thumbs.db" || name == "desktop.ini")
+                    {
+                        continue;
+                    }
+                    hasOnlyIgnorableFiles = false;
+                    break;
+                }
+
+                if (!hasOnlyIgnorableFiles)
+                {
+                    Debug.Log($"{DEBUG_FLAG} Resources directory contains user files, preserving: {resourcesAbsolutePath}");
+                    return;
+                }
+
+                foreach (string entry in entries)
+                {
+                    try { File.Delete(entry); } catch { }
+                }
+
+                // Prefer AssetDatabase API — it handles .meta cleanup automatically
+                string resourcesAssetPath = "Assets/Resources";
+                bool deletedByAssetDB = AssetDatabase.DeleteAsset(resourcesAssetPath);
+
+                if (!deletedByAssetDB && Directory.Exists(resourcesAbsolutePath))
+                {
+                    string metaPath = resourcesAbsolutePath + ".meta";
+                    if (File.Exists(metaPath))
+                    {
+                        File.Delete(metaPath);
+                    }
+                    Directory.Delete(resourcesAbsolutePath, false);
+                }
+
+                AssetDatabase.Refresh();
+                Debug.Log($"{DEBUG_FLAG} Cleaned up auto-created Resources directory.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"{DEBUG_FLAG} Failed to cleanup Resources directory: {ex.Message}");
             }
         }
     }

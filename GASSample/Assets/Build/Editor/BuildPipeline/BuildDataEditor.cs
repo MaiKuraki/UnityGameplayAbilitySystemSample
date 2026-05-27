@@ -7,11 +7,16 @@ namespace Build.Pipeline.Editor
     [CustomEditor(typeof(BuildData))]
     public class BuildDataEditor : UnityEditor.Editor
     {
+        // Duplicate detection
+        private static string[] allConfigGuids;
+        private static bool hasCheckedForDuplicates;
+
         private SerializedProperty launchScene;
         private SerializedProperty applicationVersion;
         private SerializedProperty outputBasePath;
         private SerializedProperty useBuildalon;
         private SerializedProperty useHybridCLR;
+        private SerializedProperty useObfuz;
         private SerializedProperty assetManagementType;
 
         private bool hasValidationErrors = false;
@@ -30,6 +35,7 @@ namespace Build.Pipeline.Editor
             outputBasePath = serializedObject.FindProperty("outputBasePath");
             useBuildalon = serializedObject.FindProperty("useBuildalon");
             useHybridCLR = serializedObject.FindProperty("useHybridCLR");
+            useObfuz = serializedObject.FindProperty("useObfuz");
             assetManagementType = serializedObject.FindProperty("assetManagementType");
 
             // Clear validation cache when editor is enabled
@@ -43,8 +49,14 @@ namespace Build.Pipeline.Editor
             serializedObject.Update();
             hasValidationErrors = false;
 
+            // Check for duplicates
+            CheckForDuplicates();
+
             EditorGUILayout.LabelField("Build Configuration", EditorStyles.boldLabel);
             EditorGUILayout.Space(5);
+
+            // Duplicate warning
+            DrawDuplicateWarning();
 
             // Build Scene Config
             EditorGUILayout.LabelField("Build Scene Config", EditorStyles.boldLabel);
@@ -75,6 +87,20 @@ namespace Build.Pipeline.Editor
             EditorGUILayout.LabelField("Build Pipeline Options", EditorStyles.boldLabel);
             EditorGUILayout.PropertyField(useBuildalon);
             EditorGUILayout.PropertyField(useHybridCLR);
+
+            // Obfuz Settings
+            EditorGUILayout.PropertyField(useObfuz);
+            if (useObfuz.boolValue)
+            {
+                DrawHelpBox(
+                    "✓ Obfuz is enabled.\n\n" +
+                    "The build process will automatically:\n" +
+                    "1. Generate encryption VM and secret key files\n" +
+                    "2. Configure ObfuzSettings (add Assembly-CSharp to reference list)\n" +
+                    "3. Apply obfuscation during build\n\n" +
+                    "Note: This works for both HybridCLR and non-HybridCLR projects. For HybridCLR projects, if this is enabled, HybridCLRBuildConfig.enableObfuz is automatically considered enabled.",
+                    MessageType.Info);
+            }
             EditorGUILayout.Space(10);
 
             // Asset Management System
@@ -410,6 +436,36 @@ namespace Build.Pipeline.Editor
         private void DrawHelpBox(string message, MessageType type)
         {
             EditorGUILayout.HelpBox(message, type);
+        }
+
+        private void CheckForDuplicates()
+        {
+            if (!hasCheckedForDuplicates)
+            {
+                allConfigGuids = AssetDatabase.FindAssets("t:BuildData");
+                hasCheckedForDuplicates = true;
+            }
+        }
+
+        private void DrawDuplicateWarning()
+        {
+            if (allConfigGuids != null && allConfigGuids.Length > 1)
+            {
+                EditorGUILayout.HelpBox(
+                    $"⚠ Multiple BuildData assets detected ({allConfigGuids.Length} found).\n" +
+                    "Only one BuildData should exist in the project. Please delete duplicates.",
+                    MessageType.Warning);
+
+                if (GUILayout.Button("Show All in Console"))
+                {
+                    foreach (var guid in allConfigGuids)
+                    {
+                        string path = AssetDatabase.GUIDToAssetPath(guid);
+                        Debug.Log($"BuildData found at: {path}");
+                    }
+                }
+                EditorGUILayout.Space(5);
+            }
         }
     }
 }

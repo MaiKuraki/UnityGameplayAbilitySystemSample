@@ -1,90 +1,158 @@
+using System;
 using System.Diagnostics;
-using Build.Data;
-using UnityEditor;
+using System.IO;
+using System.Text;
 using UnityEngine;
 
 namespace Build.VersionControl.Editor
 {
-    public class VersionControlProviderGit : IVersionControlProvider
+    public class VersionControlProviderGit : VersionControlProviderBase
     {
-        public string GetCommitHash()
-        {
-            ProcessStartInfo startInfo = new ProcessStartInfo
-            {
-                FileName = "git",
-                Arguments = "rev-parse HEAD",
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
+        private const string GIT_EXECUTABLE = "git";
+        private const int PROCESS_TIMEOUT_MS = 10000;
 
-            using (Process process = Process.Start(startInfo))
+        private static string _projectRoot;
+
+        private static string GetProjectRoot()
+        {
+            if (_projectRoot == null)
             {
-                string output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-                return output.Trim();
+                _projectRoot = FindGitRoot() ?? Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
             }
+            return _projectRoot;
         }
 
-        public string GetCommitCount()
+        /// <summary>
+        /// Walks up from Assets/ to find the .git directory.
+        /// This correctly handles Unity projects nested inside a Git repo.
+        /// </summary>
+        private static string FindGitRoot()
         {
-            ProcessStartInfo startInfo = new ProcessStartInfo
+            string dir = Path.GetFullPath(Application.dataPath);
+            string root = Path.GetPathRoot(dir);
+            while (dir != null && dir.Length >= root.Length)
             {
-                FileName = "git",
-                Arguments = "rev-list --count HEAD",
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using (Process process = Process.Start(startInfo))
-            {
-                string output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-                return output.Trim();
-            }
-        }
-
-        public void UpdateVersionInfoAsset(string assetPath, string commitHash, string commitCount)
-        {
-            var versionInfoData = AssetDatabase.LoadAssetAtPath<VersionInfoData>(assetPath);
-            if (versionInfoData == null)
-            {
-                UnityEngine.Debug.Log($"VersionInfoData asset not found at {assetPath}, creating a new one.");
-                versionInfoData = ScriptableObject.CreateInstance<VersionInfoData>();
-
-                string directory = System.IO.Path.GetDirectoryName(assetPath);
-                if (!System.IO.Directory.Exists(directory))
+                string gitPath = Path.Combine(dir, ".git");
+                if (Directory.Exists(gitPath) || File.Exists(gitPath))
                 {
-                    System.IO.Directory.CreateDirectory(directory);
+                    return dir;
+                }
+                dir = Path.GetDirectoryName(dir);
+            }
+            return null;
+        }
+
+        public override string GetCommitHash()
+        {
+            return RunGitCommand("rev-parse --short=7 HEAD") ?? "unknown";
+        }
+
+        public override string GetCommitCount()
+        {
+            return RunGitCommand("rev-list --count HEAD") ?? "0";
+        }
+
+        public override string GetBranchName()
+        {
+            return RunGitCommand("rev-parse --abbrev-ref HEAD") ?? "unknown";
+        }
+
+        public override string GetCommitDate()
+        {
+            return RunGitCommand("log -1 --format=%ci") ?? DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        }
+
+        private static string RunGitCommand(string arguments)
+        {
+            try
+            {
+                string projectRoot = GetProjectRoot();
+
+                // Primary: use -c safe.directory to trust the repo for this invocation.
+                // If Git rejects it (exit 128 = fatal, e.g. cross-drive / cross-user),
+                // permanently register the directory in global Git config and retry.
+                string result = TryRun(arguments, projectRoot);
+                if (result != null)
+                    return result;
+
+                UnityEngine.Debug.Log($"[VC] Primary attempt failed, registering safe.directory and retrying...");
+                RegisterSafeDirectory(projectRoot);
+                return TryRun(arguments, null);
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[VC] Git command error: git {arguments}\n{ex.Message}");
+                return null;
+            }
+        }
+
+        private static string TryRun(string arguments, string safeDir)
+        {
+            string args = safeDir != null
+                ? $"-c safe.directory={safeDir.Replace('\\', '/')} {arguments}"
+                : arguments;
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = GIT_EXECUTABLE,
+                Arguments = args,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8
+            };
+
+            using (var process = new Process { StartInfo = startInfo })
+            {
+                process.Start();
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit(PROCESS_TIMEOUT_MS);
+
+                if (process.ExitCode != 0)
+                {
+                    string error = process.StandardError.ReadToEnd();
+                    UnityEngine.Debug.LogWarning($"[VC] git {args} → exit {process.ExitCode}\n{error}");
+                    return null;
                 }
 
-                AssetDatabase.CreateAsset(versionInfoData, assetPath);
+                return output.Trim();
             }
-
-            versionInfoData.commitHash = commitHash ?? "Unknown";
-            versionInfoData.commitCount = commitCount ?? "0";
-            versionInfoData.buildDate = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-
-            // Mark the object as "dirty" so Unity knows it has changed
-            EditorUtility.SetDirty(versionInfoData);
-            // Save the changes to disk
-            AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
-
-            UnityEngine.Debug.Log($"Version information updated in asset: {assetPath}");
         }
 
-        public void ClearVersionInfoAsset(string assetPath)
+        private static void RegisterSafeDirectory(string projectRoot)
         {
-            var versionInfoData = AssetDatabase.LoadAssetAtPath<VersionInfoData>(assetPath);
-            if (versionInfoData != null)
+            try
             {
-                versionInfoData.commitHash = string.Empty;
-                versionInfoData.commitCount = string.Empty;
-                versionInfoData.buildDate = string.Empty;
-                EditorUtility.SetDirty(versionInfoData);
-                AssetDatabase.SaveAssets();
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = GIT_EXECUTABLE,
+                    Arguments = $"config --global --add safe.directory \"{projectRoot}\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using (var process = new Process { StartInfo = startInfo })
+                {
+                    process.Start();
+                    process.WaitForExit(PROCESS_TIMEOUT_MS);
+
+                    if (process.ExitCode == 0)
+                    {
+                        UnityEngine.Debug.Log($"[VC] Registered safe.directory for: {projectRoot}");
+                    }
+                    else
+                    {
+                        string error = process.StandardError.ReadToEnd();
+                        UnityEngine.Debug.LogWarning($"[VC] Failed to register safe.directory: {error}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[VC] Failed to register safe.directory: {ex.Message}");
             }
         }
     }

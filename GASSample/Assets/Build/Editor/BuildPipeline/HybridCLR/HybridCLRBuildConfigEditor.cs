@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
@@ -7,15 +9,27 @@ namespace Build.Pipeline.Editor
     [CustomEditor(typeof(HybridCLRBuildConfig))]
     public class HybridCLRBuildConfigEditor : UnityEditor.Editor
     {
+        // Duplicate detection
+        private static string[] allConfigGuids;
+        private static bool hasCheckedForDuplicates;
+
         private SerializedProperty hotUpdateAssemblies;
+        private SerializedProperty cheatAssemblies;
         private SerializedProperty hotUpdateDllOutputDirectory;
+        private SerializedProperty cheatDllOutputDirectory;
+        private SerializedProperty enableObfuz;
+        private SerializedProperty aotDllOutputDirectory;
 
         private bool hasValidationErrors = false;
 
         private void OnEnable()
         {
             hotUpdateAssemblies = serializedObject.FindProperty("hotUpdateAssemblies");
+            cheatAssemblies = serializedObject.FindProperty("cheatAssemblies");
             hotUpdateDllOutputDirectory = serializedObject.FindProperty("hotUpdateDllOutputDirectory");
+            cheatDllOutputDirectory = serializedObject.FindProperty("cheatDllOutputDirectory");
+            enableObfuz = serializedObject.FindProperty("enableObfuz");
+            aotDllOutputDirectory = serializedObject.FindProperty("aotDllOutputDirectory");
         }
 
         public override void OnInspectorGUI()
@@ -23,22 +37,74 @@ namespace Build.Pipeline.Editor
             serializedObject.Update();
             hasValidationErrors = false;
 
+            // Check for duplicates
+            CheckForDuplicates();
+
             EditorGUILayout.LabelField("HybridCLR Build Configuration", EditorStyles.boldLabel);
             EditorGUILayout.Space(5);
+
+            // Duplicate warning
+            DrawDuplicateWarning();
 
             // Hot Update Configuration
             EditorGUILayout.LabelField("Hot Update Configuration", EditorStyles.boldLabel);
             EditorGUILayout.PropertyField(hotUpdateAssemblies);
             ValidateHotUpdateAssemblies();
+            EditorGUILayout.Space(5);
+
+            // Cheat DLL Configuration (optional)
+            EditorGUILayout.LabelField("Cheat/Debug DLL Configuration (Optional)", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(cheatAssemblies);
+            ValidateCheatAssemblies();
             EditorGUILayout.Space(10);
 
             // Output Settings
             EditorGUILayout.LabelField("Output Settings", EditorStyles.boldLabel);
-            EditorGUILayout.PropertyField(hotUpdateDllOutputDirectory);
-            ValidateOutputDirectory();
+
+            // Hot Update DLL Output Directory (drag & drop folder)
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Hot Update DLL Output Directory", GUILayout.Width(200));
+            EditorGUILayout.PropertyField(hotUpdateDllOutputDirectory, GUIContent.none);
+            EditorGUILayout.EndHorizontal();
+            ValidateHotUpdateDllOutputDirectory();
+            EditorGUILayout.Space(5);
+
+            // Cheat DLL Output Directory (optional)
+            EditorGUILayout.LabelField("Cheat DLL Output Directory (Optional)", EditorStyles.boldLabel);
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Output Directory", GUILayout.Width(200));
+            EditorGUILayout.PropertyField(cheatDllOutputDirectory, GUIContent.none);
+            EditorGUILayout.EndHorizontal();
+            ValidateCheatDllOutputDirectory();
+            EditorGUILayout.Space(5);
+
+            // AOT DLL Output Settings
+            EditorGUILayout.LabelField("AOT DLL Output Settings", EditorStyles.boldLabel);
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("AOT DLL Output Directory", GUILayout.Width(200));
+            EditorGUILayout.PropertyField(aotDllOutputDirectory, GUIContent.none);
+            EditorGUILayout.EndHorizontal();
+            ValidateAOTDllOutputDirectory();
             EditorGUILayout.Space(10);
 
-            // Show validation summary at the end if there are errors
+            // Obfuz Settings
+            EditorGUILayout.LabelField("Obfuz Settings", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(enableObfuz);
+            if (enableObfuz.boolValue)
+            {
+                DrawHelpBox(
+                    "ℹ Obfuz is enabled. Hot update assemblies will be obfuscated before being copied to the output directory.\n\n" +
+                    "When obfuscation is enabled, the build process will:\n" +
+                    "1. Generate encryption VM and secret key files\n" +
+                    "2. Configure ObfuzSettings (add Assembly-CSharp to reference list)\n" +
+                    "3. Compile hot update assemblies\n" +
+                    "4. Apply obfuscation to the assemblies\n" +
+                    "5. Copy obfuscated assemblies to the output directory\n\n" +
+                    "Note: BuildData.UseObfuz takes priority. If BuildData.UseObfuz is enabled, this setting is automatically considered enabled. AOT DLLs are still needed and will be copied if AOT DLL Output Directory is configured.",
+                    MessageType.Info);
+            }
+            EditorGUILayout.Space(10);
+
             if (hasValidationErrors)
             {
                 EditorGUILayout.Space(5);
@@ -76,12 +142,24 @@ namespace Build.Pipeline.Editor
             else
             {
                 int nullCount = 0;
+                List<string> packageAssemblies = new List<string>();
+
                 for (int i = 0; i < hotUpdateAssemblies.arraySize; i++)
                 {
                     var element = hotUpdateAssemblies.GetArrayElementAtIndex(i);
                     if (element.objectReferenceValue == null)
                     {
                         nullCount++;
+                    }
+                    else
+                    {
+                        // Check if assembly is not in Assets/ folder (Package Manager packages)
+                        string assetPath = AssetDatabase.GetAssetPath(element.objectReferenceValue);
+                        if (!string.IsNullOrEmpty(assetPath) && !assetPath.StartsWith("Assets/"))
+                        {
+                            string asmName = element.objectReferenceValue.name;
+                            packageAssemblies.Add($"{asmName} ({assetPath})");
+                        }
                     }
                 }
 
@@ -95,159 +173,353 @@ namespace Build.Pipeline.Editor
                         "Tip: Empty slots will be ignored during build, but it's better to remove them for clarity.",
                         MessageType.Warning);
                 }
+
+                if (packageAssemblies.Count > 0)
+                {
+                    DrawHelpBox(
+                        "⚠ Warning: Non-Assets assemblies detected in Hot Update list!\n\n" +
+                        "The following assemblies are not in Assets/ folder (Package Manager packages):\n" +
+                        string.Join("\n", packageAssemblies.Select(asm => $"• {asm}")) + "\n\n" +
+                        "HybridCLR only compiles assemblies in Assets/ folder as hot update DLLs.\n" +
+                        "These assemblies will be automatically filtered out during build.\n\n" +
+                        "Recommendation:\n" +
+                        "• Remove these non-Assets assemblies from the list\n" +
+                        "• Package Manager packages should be AOT assemblies (preserved via link.xml)\n" +
+                        "• If you need this code to be hot-updatable, copy it to Assets/ folder and create a new asmdef",
+                        MessageType.Warning);
+                }
             }
         }
 
-        private void ValidateOutputDirectory()
+        private void ValidateCheatAssemblies()
         {
-            string path = hotUpdateDllOutputDirectory.stringValue;
-            if (string.IsNullOrWhiteSpace(path))
+            if (cheatAssemblies != null && cheatAssemblies.arraySize > 0)
             {
-                hasValidationErrors = true;
-                DrawHelpBox(
-                    "❌ Output Directory is required!\n\n" +
-                    "How to fill:\n" +
-                    "Enter a path relative to your project root, starting with 'Assets/'.\n\n" +
-                    "Correct Examples:\n" +
-                    "• Assets/HotUpdateDLL\n" +
-                    "• Assets/StreamingAssets/HotUpdateDLL\n" +
-                    "• Assets/Game/HotUpdate/Assemblies\n\n" +
-                    "The directory will be created automatically if it doesn't exist.",
-                    MessageType.Error);
-                return;
-            }
+                int nullCount = 0;
+                List<string> packageAssemblies = new List<string>();
 
-            string trimmedPath = path.Trim();
-            if (trimmedPath.Length == 0)
-            {
-                hasValidationErrors = true;
-                DrawHelpBox(
-                    "❌ Output Directory cannot be empty!\n\n" +
-                    "How to fill:\n" +
-                    "Enter a valid directory path starting with 'Assets/'.\n\n" +
-                    "Correct Examples:\n" +
-                    "• Assets/HotUpdateDLL\n" +
-                    "• Assets/StreamingAssets/HotUpdateDLL",
-                    MessageType.Error);
-                return;
-            }
-
-            // Validate path format
-            if (!trimmedPath.StartsWith("Assets/") && !trimmedPath.StartsWith("Assets\\"))
-            {
-                hasValidationErrors = true;
-                DrawHelpBox(
-                    "❌ Output Directory must be within the Assets folder!\n\n" +
-                    "Current value: " + trimmedPath + "\n\n" +
-                    "How to fix:\n" +
-                    "The path must start with 'Assets/' (case-sensitive).\n\n" +
-                    "Correct Examples:\n" +
-                    "• Assets/HotUpdateDLL\n" +
-                    "• Assets/StreamingAssets/HotUpdateDLL\n" +
-                    "• Assets/Game/HotUpdate/Assemblies\n\n" +
-                    "Incorrect Examples:\n" +
-                    "• HotUpdateDLL (missing 'Assets/' prefix)\n" +
-                    "• assets/HotUpdateDLL (wrong case, should be 'Assets')\n" +
-                    "• Assets\\HotUpdateDLL (use forward slash '/' instead of backslash)",
-                    MessageType.Error);
-                return;
-            }
-
-            // Check for invalid characters
-            char[] invalidChars = Path.GetInvalidPathChars();
-            bool hasInvalidChar = false;
-            char invalidChar = '\0';
-            foreach (char c in invalidChars)
-            {
-                if (trimmedPath.Contains(c))
+                for (int i = 0; i < cheatAssemblies.arraySize; i++)
                 {
-                    hasInvalidChar = true;
-                    invalidChar = c;
-                    break;
+                    var element = cheatAssemblies.GetArrayElementAtIndex(i);
+                    if (element.objectReferenceValue == null)
+                    {
+                        nullCount++;
+                    }
+                    else
+                    {
+                        // Check if assembly is not in Assets/ folder (Package Manager packages)
+                        string assetPath = AssetDatabase.GetAssetPath(element.objectReferenceValue);
+                        if (!string.IsNullOrEmpty(assetPath) && !assetPath.StartsWith("Assets/"))
+                        {
+                            string asmName = element.objectReferenceValue.name;
+                            packageAssemblies.Add($"{asmName} ({assetPath})");
+                        }
+                    }
+                }
+
+                if (nullCount > 0)
+                {
+                    DrawHelpBox(
+                        $"⚠ Warning: {nullCount} empty slot(s) in Cheat Assemblies list.\n\n" +
+                        "Empty slots will be ignored during build.",
+                        MessageType.Warning);
+                }
+
+                if (packageAssemblies.Count > 0)
+                {
+                    DrawHelpBox(
+                        "⚠ Warning: Non-Assets assemblies detected in Cheat list!\n\n" +
+                        "The following assemblies are not in Assets/ folder (Package Manager packages):\n" +
+                        string.Join("\n", packageAssemblies.Select(asm => $"• {asm}")) + "\n\n" +
+                        "HybridCLR only compiles assemblies in Assets/ folder as hot update DLLs.\n" +
+                        "These assemblies will be automatically filtered out during build.\n\n" +
+                        "Recommendation:\n" +
+                        "• Remove these non-Assets assemblies from the list\n" +
+                        "• Package Manager packages should be AOT assemblies (preserved via link.xml)\n" +
+                        "• If you need this code to be hot-updatable, copy it to Assets/ folder and create a new asmdef",
+                        MessageType.Warning);
                 }
             }
+        }
 
-            if (hasInvalidChar)
+        private void ValidateCheatDllOutputDirectory()
+        {
+            if (cheatAssemblies == null || cheatAssemblies.arraySize == 0)
             {
-                hasValidationErrors = true;
-                string charDisplay = invalidChar == '\0' ? "null" : $"'{invalidChar}'";
                 DrawHelpBox(
-                    $"❌ Output Directory contains invalid character: {charDisplay}\n\n" +
-                    "How to fix:\n" +
-                    "Remove all invalid characters from the path. Use only letters, numbers, underscores, hyphens, and forward slashes.\n\n" +
-                    "Correct Examples:\n" +
-                    "• Assets/HotUpdateDLL\n" +
-                    "• Assets/HotUpdate_DLL\n" +
-                    "• Assets/HotUpdate-DLL\n\n" +
-                    "Invalid Characters:\n" +
-                    "• < > : \" | ? * and other special characters",
-                    MessageType.Error);
+                    "ℹ No Cheat Assemblies assigned. Cheat DLL Output Directory is optional.\n\n" +
+                    "If you don't need cheat/debug DLLs, you can ignore this setting.",
+                    MessageType.Info);
                 return;
             }
 
-            // Check for relative path issues
-            if (trimmedPath.Contains(".."))
+            if (cheatDllOutputDirectory.objectReferenceValue == null)
             {
                 DrawHelpBox(
-                    "⚠ Warning: Output path contains '..' which may cause issues.\n\n" +
-                    "Current value: " + trimmedPath + "\n\n" +
+                    "⚠ Cheat DLL Output Directory is not set, but cheat assemblies are defined.\n\n" +
                     "How to fix:\n" +
-                    "Use a direct path relative to the Assets folder instead of using '..'.\n\n" +
-                    "Correct Examples:\n" +
-                    "• Assets/HotUpdateDLL (instead of Assets/../HotUpdateDLL)\n" +
-                    "• Assets/StreamingAssets/HotUpdateDLL",
+                    "1. Drag a folder from your project (e.g., Assets/HotUpdate/Compiled/Cheat) into the field above\n" +
+                    "2. The folder must be within the Assets directory\n" +
+                    "3. The directory will be created automatically if it doesn't exist\n\n" +
+                    "Example folders:\n" +
+                    "• Assets/HotUpdate/Compiled/Cheat\n" +
+                    "• Assets/StreamingAssets/Cheat\n" +
+                    "• Assets/Game/Cheat/Assemblies\n\n" +
+                    "Note: Cheat DLLs will not be copied if the output directory is not configured.",
                     MessageType.Warning);
+                return;
             }
 
-            // Check if directory exists or can be created
-            string fullPath = GetFullOutputPath();
+            string path = AssetDatabase.GetAssetPath(cheatDllOutputDirectory.objectReferenceValue);
+            if (string.IsNullOrEmpty(path))
+            {
+                DrawHelpBox(
+                    "⚠ Invalid folder reference!\n\n" +
+                    "Please drag a valid folder from your project into the field above.",
+                    MessageType.Warning);
+                return;
+            }
+
+            if (!AssetDatabase.IsValidFolder(path))
+            {
+                DrawHelpBox(
+                    "⚠ Selected asset is not a folder!\n\n" +
+                    "Please drag a folder (not a file) from your project into the field above.",
+                    MessageType.Warning);
+                return;
+            }
+
+            if (!path.StartsWith("Assets/") && !path.StartsWith("Assets\\"))
+            {
+                DrawHelpBox(
+                    "⚠ Cheat DLL Output Directory must be within the Assets folder!\n\n" +
+                    "Current value: " + path + "\n\n" +
+                    "How to fix:\n" +
+                    "The folder must be within the Assets directory.\n\n" +
+                    "Correct Examples:\n" +
+                    "• Assets/HotUpdate/Compiled/Cheat\n" +
+                    "• Assets/StreamingAssets/Cheat",
+                    MessageType.Warning);
+                return;
+            }
+
+            string fullPath = GetFullCheatDllOutputPath();
             if (!string.IsNullOrEmpty(fullPath))
             {
                 if (Directory.Exists(fullPath))
                 {
                     DrawHelpBox(
-                        $"✓ Output directory exists and is ready to use.\n\n" +
+                        $"✓ Cheat DLL output directory is configured.\n\n" +
+                        $"Path: {path}\n" +
+                        $"Full Path:\n{fullPath}\n\n" +
+                        "Cheat assemblies will be copied to this directory during build.",
+                        MessageType.Info);
+                }
+                else
+                {
+                    DrawHelpBox(
+                        $"ℹ Cheat DLL output directory will be created during build.\n\n" +
+                        $"Path: {path}\n" +
+                        $"Full Path:\n{fullPath}",
+                        MessageType.Info);
+                }
+            }
+        }
+
+        private void ValidateHotUpdateDllOutputDirectory()
+        {
+            if (hotUpdateDllOutputDirectory.objectReferenceValue == null)
+            {
+                hasValidationErrors = true;
+                DrawHelpBox(
+                    "❌ Hot Update DLL Output Directory is required!\n\n" +
+                    "How to fix:\n" +
+                    "1. Drag a folder from your project (e.g., Assets/HotUpdateDLL) into the field above\n" +
+                    "2. The folder must be within the Assets directory\n" +
+                    "3. The directory will be created automatically if it doesn't exist\n\n" +
+                    "Example folders:\n" +
+                    "• Assets/HotUpdateDLL\n" +
+                    "• Assets/StreamingAssets/HotUpdateDLL\n" +
+                    "• Assets/Game/HotUpdate/Assemblies",
+                    MessageType.Error);
+                return;
+            }
+
+            string path = AssetDatabase.GetAssetPath(hotUpdateDllOutputDirectory.objectReferenceValue);
+            if (string.IsNullOrEmpty(path))
+            {
+                hasValidationErrors = true;
+                DrawHelpBox(
+                    "❌ Invalid folder reference!\n\n" +
+                    "Please drag a valid folder from your project into the field above.",
+                    MessageType.Error);
+                return;
+            }
+
+            // Validate it's a folder (not a file)
+            if (!AssetDatabase.IsValidFolder(path))
+            {
+                hasValidationErrors = true;
+                DrawHelpBox(
+                    "❌ Selected asset is not a folder!\n\n" +
+                    "Please drag a folder (not a file) from your project into the field above.",
+                    MessageType.Error);
+                return;
+            }
+
+            // Validate path format
+            if (!path.StartsWith("Assets/") && !path.StartsWith("Assets\\"))
+            {
+                hasValidationErrors = true;
+                DrawHelpBox(
+                    "❌ Output Directory must be within the Assets folder!\n\n" +
+                    "Current value: " + path + "\n\n" +
+                    "How to fix:\n" +
+                    "The folder must be within the Assets directory.\n\n" +
+                    "Correct Examples:\n" +
+                    "• Assets/HotUpdateDLL\n" +
+                    "• Assets/StreamingAssets/HotUpdateDLL",
+                    MessageType.Error);
+                return;
+            }
+
+            // Show success message
+            string fullPath = GetFullHotUpdateDllOutputPath();
+            if (!string.IsNullOrEmpty(fullPath))
+            {
+                if (Directory.Exists(fullPath))
+                {
+                    DrawHelpBox(
+                        $"✓ Hot Update DLL output directory is ready.\n\n" +
+                        $"Path: {path}\n" +
                         $"Full Path:\n{fullPath}\n\n" +
                         "The hot update DLLs will be copied to this directory during build.",
                         MessageType.Info);
                 }
                 else
                 {
-                    // Check if parent directory exists
-                    string parentDir = Path.GetDirectoryName(fullPath);
-                    if (Directory.Exists(parentDir))
-                    {
-                        DrawHelpBox(
-                            $"ℹ Output directory will be created automatically during build.\n\n" +
-                            $"Full Path:\n{fullPath}\n\n" +
-                            "The directory doesn't exist yet, but it will be created when you build.",
-                            MessageType.Info);
-                    }
-                    else
-                    {
-                        DrawHelpBox(
-                            $"⚠ Warning: Parent directory does not exist.\n\n" +
-                            $"Full Path:\n{fullPath}\n\n" +
-                            "How to fix:\n" +
-                            "Ensure the parent path is valid. The directory will be created during build, but make sure the path structure is correct.\n\n" +
-                            "Example:\n" +
-                            "If you entered 'Assets/Game/HotUpdateDLL', make sure 'Assets/Game' exists or can be created.",
-                            MessageType.Warning);
-                    }
+                    DrawHelpBox(
+                        $"ℹ Hot Update DLL output directory will be created during build.\n\n" +
+                        $"Path: {path}\n" +
+                        $"Full Path:\n{fullPath}",
+                        MessageType.Info);
                 }
             }
         }
 
-        private string GetFullOutputPath()
+        private void ValidateAOTDllOutputDirectory()
         {
-            if (hotUpdateDllOutputDirectory == null || string.IsNullOrEmpty(hotUpdateDllOutputDirectory.stringValue))
+            if (aotDllOutputDirectory.objectReferenceValue == null)
+            {
+                hasValidationErrors = true;
+                DrawHelpBox(
+                    "❌ AOT DLL Output Directory is required!\n\n" +
+                    "AOT DLLs are essential for HybridCLR supplementary metadata generation at runtime. " +
+                    "Without AOT DLLs, HybridCLR cannot properly load hot update assemblies that:\n" +
+                    "• Reference AOT types (e.g., System.Collections.Generic.List<T>)\n" +
+                    "• Use generics with value types defined in hot update code\n" +
+                    "• Access AOT assembly members (types, methods, fields)\n\n" +
+                    "How to fix:\n" +
+                    "1. Drag a folder from your project (e.g., Assets/HotUpdate/Compiled/AOT) into the field above\n" +
+                    "2. The folder must be within the Assets directory\n" +
+                    "3. This directory will store AOT assemblies needed for metadata generation\n\n" +
+                    "Example folders:\n" +
+                    "• Assets/HotUpdate/Compiled/AOT\n" +
+                    "• Assets/StreamingAssets/AOT\n" +
+                    "• Assets/Game/HotUpdate/AOT\n\n" +
+                    "Note: HybridCLR's MissingMetadataChecker will report errors if hot update code references AOT assemblies without supplementary metadata.",
+                    MessageType.Error);
+                return;
+            }
+
+            string path = AssetDatabase.GetAssetPath(aotDllOutputDirectory.objectReferenceValue);
+            if (string.IsNullOrEmpty(path))
+            {
+                DrawHelpBox(
+                    "⚠ Invalid folder reference!\n\n" +
+                    "Please drag a valid folder from your project into the field above.",
+                    MessageType.Warning);
+                return;
+            }
+
+            // Validate it's a folder (not a file)
+            if (!AssetDatabase.IsValidFolder(path))
+            {
+                DrawHelpBox(
+                    "⚠ Selected asset is not a folder!\n\n" +
+                    "Please drag a folder (not a file) from your project into the field above.",
+                    MessageType.Warning);
+                return;
+            }
+
+            // Validate path format
+            if (!path.StartsWith("Assets/") && !path.StartsWith("Assets\\"))
+            {
+                hasValidationErrors = true;
+                DrawHelpBox(
+                    "❌ AOT DLL Output Directory must be within the Assets folder!\n\n" +
+                    "Current value: " + path + "\n\n" +
+                    "How to fix:\n" +
+                    "The folder must be within the Assets directory.\n\n" +
+                    "Correct Examples:\n" +
+                    "• Assets/HotUpdate/Compiled/AOT\n" +
+                    "• Assets/StreamingAssets/AOT",
+                    MessageType.Error);
+                return;
+            }
+
+            // Show success message
+            string fullPath = GetFullAOTDllOutputPath();
+            if (!string.IsNullOrEmpty(fullPath))
+            {
+                DrawHelpBox(
+                    $"✓ AOT DLL output directory is configured.\n\n" +
+                    $"Path: {path}\n" +
+                    $"Full Path:\n{fullPath}\n\n" +
+                    "AOT assemblies will be copied to this directory for HybridCLR metadata generation at runtime.",
+                    MessageType.Info);
+            }
+        }
+
+        private string GetFullHotUpdateDllOutputPath()
+        {
+            if (hotUpdateDllOutputDirectory == null || hotUpdateDllOutputDirectory.objectReferenceValue == null)
                 return null;
 
-            string relativePath = hotUpdateDllOutputDirectory.stringValue.Trim();
-            if (!relativePath.StartsWith("Assets/") && !relativePath.StartsWith("Assets\\"))
+            string relativePath = AssetDatabase.GetAssetPath(hotUpdateDllOutputDirectory.objectReferenceValue);
+            if (string.IsNullOrEmpty(relativePath))
                 return null;
 
-            // Normalize path separators
+            relativePath = relativePath.Replace('\\', '/');
+
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            return Path.Combine(projectRoot, relativePath).Replace('\\', '/');
+        }
+
+        private string GetFullAOTDllOutputPath()
+        {
+            if (aotDllOutputDirectory == null || aotDllOutputDirectory.objectReferenceValue == null)
+                return null;
+
+            string relativePath = AssetDatabase.GetAssetPath(aotDllOutputDirectory.objectReferenceValue);
+            if (string.IsNullOrEmpty(relativePath))
+                return null;
+
+            relativePath = relativePath.Replace('\\', '/');
+
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            return Path.Combine(projectRoot, relativePath).Replace('\\', '/');
+        }
+
+        private string GetFullCheatDllOutputPath()
+        {
+            if (cheatDllOutputDirectory == null || cheatDllOutputDirectory.objectReferenceValue == null)
+                return null;
+
+            string relativePath = AssetDatabase.GetAssetPath(cheatDllOutputDirectory.objectReferenceValue);
+            if (string.IsNullOrEmpty(relativePath))
+                return null;
+
             relativePath = relativePath.Replace('\\', '/');
 
             string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
@@ -257,6 +529,36 @@ namespace Build.Pipeline.Editor
         private void DrawHelpBox(string message, MessageType type)
         {
             EditorGUILayout.HelpBox(message, type);
+        }
+
+        private void CheckForDuplicates()
+        {
+            if (!hasCheckedForDuplicates)
+            {
+                allConfigGuids = AssetDatabase.FindAssets("t:HybridCLRBuildConfig");
+                hasCheckedForDuplicates = true;
+            }
+        }
+
+        private void DrawDuplicateWarning()
+        {
+            if (allConfigGuids != null && allConfigGuids.Length > 1)
+            {
+                EditorGUILayout.HelpBox(
+                    $"⚠ Multiple HybridCLRBuildConfig assets detected ({allConfigGuids.Length} found).\n" +
+                    "Only one HybridCLRBuildConfig should exist in the project. Please delete duplicates.",
+                    MessageType.Warning);
+
+                if (GUILayout.Button("Show All in Console"))
+                {
+                    foreach (var guid in allConfigGuids)
+                    {
+                        string path = AssetDatabase.GUIDToAssetPath(guid);
+                        Debug.Log($"HybridCLRBuildConfig found at: {path}");
+                    }
+                }
+                EditorGUILayout.Space(5);
+            }
         }
     }
 }

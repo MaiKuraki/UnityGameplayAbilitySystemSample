@@ -9,6 +9,7 @@ namespace Build.Pipeline.Editor
 {
     public static class AddressablesBuilder
     {
+        public const string DEFAULT_BUILD_OUTPUT_DIR = "Build/AddressablesContent";
         private const string DEBUG_FLAG = "<color=cyan>[Addressables]</color>";
 
         [MenuItem("Build/Addressables/Build Content (From Config)", priority = 100)]
@@ -103,8 +104,8 @@ namespace Build.Pipeline.Editor
                             string outputDir = useBuildOutputDirectory;
                             if (string.IsNullOrEmpty(outputDir))
                             {
-                                outputDir = "Build/AddressablesContent";
-                                Debug.Log($"{DEBUG_FLAG} BuildOutputDirectory is empty, using default path: {outputDir}");
+                                outputDir = DEFAULT_BUILD_OUTPUT_DIR;
+                            Debug.Log($"{DEBUG_FLAG} BuildOutputDirectory is empty, using default path: {outputDir}");
                             }
                             CopyBuildResultToOutput(buildTarget, outputDir, useBuildRemoteCatalog);
                         }
@@ -549,7 +550,7 @@ namespace Build.Pipeline.Editor
                 string targetDir = outputDirectory;
                 if (string.IsNullOrEmpty(targetDir))
                 {
-                    targetDir = "Build/AddressablesContent";
+                    targetDir = DEFAULT_BUILD_OUTPUT_DIR;
                 }
 
                 string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
@@ -751,7 +752,7 @@ namespace Build.Pipeline.Editor
             }
             else
             {
-                IVersionControlProvider provider = VersionControlFactory.CreateProvider(VersionControlType.Git);
+                IVersionControlProvider provider = VersionControlFactory.CreateProvider(VersionControlFactory.Detect());
                 string count = provider.GetCommitCount();
                 if (string.IsNullOrEmpty(count)) count = "0";
                 return $"{config.versionPrefix}.{count}";
@@ -859,7 +860,7 @@ namespace Build.Pipeline.Editor
                     {
                         // Convert absolute path to relative path for AssetDatabase
                         string versionFileRelativePath = versionFilePath.Replace(Application.dataPath, "Assets").Replace('\\', '/');
-                        
+
                         // Delete version file using AssetDatabase (handles .meta automatically)
                         AssetDatabase.DeleteAsset(versionFileRelativePath);
                         Debug.Log($"{DEBUG_FLAG} Cleaned up version file: {versionFileRelativePath}");
@@ -872,6 +873,40 @@ namespace Build.Pipeline.Editor
             catch (Exception ex)
             {
                 Debug.LogWarning($"{DEBUG_FLAG} Failed to cleanup version files: {ex.Message}");
+            }
+        }
+
+
+        /// <summary>
+        /// Cleans up the StreamingAssets/aa folder before Addressables build.
+        /// This prevents file conflict errors when Unity's Addressables tries to copy files
+        /// from Library to StreamingAssets during BuildPlayer.
+        /// </summary>
+        public static void CleanupStreamingAssetsAddressables()
+        {
+            try
+            {
+                string streamingAssetsAA = Path.Combine(Application.dataPath, "StreamingAssets", "aa");
+
+                if (Directory.Exists(streamingAssetsAA))
+                {
+                    Debug.Log($"{DEBUG_FLAG} Cleaning up StreamingAssets/aa to prevent file conflicts...");
+                    Directory.Delete(streamingAssetsAA, true);
+
+                    // Also delete the .meta file if it exists
+                    string metaFile = streamingAssetsAA + ".meta";
+                    if (File.Exists(metaFile))
+                    {
+                        File.Delete(metaFile);
+                    }
+
+                    AssetDatabase.Refresh();
+                    Debug.Log($"{DEBUG_FLAG} ✓ StreamingAssets/aa cleaned up successfully.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"{DEBUG_FLAG} Failed to cleanup StreamingAssets/aa: {ex.Message}");
             }
         }
 
