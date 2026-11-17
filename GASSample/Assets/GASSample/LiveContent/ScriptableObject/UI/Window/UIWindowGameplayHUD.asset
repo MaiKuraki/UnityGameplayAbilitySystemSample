@@ -12,8 +12,16 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e0ed2f4a7fe492f449faba41c737e4b7, type: 3}
   m_Name: UIWindowGameplayHUD
   m_EditorClassIdentifier: 
+  windowId: UIWindowGameplayHUD
   source: 0
   windowPrefab: {fileID: 5181681139294313156, guid: 3ee6ffca86975c647ab0ed31f95e7ae9,
     type: 3}
+  prefabAssetRef:
+    location: 
+    editorGuid: 
   prefabLocation: 
   layer: {fileID: 11400000, guid: ba5952d225fc36646a190ee3fda7c68a, type: 2}
+  priority: 0
+  isSceneBound: 0
+  subCanvasPolicy: 0
+  cullWhenHidden: 0

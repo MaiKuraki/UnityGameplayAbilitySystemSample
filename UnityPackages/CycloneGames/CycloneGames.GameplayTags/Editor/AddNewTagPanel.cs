@@ -4,13 +4,15 @@ using System.IO;
 using UnityEditor;
 using UnityEngine;
 using CycloneGames.GameplayTags.Core;
-using CycloneGames.GameplayTags.Unity.Runtime;
+using CycloneGames.Logging;
 
 namespace CycloneGames.GameplayTags.Unity.Editor
 {
    internal class AddNewTagPanel
    {
       private const int k_NewFileOptionIndex = 0;
+
+      private static readonly LogChannel Log = GameplayTagsEditorLog.Channel;
 
       public event Action OnClose;
       public event Action<GameplayTag> OnTagAdded;
@@ -108,13 +110,13 @@ namespace CycloneGames.GameplayTags.Unity.Editor
                   FileGameplayTagSource source = GetOrCreateFileTagSource();
                   source.AddTag(m_NewTagName, m_NewTagComment);
 
-                  GameplayTagManager.ReloadTags();
+                  GameplayTagManager.Reload();
 
-                  GameplayTag addedTag = GameplayTagManager.RequestTag(m_NewTagName);
+                  GameplayTag addedTag = GameplayTagManager.Request(m_NewTagName);
 
                   if (!addedTag.IsValid)
                   {
-                     Debug.LogError("Tag was added but could not be found after reloading.");
+                     Log.Error("Tag was added but could not be found after reloading.");
                      return;
                   }
 
@@ -172,6 +174,12 @@ namespace CycloneGames.GameplayTags.Unity.Editor
          if (!GameplayTagUtility.IsNameValid(m_NewTagName, out m_ValidationError))
             return;
 
+         if (m_NewTagComment != null && m_NewTagComment.Length > FileGameplayTagSource.MaxCommentLength)
+         {
+            m_ValidationError = $"Comment cannot exceed {FileGameplayTagSource.MaxCommentLength} UTF-16 code units.";
+            return;
+         }
+
          if (m_SelectedSourceFileIndex == k_NewFileOptionIndex)
          {
             if (m_NewSourceFileName.Length == 0)
@@ -197,17 +205,7 @@ namespace CycloneGames.GameplayTags.Unity.Editor
                return;
             }
 
-            if (!Directory.Exists(Path.GetDirectoryName(filePath)))
-            {
-               m_ValidationError = "The specified directory does not exist.";
-               return;
-            }
-
-            if (!filePath.StartsWith(FileGameplayTagSource.DirectoryPath, StringComparison.OrdinalIgnoreCase))
-            {
-               m_ValidationError = $"Source file must be created inside the '{FileGameplayTagSource.DirectoryPath}' directory.";
-               return;
-            }
+            FileGameplayTagSource.ValidateSourcePath(filePath);
          }
          else
          {
@@ -225,5 +223,6 @@ namespace CycloneGames.GameplayTags.Unity.Editor
             }
          }
       }
+
    }
 }

@@ -1,13 +1,14 @@
 using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using UnityEngine;
 using MackySoft.Navigathena;
 using MackySoft.Navigathena.Transitions;
 using MackySoft.Navigathena.SceneManagement;
 using MackySoft.Navigathena.SceneManagement.Utilities;
 using CycloneGames.AssetManagement.Runtime;
-using CycloneGames.Logger;
 using GASSample.AssetManagement;
+using CycloneGames.Logging;
 
 namespace GASSample.Scene
 {
@@ -42,6 +43,7 @@ namespace GASSample.Scene
     }
     public class SimpleTransitionDirector : ITransitionDirector
     {
+        private static readonly LogChannel Log = LogChannel.Create("GASSample");
         private readonly ISceneIdentifier m_SceneIdentifier;
         private readonly IAssetModule assetModule;
         private readonly TransitionDisplayData transitionDisplayData;
@@ -90,8 +92,8 @@ namespace GASSample.Scene
                 await m_Director.EndTransition(cancellation);
                 m_Director = null;
                 await m_SceneHandle.Unload(cancellationToken: cancellation);
-                await assetModule.GetPackage(AssetPackageName.DefaultPackage).UnloadUnusedAssetsAsync();
-                CLogger.LogInfo($"{DEBUG_FLAG} Unload unused asset");
+                await Resources.UnloadUnusedAssets().ToUniTask(cancellationToken: cancellation);
+                Log.Info($"{DEBUG_FLAG} Unload unused asset");
             }
 
             public void Report(IProgressDataStore progressDataStore)

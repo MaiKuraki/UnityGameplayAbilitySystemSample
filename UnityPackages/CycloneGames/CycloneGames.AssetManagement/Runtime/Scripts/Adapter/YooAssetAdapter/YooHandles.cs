@@ -1,636 +1,1681 @@
-#if YOOASSET_PRESENT
-using Cysharp.Threading.Tasks;
+#if CYCLONEGAMES_HAS_YOOASSET
 using System;
 using System.Collections.Generic;
+using System.Runtime.ExceptionServices;
 using System.Threading;
+
 using UnityEngine;
 using UnityEngine.SceneManagement;
+
+using Cysharp.Threading.Tasks;
 using YooAsset;
-using CycloneGames.Logger;
+
+using CycloneGames.Logging;
 
 namespace CycloneGames.AssetManagement.Runtime
 {
-    /// <summary>
-    /// Thread-safe object pool with soft/hard sizing limits and idle-based auto-shrink.
-    /// Soft limit: preferred steady-state pool size.
-    /// Hard limit: absolute cap; objects beyond it are discarded to prevent memory bloat.
-    /// Shrink: triggers only when the pool has been genuinely idle for SHRINK_THRESHOLD_MS
-    ///         (idle timer starts after Release when pool exceeds soft limit, and resets on any Get).
-    /// </summary>
-    internal static class AdaptiveHandlePool<T> where T : class, new()
+    internal static class YooOperationTask
     {
-        private const int SOFT_LIMIT = 64;
-        private const int HARD_LIMIT = 512;
-        private const int SHRINK_THRESHOLD_MS = 30000;
-        private const int SHRINK_BATCH_SIZE = 16;
-
-        private static readonly Stack<T> _pool = new Stack<T>(SOFT_LIMIT);
-        private static readonly object _poolLock = new object();
-        // long.MaxValue signals "not idle" (pool is actively in use).
-        private static long _idleStartTicks = long.MaxValue;
-        private static int _highWaterMark;
-
-        public static T Get()
+        public static async UniTask CompleteAsync(HandleBase operation, string fallbackError)
         {
-            lock (_poolLock)
+            if (operation == null || !operation.IsValid)
             {
-                _idleStartTicks = long.MaxValue; // reset idle timer on every access
-                if (_pool.Count > 0) return _pool.Pop();
+                throw new InvalidOperationException($"{fallbackError} The provider handle is invalid.");
             }
-            return new T();
-        }
 
-        public static void Release(T item)
-        {
-            if (item == null) return;
-            lock (_poolLock)
+            await operation;
+            if (!operation.IsValid)
             {
-                int count = _pool.Count;
-                if (count < HARD_LIMIT)
-                {
-                    _pool.Push(item);
-                    if (count + 1 > _highWaterMark) _highWaterMark = count + 1;
-                }
+                throw new InvalidOperationException($"{fallbackError} The provider handle became invalid before completion.");
+            }
 
-                // Start idle timer only when pool is above soft limit and no timer is running.
-                if (_pool.Count > SOFT_LIMIT && _idleStartTicks == long.MaxValue)
-                    _idleStartTicks = DateTime.UtcNow.Ticks;
-
-                TryShrinkIfIdle();
+            if (operation.Status != EOperationStatus.Succeeded)
+            {
+                throw new InvalidOperationException(
+                    string.IsNullOrEmpty(operation.Error) ? fallbackError : operation.Error);
             }
         }
 
-        private static void TryShrinkIfIdle()
+        public static async UniTask CompleteAsync(AsyncOperationBase operation, string fallbackError)
         {
-            if (_pool.Count <= SOFT_LIMIT || _idleStartTicks == long.MaxValue) return;
-
-            long idleMs = (DateTime.UtcNow.Ticks - _idleStartTicks) / TimeSpan.TicksPerMillisecond;
-            if (idleMs < SHRINK_THRESHOLD_MS) return;
-
-            int toRemove = Math.Min(SHRINK_BATCH_SIZE, _pool.Count - SOFT_LIMIT);
-            for (int i = 0; i < toRemove; i++) _pool.Pop();
-
-            if (_pool.Count <= SOFT_LIMIT) _idleStartTicks = long.MaxValue;
-        }
-
-        public static (int current, int highWaterMark) GetStats()
-        {
-            lock (_poolLock) return (_pool.Count, _highWaterMark);
-        }
-
-        public static void Clear()
-        {
-            lock (_poolLock)
+            if (operation == null)
             {
-                _pool.Clear();
-                _highWaterMark = 0;
-                _idleStartTicks = long.MaxValue;
+                throw new InvalidOperationException($"{fallbackError} The provider operation is unavailable.");
+            }
+
+            await operation;
+            if (operation.Status != EOperationStatus.Succeeded)
+            {
+                throw new InvalidOperationException(
+                    string.IsNullOrEmpty(operation.Error) ? fallbackError : operation.Error);
             }
         }
     }
 
-    public sealed class YooAssetHandle<TAsset> : IAssetHandle<TAsset>, IInternalCacheable where TAsset : UnityEngine.Object
+    internal static class YooSynchronousWait
     {
-        private int _id;
-        internal AssetHandle Raw;
+        public static void EnsureTerminal(UniTaskStatus status)
+        {
+            if (status == UniTaskStatus.Pending)
+            {
+                throw new NotSupportedException(
+                    "Pending YooAsset operations cannot be completed synchronously through this adapter. " +
+                    "Await IOperation.Task instead.");
+            }
+        }
+    }
+
+    internal sealed class YooAssetHandle<TAsset> : IAssetHandle<TAsset>, IReferenceCounted,
+        IInternalCacheable, IAssetMemoryFootprint, IAssetBackendLifetime, ITrackedAssetHandle
+        where TAsset : UnityEngine.Object
+    {
+        private static readonly LogChannel Log = AssetManagementYooAssetLog.Channel;
+
+        private readonly long _id;
+        long ITrackedAssetHandle.DiagnosticHandleId => _id;
+        private readonly Cache.AssetCacheKey _cacheKey;
+        private readonly AssetOperationCompletion _completion;
+        private Action<Cache.AssetCacheKey, IReferenceCounted> _onReleaseToCache;
         private int _refCount;
-        private volatile bool _disposed;
-        private string _cacheKey;
-        private Action<string, IReferenceCounted> _onReleaseToCache;
+        private int _releaseState;
 
-        public YooAssetHandle() { }
+        internal AssetHandle Raw { get; private set; }
+        internal object Owner { get; private set; }
 
-        internal void Initialize(int id, string cacheKey, AssetHandle raw, Action<string, IReferenceCounted> onReleaseToCache, CancellationToken cancellationToken)
+        private YooAssetHandle(
+            long id,
+            object owner,
+            Cache.AssetCacheKey cacheKey,
+            AssetHandle raw,
+            Action<Cache.AssetCacheKey, IReferenceCounted> onReleaseToCache,
+            AssetOperationTailTracker operationTails)
         {
             _id = id;
+            Owner = owner;
             _cacheKey = cacheKey;
             Raw = raw;
+            _completion = AssetOperationCompletion.Start(YooOperationTask.CompleteAsync(
+                raw,
+                $"YooAsset failed to load an asset of type '{typeof(TAsset).Name}'."),
+                operationTails);
             _onReleaseToCache = onReleaseToCache;
-            _disposed = false;
             _refCount = 1;
         }
 
-        public static YooAssetHandle<TAsset> Create(int id, string cacheKey, AssetHandle raw, Action<string, IReferenceCounted> onReleaseToCache, CancellationToken cancellationToken)
-        {
-            var h = AdaptiveHandlePool<YooAssetHandle<TAsset>>.Get();
-            h.Initialize(id, cacheKey, raw, onReleaseToCache, cancellationToken);
-            return h;
-        }
+        public static YooAssetHandle<TAsset> Create(
+            long id,
+            object owner,
+            Cache.AssetCacheKey cacheKey,
+            AssetHandle raw,
+            Action<Cache.AssetCacheKey, IReferenceCounted> onReleaseToCache,
+            AssetOperationTailTracker operationTails) =>
+            new YooAssetHandle<TAsset>(id, owner, cacheKey, raw, onReleaseToCache, operationTails);
 
-        public bool IsDone => Raw == null || Raw.IsDone;
+        public bool IsDone => _completion.Task.Status != UniTaskStatus.Pending;
         public float Progress => Raw?.Progress ?? 0f;
-        public string Error => Raw?.LastError ?? string.Empty;
-        // Use System.Threading.Tasks.Task (supports multiple awaiters) instead of IEnumerator.ToUniTask() (one-shot).
-        public UniTask Task => IsDone ? UniTask.CompletedTask : (Raw?.Task.AsUniTask() ?? UniTask.CompletedTask);
-        public void WaitForAsyncComplete() => Raw?.WaitForAsyncComplete();
-
-        public TAsset Asset => Raw != null ? Raw.GetAssetObject<TAsset>() : null;
+        public string Error => Raw?.Error ?? string.Empty;
+        public UniTask Task => _completion.Task;
+        public TAsset Asset => Raw?.GetAssetObject<TAsset>();
         public UnityEngine.Object AssetObject => Raw?.AssetObject;
+        public int RefCount => Volatile.Read(ref _refCount);
 
-        public int RefCount => Interlocked.CompareExchange(ref _refCount, 0, 0);
+        public void WaitForAsyncComplete()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            YooSynchronousWait.EnsureTerminal(_completion.Task.Status);
+        }
 
         public void Retain()
         {
-            if (_disposed) { CLogger.LogError("[YooAssetHandle] Retain called on a disposed handle."); return; }
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
+            {
+                Log.Error("[YooAssetHandle] Retain called on a disposed handle.");
+                return;
+            }
+
             Interlocked.Increment(ref _refCount);
         }
 
         public void Release()
         {
-            int newCount = Interlocked.Decrement(ref _refCount);
-            if (newCount < 0)
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
             {
-                Interlocked.Increment(ref _refCount);
-                CLogger.LogError("[YooAssetHandle] Release called more times than Retain. Ignoring extra release.");
                 return;
             }
-            if (newCount == 0)
+
+            int count = Interlocked.Decrement(ref _refCount);
+            if (count < 0)
             {
-                if (_onReleaseToCache != null) _onReleaseToCache(_cacheKey, this);
-                else DisposeInternal();
+                Interlocked.Increment(ref _refCount);
+                Log.Error("[YooAssetHandle] Release called more times than Retain.");
+                return;
+            }
+
+            if (count == 0)
+            {
+                if (_onReleaseToCache != null)
+                {
+                    _onReleaseToCache(_cacheKey, this);
+                }
+                else
+                {
+                    DisposeInternal();
+                }
             }
         }
 
-        public void Dispose() => Release();
+        public void Dispose()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            Release();
+        }
 
         internal void DisposeInternal()
         {
-            _disposed = true;
-            Raw?.Dispose();
+            AssetRuntimeGuard.EnsureMainThread();
+            if (!ProviderReleaseStateMachine.TryBeginRelease(ref _releaseState))
+            {
+                return;
+            }
+
+            _completion.TryCancelByOwner();
+            try
+            {
+                Raw?.Dispose();
+            }
+            catch
+            {
+                ProviderReleaseStateMachine.MarkReleaseFailed(ref _releaseState);
+                throw;
+            }
+
             Raw = null;
-            _cacheKey = null;
+            Owner = null;
             _onReleaseToCache = null;
-            if (HandleTracker.Enabled) HandleTracker.Unregister(_id);
-            AdaptiveHandlePool<YooAssetHandle<TAsset>>.Release(this);
+            ProviderReleaseStateMachine.MarkReleased(ref _releaseState);
+            HandleTracker.Unregister(_id);
         }
 
         void IInternalCacheable.ForceDispose() => DisposeInternal();
+        bool IAssetBackendLifetime.IsDisposed => ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState);
+        long IAssetMemoryFootprint.EstimateRuntimeBytes() => Cache.AssetMemoryEstimator.Estimate(AssetObject);
     }
 
-    public sealed class YooAllAssetsHandle<TAsset> : IAllAssetsHandle<TAsset>, IInternalCacheable where TAsset : UnityEngine.Object
+    internal sealed class YooAllAssetsHandle<TAsset> : IAllAssetsHandle<TAsset>, IReferenceCounted,
+        IInternalCacheable, IAssetMemoryFootprint, IAssetBackendLifetime, ITrackedAssetHandle
+        where TAsset : UnityEngine.Object
     {
-        // Wraps a List<UnityEngine.Object> as IReadOnlyList<TAsset> without allocating a new list.
+        private static readonly LogChannel Log = AssetManagementYooAssetLog.Channel;
+
         private sealed class ReadOnlyListAdapter : IReadOnlyList<TAsset>
         {
             private IReadOnlyList<UnityEngine.Object> _source;
 
-            public void Initialize(IReadOnlyList<UnityEngine.Object> source) => _source = source;
-            public void Clear() => _source = null;
-
             public TAsset this[int index] => _source[index] as TAsset;
             public int Count => _source?.Count ?? 0;
+            public void SetSource(IReadOnlyList<UnityEngine.Object> source) => _source = source;
+            public void Clear() => _source = null;
 
             public IEnumerator<TAsset> GetEnumerator()
             {
-                if (_source == null) yield break;
-                foreach (var item in _source) yield return item as TAsset;
+                if (_source == null)
+                {
+                    yield break;
+                }
+
+                for (int i = 0; i < _source.Count; i++)
+                {
+                    yield return _source[i] as TAsset;
+                }
             }
+
             System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
         }
 
-        private int _id;
-        internal AllAssetsHandle Raw;
-        private readonly ReadOnlyListAdapter _listAdapter = new ReadOnlyListAdapter();
+        private readonly long _id;
+        long ITrackedAssetHandle.DiagnosticHandleId => _id;
+        private readonly Cache.AssetCacheKey _cacheKey;
+        private readonly ReadOnlyListAdapter _assets = new ReadOnlyListAdapter();
+        private readonly AssetOperationCompletion _completion;
+        private Action<Cache.AssetCacheKey, IReferenceCounted> _onReleaseToCache;
+        private AllAssetsHandle _raw;
         private int _refCount;
-        private volatile bool _disposed;
-        private string _cacheKey;
-        private Action<string, IReferenceCounted> _onReleaseToCache;
+        private int _releaseState;
 
-        public YooAllAssetsHandle() { }
-
-        internal void Initialize(int id, string cacheKey, AllAssetsHandle raw, Action<string, IReferenceCounted> onReleaseToCache, CancellationToken cancellationToken)
+        private YooAllAssetsHandle(
+            long id,
+            Cache.AssetCacheKey cacheKey,
+            AllAssetsHandle raw,
+            Action<Cache.AssetCacheKey, IReferenceCounted> onReleaseToCache,
+            AssetOperationTailTracker operationTails)
         {
             _id = id;
             _cacheKey = cacheKey;
-            Raw = raw;
-            _listAdapter.Clear();
+            _raw = raw;
+            _completion = AssetOperationCompletion.Start(YooOperationTask.CompleteAsync(
+                raw,
+                "YooAsset failed to load the requested asset collection."),
+                operationTails);
             _onReleaseToCache = onReleaseToCache;
-            _disposed = false;
             _refCount = 1;
         }
 
-        public static YooAllAssetsHandle<TAsset> Create(int id, string cacheKey, AllAssetsHandle raw, Action<string, IReferenceCounted> onReleaseToCache, CancellationToken cancellationToken)
-        {
-            var h = AdaptiveHandlePool<YooAllAssetsHandle<TAsset>>.Get();
-            h.Initialize(id, cacheKey, raw, onReleaseToCache, cancellationToken);
-            return h;
-        }
+        public static YooAllAssetsHandle<TAsset> Create(
+            long id,
+            Cache.AssetCacheKey cacheKey,
+            AllAssetsHandle raw,
+            Action<Cache.AssetCacheKey, IReferenceCounted> onReleaseToCache,
+            AssetOperationTailTracker operationTails) =>
+            new YooAllAssetsHandle<TAsset>(id, cacheKey, raw, onReleaseToCache, operationTails);
 
-        public bool IsDone => Raw == null || Raw.IsDone;
-        public float Progress => Raw?.Progress ?? 0f;
-        public string Error => Raw?.LastError ?? string.Empty;
-        // Use System.Threading.Tasks.Task (supports multiple awaiters) instead of IEnumerator.ToUniTask() (one-shot).
-        public UniTask Task => IsDone ? UniTask.CompletedTask : (Raw?.Task.AsUniTask() ?? UniTask.CompletedTask);
-        public void WaitForAsyncComplete() => Raw?.WaitForAsyncComplete();
+        public bool IsDone => _completion.Task.Status != UniTaskStatus.Pending;
+        public float Progress => _raw?.Progress ?? 0f;
+        public string Error => _raw?.Error ?? string.Empty;
+        public UniTask Task => _completion.Task;
+        public int RefCount => Volatile.Read(ref _refCount);
 
         public IReadOnlyList<TAsset> Assets
         {
             get
             {
-                if (Raw == null || !Raw.IsDone) return Array.Empty<TAsset>();
-                if (_listAdapter.Count == 0 && Raw.AllAssetObjects != null)
-                    _listAdapter.Initialize(Raw.AllAssetObjects);
-                return _listAdapter;
+                _assets.SetSource(_raw != null && _raw.IsDone ? _raw.AllAssetObjects : null);
+                return _assets;
             }
         }
 
-        public int RefCount => Interlocked.CompareExchange(ref _refCount, 0, 0);
+        public void WaitForAsyncComplete()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            YooSynchronousWait.EnsureTerminal(_completion.Task.Status);
+        }
 
         public void Retain()
         {
-            if (_disposed) { CLogger.LogError("[YooAllAssetsHandle] Retain called on a disposed handle."); return; }
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
+            {
+                Log.Error("[YooAllAssetsHandle] Retain called on a disposed handle.");
+                return;
+            }
+
             Interlocked.Increment(ref _refCount);
         }
 
         public void Release()
         {
-            int newCount = Interlocked.Decrement(ref _refCount);
-            if (newCount < 0)
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
             {
-                Interlocked.Increment(ref _refCount);
-                CLogger.LogError("[YooAllAssetsHandle] Release called more times than Retain. Ignoring extra release.");
                 return;
             }
-            if (newCount == 0)
+
+            int count = Interlocked.Decrement(ref _refCount);
+            if (count < 0)
             {
-                if (_onReleaseToCache != null) _onReleaseToCache(_cacheKey, this);
-                else DisposeInternal();
+                Interlocked.Increment(ref _refCount);
+                Log.Error("[YooAllAssetsHandle] Release called more times than Retain.");
+                return;
+            }
+
+            if (count == 0)
+            {
+                if (_onReleaseToCache != null)
+                {
+                    _onReleaseToCache(_cacheKey, this);
+                }
+                else
+                {
+                    DisposeInternal();
+                }
             }
         }
 
-        public void Dispose() => Release();
+        public void Dispose()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            Release();
+        }
 
         internal void DisposeInternal()
         {
-            _disposed = true;
-            Raw?.Dispose();
-            Raw = null;
-            _listAdapter.Clear();
-            _cacheKey = null;
+            AssetRuntimeGuard.EnsureMainThread();
+            if (!ProviderReleaseStateMachine.TryBeginRelease(ref _releaseState))
+            {
+                return;
+            }
+
+            _completion.TryCancelByOwner();
+            try
+            {
+                _raw?.Dispose();
+            }
+            catch
+            {
+                ProviderReleaseStateMachine.MarkReleaseFailed(ref _releaseState);
+                throw;
+            }
+
+            _raw = null;
+            _assets.Clear();
             _onReleaseToCache = null;
-            if (HandleTracker.Enabled) HandleTracker.Unregister(_id);
-            AdaptiveHandlePool<YooAllAssetsHandle<TAsset>>.Release(this);
+            ProviderReleaseStateMachine.MarkReleased(ref _releaseState);
+            HandleTracker.Unregister(_id);
         }
 
         void IInternalCacheable.ForceDispose() => DisposeInternal();
+        bool IAssetBackendLifetime.IsDisposed => ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState);
+
+        long IAssetMemoryFootprint.EstimateRuntimeBytes()
+        {
+            if (_raw?.AllAssetObjects == null)
+            {
+                return 0L;
+            }
+
+            long total = 0L;
+            IReadOnlyList<UnityEngine.Object> objects = _raw.AllAssetObjects;
+            for (int i = 0; i < objects.Count; i++)
+            {
+                if (!Cache.AssetMemoryEstimator.TryAddToAggregate(objects[i], ref total))
+                {
+                    return 0L;
+                }
+            }
+
+            return total;
+        }
     }
 
-    public sealed class YooInstantiateHandle : IInstantiateHandle, IInternalCacheable
+    internal sealed class YooRawFileHandle : IRawFileHandle, IReferenceCounted, IInternalCacheable,
+        IAssetMemoryFootprint, IAssetBackendLifetime, ITrackedAssetHandle
     {
-        private int _id;
-        internal InstantiateOperation Raw;
+        private static readonly LogChannel Log = AssetManagementYooAssetLog.Channel;
+
+        private const long SNAPSHOT_OBJECT_OVERHEAD_BYTES = 64L;
+
+        private readonly long _id;
+        long ITrackedAssetHandle.DiagnosticHandleId => _id;
+        private readonly Cache.AssetCacheKey _cacheKey;
+        private readonly AssetOperationCompletion _completion;
+        private Action<Cache.AssetCacheKey, IReferenceCounted> _onReleaseToCache;
+        private AssetHandle _raw;
+        private byte[] _bytesSnapshot;
+        private string _textSnapshot = string.Empty;
+        private string _error = string.Empty;
+        private float _progress;
         private int _refCount;
-        private volatile bool _disposed;
-        private Action<string, IReferenceCounted> _onReleaseToCache;
+        private int _releaseState;
 
-        public YooInstantiateHandle() { }
-
-        internal void Initialize(int id, InstantiateOperation raw, Action<string, IReferenceCounted> onReleaseToCache)
+        private YooRawFileHandle(
+            long id,
+            Cache.AssetCacheKey cacheKey,
+            AssetHandle raw,
+            Action<Cache.AssetCacheKey, IReferenceCounted> onReleaseToCache,
+            AssetOperationTailTracker operationTails)
         {
             _id = id;
-            Raw = raw;
+            _cacheKey = cacheKey;
+            _raw = raw;
+            _completion = AssetOperationCompletion.Start(CompleteAndSnapshotAsync(raw), operationTails);
             _onReleaseToCache = onReleaseToCache;
-            _disposed = false;
             _refCount = 1;
         }
 
-        public static YooInstantiateHandle Create(int id, InstantiateOperation raw, Action<string, IReferenceCounted> onReleaseToCache)
+        public static YooRawFileHandle Create(
+            long id,
+            Cache.AssetCacheKey cacheKey,
+            AssetHandle raw,
+            Action<Cache.AssetCacheKey, IReferenceCounted> onReleaseToCache,
+            AssetOperationTailTracker operationTails) =>
+            new YooRawFileHandle(id, cacheKey, raw, onReleaseToCache, operationTails);
+
+        public bool IsDone => _completion.Task.Status != UniTaskStatus.Pending;
+        public float Progress
         {
-            var h = AdaptiveHandlePool<YooInstantiateHandle>.Get();
-            h.Initialize(id, raw, onReleaseToCache);
-            return h;
+            get
+            {
+                AssetHandle raw = Volatile.Read(ref _raw);
+                if (raw != null && PlayerLoopHelper.IsMainThread && raw.IsValid)
+                {
+                    Volatile.Write(ref _progress, raw.Progress);
+                }
+
+                return Volatile.Read(ref _progress);
+            }
         }
 
-        public bool IsDone => Raw == null || Raw.IsDone;
-        public float Progress => Raw?.Progress ?? 0f;
-        public string Error => Raw?.Error ?? string.Empty;
-        public UniTask Task => IsDone ? UniTask.CompletedTask : (Raw?.Task.AsUniTask() ?? UniTask.CompletedTask);
-        public void WaitForAsyncComplete() { }
+        public string Error => Volatile.Read(ref _error) ?? string.Empty;
+        public UniTask Task => _completion.Task;
+        public string FilePath => string.Empty;
+        public int RefCount => Volatile.Read(ref _refCount);
 
-        public GameObject Instance => Raw?.Result;
+        public void WaitForAsyncComplete()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            YooSynchronousWait.EnsureTerminal(_completion.Task.Status);
+        }
 
-        public int RefCount => Interlocked.CompareExchange(ref _refCount, 0, 0);
+        public string ReadText()
+        {
+            if (_completion.Task.Status != UniTaskStatus.Succeeded ||
+                ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
+            {
+                return string.Empty;
+            }
+
+            return Volatile.Read(ref _textSnapshot) ?? string.Empty;
+        }
+
+        public byte[] ReadBytes()
+        {
+            if (_completion.Task.Status != UniTaskStatus.Succeeded ||
+                ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
+            {
+                return null;
+            }
+
+            byte[] snapshot = Volatile.Read(ref _bytesSnapshot);
+            if (snapshot == null)
+            {
+                return null;
+            }
+
+            if (snapshot.Length == 0)
+            {
+                return Array.Empty<byte>();
+            }
+
+            var copy = new byte[snapshot.Length];
+            Buffer.BlockCopy(snapshot, 0, copy, 0, snapshot.Length);
+            return copy;
+        }
+
+        private async UniTask CompleteAndSnapshotAsync(AssetHandle raw)
+        {
+            try
+            {
+                await YooOperationTask.CompleteAsync(
+                    raw,
+                    "YooAsset failed to load the requested raw file.");
+
+                if (!PlayerLoopHelper.IsMainThread)
+                {
+                    await UniTask.SwitchToMainThread();
+                }
+
+                if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
+                {
+                    throw new ObjectDisposedException(nameof(YooRawFileHandle));
+                }
+
+                RawFileObject rawFile = raw.GetAssetObject<RawFileObject>();
+                if (rawFile == null)
+                {
+                    throw new InvalidOperationException(
+                        "YooAsset completed the raw-file load without a RawFileObject result.");
+                }
+
+                byte[] bytes = rawFile.GetBytes();
+                if (bytes == null)
+                {
+                    throw new InvalidOperationException(
+                        "YooAsset completed the raw-file load without readable byte content.");
+                }
+
+                string text = rawFile.GetText() ?? string.Empty;
+                Volatile.Write(ref _bytesSnapshot, bytes);
+                Volatile.Write(ref _textSnapshot, text);
+                Volatile.Write(ref _progress, 1f);
+            }
+            catch (Exception ex)
+            {
+                if (_completion.Task.Status != UniTaskStatus.Canceled)
+                {
+                    Volatile.Write(ref _error, ex.Message ?? "YooAsset raw-file load failed.");
+                }
+                throw;
+            }
+            finally
+            {
+                ReleaseProviderHandle(raw);
+            }
+        }
+
+        private void ReleaseProviderHandle(AssetHandle raw)
+        {
+            if (raw == null || !ReferenceEquals(Volatile.Read(ref _raw), raw))
+            {
+                return;
+            }
+
+            if (raw.IsValid)
+            {
+                raw.Dispose();
+            }
+
+            Interlocked.CompareExchange(ref _raw, null, raw);
+        }
 
         public void Retain()
         {
-            if (_disposed) { CLogger.LogError("[YooInstantiateHandle] Retain called on a disposed handle."); return; }
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
+            {
+                Log.Error("[YooRawFileHandle] Retain called on a disposed handle.");
+                return;
+            }
+
             Interlocked.Increment(ref _refCount);
         }
 
         public void Release()
         {
-            int newCount = Interlocked.Decrement(ref _refCount);
-            if (newCount < 0)
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
             {
-                Interlocked.Increment(ref _refCount);
-                CLogger.LogError("[YooInstantiateHandle] Release called more times than Retain. Ignoring extra release.");
                 return;
             }
-            if (newCount == 0)
+
+            int count = Interlocked.Decrement(ref _refCount);
+            if (count < 0)
             {
-                // Scene lifetimes are explicitly controlled via IAssetPackage.UnloadSceneAsync.
-                // Reaching RefCount == 0 only means the caller released the wrapper; it must not
-                // implicitly unload the scene or mutate provider state in a provider-specific way.
+                Interlocked.Increment(ref _refCount);
+                Log.Error("[YooRawFileHandle] Release called more times than Retain.");
+                return;
+            }
+
+            if (count == 0)
+            {
+                if (_onReleaseToCache != null)
+                {
+                    _onReleaseToCache(_cacheKey, this);
+                }
+                else
+                {
+                    DisposeInternal();
+                }
             }
         }
 
-        public void Dispose() => Release();
+        public void Dispose()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            Release();
+        }
 
         internal void DisposeInternal()
         {
-            _disposed = true;
-            Raw = null;
+            AssetRuntimeGuard.EnsureMainThread();
+            if (!ProviderReleaseStateMachine.TryBeginRelease(ref _releaseState))
+            {
+                return;
+            }
+
+            _completion.TryCancelByOwner();
+            AssetHandle raw = Volatile.Read(ref _raw);
+            try
+            {
+                if (raw != null && raw.IsValid)
+                {
+                    raw.Dispose();
+                }
+            }
+            catch
+            {
+                ProviderReleaseStateMachine.MarkReleaseFailed(ref _releaseState);
+                throw;
+            }
+
+            Interlocked.CompareExchange(ref _raw, null, raw);
+            Volatile.Write(ref _bytesSnapshot, null);
+            Volatile.Write(ref _textSnapshot, string.Empty);
             _onReleaseToCache = null;
-            if (HandleTracker.Enabled) HandleTracker.Unregister(_id);
-            AdaptiveHandlePool<YooInstantiateHandle>.Release(this);
+            ProviderReleaseStateMachine.MarkReleased(ref _releaseState);
+            HandleTracker.Unregister(_id);
+        }
+
+        void IInternalCacheable.ForceDispose() => DisposeInternal();
+        bool IAssetBackendLifetime.IsDisposed => ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState);
+
+        long IAssetMemoryFootprint.EstimateRuntimeBytes()
+        {
+            byte[] bytes = Volatile.Read(ref _bytesSnapshot);
+            string text = Volatile.Read(ref _textSnapshot);
+            long byteCount = bytes?.LongLength ?? 0L;
+            long textBytes = text == null ? 0L : (long)text.Length * sizeof(char);
+            return SNAPSHOT_OBJECT_OVERHEAD_BYTES + byteCount + textBytes;
+        }
+    }
+
+    internal sealed class YooInstantiateHandle : IInstantiateHandle, IReferenceCounted, IInternalCacheable,
+        ITrackedAssetHandle
+    {
+        private static readonly LogChannel Log = AssetManagementYooAssetLog.Channel;
+
+        private readonly long _id;
+        long ITrackedAssetHandle.DiagnosticHandleId => _id;
+        private readonly AssetOperationCompletion _completion;
+        private InstantiateOperation _raw;
+        private YooAssetHandle<GameObject> _source;
+        private Action<long> _onDisposed;
+        private int _refCount;
+        private int _callerDisposed;
+        private int _releaseState;
+
+        private YooInstantiateHandle(
+            long id,
+            InstantiateOperation raw,
+            YooAssetHandle<GameObject> source,
+            Action<long> onDisposed,
+            AssetOperationTailTracker operationTails)
+        {
+            _id = id;
+            _raw = raw;
+            _completion = AssetOperationCompletion.Start(CompleteAsync(raw), operationTails);
+            _source = source;
+            _onDisposed = onDisposed;
+            _source.Retain();
+            _refCount = 1;
+        }
+
+        private async UniTask CompleteAsync(InstantiateOperation raw)
+        {
+            try
+            {
+                await YooOperationTask.CompleteAsync(
+                    raw,
+                    "YooAsset failed to instantiate the requested asset.");
+            }
+            finally
+            {
+                // The currently supported provider cancellation is synchronous, but retain authoritative cleanup
+                // if another compatible provider revision publishes an instance after the wrapper is retired.
+                if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState) && raw?.Result != null)
+                {
+                    UnityEngine.Object.Destroy(raw.Result);
+                }
+            }
+        }
+
+        public static YooInstantiateHandle Create(
+            long id,
+            InstantiateOperation raw,
+            YooAssetHandle<GameObject> source,
+            Action<long> onDisposed,
+            AssetOperationTailTracker operationTails) =>
+            new YooInstantiateHandle(id, raw, source, onDisposed, operationTails);
+
+        public bool IsDone => _completion.Task.Status != UniTaskStatus.Pending;
+        public float Progress => _raw?.Progress ?? 0f;
+        public string Error => _raw?.Error ?? string.Empty;
+        public UniTask Task => _completion.Task;
+        public GameObject Instance => !ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState)
+            ? _raw?.Result
+            : null;
+        public int RefCount => Volatile.Read(ref _refCount);
+        public void WaitForAsyncComplete()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            YooSynchronousWait.EnsureTerminal(_completion.Task.Status);
+        }
+        public void Retain()
+        {
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
+            {
+                Log.Error("[YooInstantiateHandle] Retain called on a disposed handle.");
+                return;
+            }
+
+            Interlocked.Increment(ref _refCount);
+        }
+
+        public void Release()
+        {
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
+            {
+                return;
+            }
+
+            int count = Interlocked.Decrement(ref _refCount);
+            if (count < 0)
+            {
+                Interlocked.Increment(ref _refCount);
+                Log.Error("[YooInstantiateHandle] Release called more times than Retain.");
+            }
+            else if (count == 0)
+            {
+                DisposeInternal();
+            }
+        }
+
+        public void Dispose()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            if (Interlocked.Exchange(ref _callerDisposed, 1) == 0)
+            {
+                Release();
+                return;
+            }
+
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState) &&
+                !ProviderReleaseStateMachine.IsReleased(ref _releaseState))
+            {
+                DisposeInternal();
+            }
+        }
+
+        internal void DisposeInternal()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            if (!ProviderReleaseStateMachine.TryBeginRelease(ref _releaseState))
+            {
+                return;
+            }
+
+            _completion.TryCancelByOwner();
+            try
+            {
+                if (_raw != null)
+                {
+                    if (!_raw.IsDone)
+                    {
+                        _raw.Cancel();
+                    }
+
+                    if (_raw.Result != null)
+                    {
+                        UnityEngine.Object.Destroy(_raw.Result);
+                    }
+                }
+            }
+            catch
+            {
+                ProviderReleaseStateMachine.MarkReleaseFailed(ref _releaseState);
+                throw;
+            }
+
+            YooAssetHandle<GameObject> source = _source;
+            _source = null;
+            ExceptionDispatchInfo sourceReleaseFailure = null;
+            try
+            {
+                source?.Release();
+            }
+            catch (Exception exception)
+            {
+                // The cache retains a failed source release in its retry registry. This instantiate handle no
+                // longer owns the source reference and must not decrement its refcount a second time on retry.
+                sourceReleaseFailure = ExceptionDispatchInfo.Capture(exception);
+            }
+
+            Action<long> onDisposed = _onDisposed;
+            _onDisposed = null;
+            _raw = null;
+            ProviderReleaseStateMachine.MarkReleased(ref _releaseState);
+            HandleTracker.Unregister(_id);
+            onDisposed?.Invoke(_id);
+            sourceReleaseFailure?.Throw();
         }
 
         void IInternalCacheable.ForceDispose() => DisposeInternal();
     }
 
-    public sealed class YooSceneHandle : ISceneHandle, IInternalCacheable
+    internal sealed class YooSceneHandle : ISceneHandle, IReferenceCounted,
+        ISceneTrackerHandleState, ITrackedAssetHandle
     {
-        private int _id;
-        internal int DebugId => _id;
-        public YooAsset.SceneHandle Raw;
-        private int _refCount;
-        private volatile bool _disposed;
-        private Action<string, IReferenceCounted> _onReleaseToCache;
-        private SceneActivationState _activationState;
+        private static readonly LogChannel Log = AssetManagementYooAssetLog.Channel;
 
-        public static bool SupportsDeferredActivation => true;
+        private const float MANUAL_ACTIVATION_READY_PROGRESS = 0.9f;
+
+        private readonly long _id;
+        long ITrackedAssetHandle.DiagnosticHandleId => _id;
+        private readonly AssetOperationCompletion _completion;
+        private int _refCount;
+        private int _releaseState;
+        private SceneActivationState _activationState;
+        private bool _activationStarted;
+        private UniTask _activationTask;
+        private bool _manualLoadResumed;
+        private bool _unloadStarted;
+        private UniTask _unloadTask;
+        private string _scenePath;
+        private Scene _scene;
+        private float _progress;
+        private string _error = string.Empty;
+        private int _callerDisposed;
+        private string _lifecycleError = string.Empty;
+        private bool _providerSceneUnloaded;
+
+        internal YooAsset.SceneHandle Raw { get; private set; }
+        internal long DebugId => _id;
+        internal object OwnerToken { get; private set; }
+        internal bool UnloadStarted => _unloadStarted;
+        internal bool IsTerminallyReleased => ProviderReleaseStateMachine.IsReleased(ref _releaseState);
+        internal bool RequiresShutdownActivation
+        {
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                if (IsTerminallyReleased ||
+                    _providerSceneUnloaded ||
+                    ActivationMode != SceneActivationMode.Manual ||
+                    _manualLoadResumed)
+                {
+                    return false;
+                }
+
+                RefreshActivationState();
+                if (_activationState == SceneActivationState.Activated)
+                {
+                    return false;
+                }
+
+                YooAsset.SceneHandle raw = Raw;
+                return raw == null ||
+                       !raw.IsValid ||
+                       !raw.IsDone ||
+                       raw.Status != EOperationStatus.Failed;
+            }
+        }
+
+        private YooSceneHandle(
+            long id,
+            object ownerToken,
+            string scenePath,
+            YooAsset.SceneHandle raw,
+            bool activateOnLoad,
+            AssetOperationTailTracker operationTails)
+        {
+            _id = id;
+            OwnerToken = ownerToken ?? throw new ArgumentNullException(nameof(ownerToken));
+            Raw = raw;
+            _completion = AssetOperationCompletion.Start(CompleteLoadAsync(raw), operationTails);
+            ActivationMode = activateOnLoad ? SceneActivationMode.ActivateOnLoad : SceneActivationMode.Manual;
+            _activationState = SceneActivationState.Loading;
+            _scenePath = scenePath ?? string.Empty;
+            _refCount = 1;
+        }
+
+        private async UniTask CompleteLoadAsync(YooAsset.SceneHandle raw)
+        {
+            await YooOperationTask.CompleteAsync(
+                raw,
+                "YooAsset failed to load the requested scene.");
+            CaptureSceneIfAvailable(raw);
+        }
+
+        public static YooSceneHandle Create(
+            long id,
+            object ownerToken,
+            string scenePath,
+            YooAsset.SceneHandle raw,
+            bool activateOnLoad,
+            AssetOperationTailTracker operationTails) =>
+            new YooSceneHandle(id, ownerToken, scenePath, raw, activateOnLoad, operationTails);
+
+        private bool CanReadRaw => !ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState) &&
+                                   Raw != null &&
+                                   Raw.IsValid;
+
+        public bool IsDone => _completion.Task.Status != UniTaskStatus.Pending;
+        public float Progress
+        {
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                return CanReadRaw ? _progress = Raw.Progress : _progress;
+            }
+        }
+        public string Error
+        {
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                if (!string.IsNullOrEmpty(_lifecycleError))
+                {
+                    return _lifecycleError;
+                }
+
+                return CanReadRaw ? _error = Raw.Error ?? string.Empty : _error;
+            }
+        }
+        public UniTask Task => _completion.Task;
+        public string ScenePath => _scenePath;
+        public Scene Scene
+        {
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                return CanReadRaw ? _scene = Raw.SceneObject : _scene;
+            }
+        }
         public SceneActivationMode ActivationMode { get; private set; }
+        public bool SupportsManualActivation => true;
+        public int RefCount => Volatile.Read(ref _refCount);
+
         public SceneActivationState ActivationState
         {
             get
             {
+                AssetRuntimeGuard.EnsureMainThread();
                 RefreshActivationState();
                 return _activationState;
             }
         }
 
-        public bool SupportsManualActivation => true;
-
-        public YooSceneHandle() { }
-
-        internal void Initialize(int id, YooAsset.SceneHandle raw, bool activateOnLoad, bool isActivated, Action<string, IReferenceCounted> onReleaseToCache)
+        public bool ShouldRemoveFromSceneTracker
         {
-            _id = id;
-            Raw = raw;
-            ActivationMode = activateOnLoad ? SceneActivationMode.ActivateOnLoad : SceneActivationMode.Manual;
-            _activationState = isActivated ? SceneActivationState.Activated : SceneActivationState.Loading;
-            _onReleaseToCache = onReleaseToCache;
-            _disposed = false;
-            _refCount = 1;
-        }
-
-        public static YooSceneHandle Create(int id, YooAsset.SceneHandle raw, bool activateOnLoad, bool isActivated, Action<string, IReferenceCounted> onReleaseToCache)
-        {
-            var h = AdaptiveHandlePool<YooSceneHandle>.Get();
-            h.Initialize(id, raw, activateOnLoad, isActivated, onReleaseToCache);
-            return h;
-        }
-
-        public bool IsDone => Raw == null || Raw.IsDone;
-        public float Progress => Raw?.Progress ?? 0f;
-        public string Error => Raw?.LastError ?? string.Empty;
-        public UniTask Task => IsDone ? UniTask.CompletedTask : (Raw?.Task.AsUniTask() ?? UniTask.CompletedTask);
-        public void WaitForAsyncComplete() { }
-
-        public async UniTask ActivateAsync(CancellationToken cancellationToken = default)
-        {
-            RefreshActivationState();
-            if (_activationState == SceneActivationState.Activated)
+            get
             {
-                return;
-            }
+                if (ProviderReleaseStateMachine.IsReleased(ref _releaseState))
+                {
+                    return true;
+                }
 
+                if (Raw == null || !Raw.IsValid)
+                {
+                    return !_scene.IsValid() || !_scene.isLoaded;
+                }
+
+                return false;
+            }
+        }
+
+        public void WaitForAsyncComplete()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
             if (!IsDone)
             {
-                await Task.AttachExternalCancellation(cancellationToken);
+                throw new NotSupportedException(
+                    "YooAsset does not expose public synchronous scene completion for this provider version.");
+            }
+        }
+
+        public UniTask ActivateAsync(CancellationToken cancellationToken = default)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
+            {
+                throw new ObjectDisposedException(nameof(YooSceneHandle));
             }
 
             RefreshActivationState();
             if (_activationState == SceneActivationState.Activated)
             {
-                return;
+                return UniTask.CompletedTask;
             }
 
-            if (Raw == null)
+            if (_activationStarted)
             {
-                return;
+                return _activationTask;
             }
 
-            if (ActivationMode == SceneActivationMode.ActivateOnLoad)
+            if (_unloadStarted)
             {
-                _activationState = SceneActivationState.Activated;
-                return;
+                throw new InvalidOperationException(
+                    "Scene activation cannot start after scene unload has been committed.");
             }
 
-            Raw.UnSuspend();
-            await Task.AttachExternalCancellation(cancellationToken);
+            if (!_activationStarted)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                _activationStarted = true;
+                _activationTask = AssetOperationBroadcast.Create(ActivateCoreAsync());
+            }
 
-            _activationState = SceneActivationState.Activated;
+            return _activationTask;
         }
 
-        public string ScenePath => Raw?.SceneName;
-        public Scene Scene => Raw?.SceneObject ?? default;
+        internal async UniTask ResolveShutdownActivationAsync()
+        {
+            if (!RequiresShutdownActivation)
+            {
+                return;
+            }
+
+            try
+            {
+                await ActivateAsync(CancellationToken.None);
+            }
+            catch (Exception exception) when (AssetRuntimeGuard.IsRecoverableException(exception))
+            {
+                // Terminal load failure and provider-observed scene retirement no longer hold Unity's queue.
+                // Any still-unresolved manual activation must stop shutdown before unload operations are queued.
+                if (RequiresShutdownActivation)
+                {
+                    throw;
+                }
+            }
+        }
+
+        private async UniTask ActivateCoreAsync()
+        {
+            try
+            {
+                if (ActivationMode == SceneActivationMode.Manual && CanReadRaw && !_manualLoadResumed)
+                {
+                    if (!Raw.AllowSceneActivation())
+                    {
+                        throw new InvalidOperationException(
+                            "YooAsset rejected the scene activation request.");
+                    }
+                    _manualLoadResumed = true;
+                    _activationState = SceneActivationState.Loading;
+                }
+
+                // The broadcast task is repeatable. Always await it so a load that already faulted cannot be
+                // mistaken for a completed, activatable scene.
+                await Task;
+
+                if (!CanReadRaw)
+                {
+                    throw new InvalidOperationException("YooAsset scene handle became invalid before activation.");
+                }
+
+                _activationState = SceneActivationState.Activated;
+            }
+            catch
+            {
+                _activationStarted = false;
+                throw;
+            }
+        }
+
+        internal UniTask UnloadAsync(CancellationToken cancellationToken)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            if (ProviderReleaseStateMachine.IsReleased(ref _releaseState))
+            {
+                return UniTask.CompletedTask;
+            }
+
+            if (!_unloadStarted)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                _unloadStarted = true;
+                _lifecycleError = string.Empty;
+                SceneTracker.MarkUnloadRequested(_id);
+                _unloadTask = AssetOperationBroadcast.Create(UnloadCoreAsync());
+            }
+
+            return _unloadTask;
+        }
+
+        private async UniTask UnloadCoreAsync()
+        {
+            try
+            {
+                if (_activationStarted)
+                {
+                    try
+                    {
+                        // Preserve operation ordering: an activation committed before unload reaches its terminal
+                        // wrapper state before YooAsset is allowed to invalidate the native scene handle.
+                        await _activationTask;
+                    }
+                    catch (Exception exception) when (AssetRuntimeGuard.IsRecoverableException(exception))
+                    {
+                        // The activation caller observes its own failure. Cleanup must still run so a failed load
+                        // cannot retain provider ownership indefinitely.
+                    }
+                }
+
+                YooAsset.SceneHandle raw = Raw;
+                if (raw == null || !raw.IsValid)
+                {
+                    // YooAsset invalidates and releases SceneHandle from its scene-unloaded callback. A valid,
+                    // still-loaded cached Scene is the only evidence that cleanup is not already complete.
+                    if (IsKnownSceneAbsent(raw))
+                    {
+                        DisposeInternal(providerHandleAlreadyReleased: true);
+                        return;
+                    }
+
+                    throw new InvalidOperationException(
+                        "YooAsset scene unload cannot start because the provider handle is invalid and scene absence cannot be proven.");
+                }
+
+                if (raw.IsDone && raw.Status == EOperationStatus.Failed)
+                {
+                    // The provider reports an immediately rejected scene load with ErrorProvider.
+                    // ErrorProvider cannot construct UnloadSceneOperation; its terminal handle must be
+                    // released directly because no Unity Scene was created.
+                    DisposeInternal(providerHandleAlreadyReleased: false);
+                    return;
+                }
+
+                // YooAsset's operation unsuspends a manual load and waits for an in-flight scene load before
+                // unloading it. Do not reject an invalid SceneObject before starting this operation.
+                CaptureSceneIfAvailable(raw);
+                UnloadSceneOperation operation = raw.UnloadSceneAsync();
+                if (ActivationMode == SceneActivationMode.Manual && !_manualLoadResumed)
+                {
+                    // The provider accepted authoritative unload, which is YooAsset's operation for releasing
+                    // the manual activation barrier before scene teardown. Do not mark the barrier resolved if
+                    // operation construction throws.
+                    _manualLoadResumed = true;
+                    _activationState = SceneActivationState.Loading;
+                }
+                await operation;
+                if (operation.Status == EOperationStatus.Succeeded)
+                {
+                    // YooAsset releases SceneHandle automatically through its scene-unloaded callback.
+                    // Do not query the provider handle after successful completion.
+                    DisposeInternal(providerHandleAlreadyReleased: true);
+                    return;
+                }
+
+                if (IsKnownSceneAbsent(raw))
+                {
+                    DisposeInternal(providerHandleAlreadyReleased: !raw.IsValid);
+                    return;
+                }
+
+                throw new InvalidOperationException(
+                    string.IsNullOrEmpty(operation.Error) ? "YooAsset scene unload failed." : operation.Error);
+            }
+            catch (Exception exception)
+            {
+                _unloadStarted = false;
+                if (AssetRuntimeGuard.IsRecoverableException(exception))
+                {
+                    _lifecycleError = exception.Message;
+                    SceneTracker.MarkUnloadFailed(_id, _lifecycleError);
+                }
+                throw;
+            }
+        }
+
+        private void CaptureSceneIfAvailable(YooAsset.SceneHandle raw)
+        {
+            if (raw != null && raw.IsValid)
+            {
+                Scene providerScene = raw.SceneObject;
+                if (providerScene.IsValid())
+                {
+                    _scene = providerScene;
+                }
+            }
+        }
+
+        internal bool MatchesScene(Scene scene)
+        {
+            if (!scene.IsValid())
+            {
+                return false;
+            }
+
+            if (!_scene.IsValid())
+            {
+                CaptureSceneIfAvailable(Raw);
+            }
+
+            return _scene.IsValid() && _scene == scene;
+        }
+
+        internal void OnProviderSceneUnloadObserved(Scene scene)
+        {
+            _providerSceneUnloaded = true;
+            if (scene.IsValid() && (!_scene.IsValid() || _scene == scene))
+            {
+                _scene = scene;
+            }
+        }
+
+        internal void OnProviderSceneUnloaded(Scene scene)
+        {
+            // YooAsset releases SceneHandle from its scene-unloaded callback. The wrapper must not
+            // release that invalidated provider handle a second time.
+            OnProviderSceneUnloadObserved(scene);
+            DisposeInternal(providerHandleAlreadyReleased: true);
+        }
+
+        private bool IsKnownSceneAbsent(YooAsset.SceneHandle raw)
+        {
+            if (_scene.IsValid())
+            {
+                return !_scene.isLoaded;
+            }
+
+            if (_providerSceneUnloaded)
+            {
+                return true;
+            }
+
+            if (raw == null || !raw.IsValid)
+            {
+                // Provider invalidation is not proof that the Unity scene is absent. Another owner can
+                // invalidate YooAsset state before this package observes SceneManager.sceneUnloaded.
+                return false;
+            }
+
+            Scene providerScene = raw.SceneObject;
+            if (providerScene.IsValid())
+            {
+                _scene = providerScene;
+                return !providerScene.isLoaded;
+            }
+
+            return raw.IsDone && raw.Status == EOperationStatus.Failed;
+        }
 
         private void RefreshActivationState()
         {
-            if (_activationState != SceneActivationState.Loading || !IsDone)
+            if (_activationState != SceneActivationState.Loading)
             {
                 return;
             }
 
-            _activationState = SceneActivationState.Activated;
-        }
+            UniTaskStatus taskStatus = _completion.Task.Status;
+            if (ActivationMode == SceneActivationMode.Manual && !_manualLoadResumed)
+            {
+                if (PlayerLoopHelper.IsMainThread && CanReadRaw)
+                {
+                    _progress = Raw.Progress;
+                }
 
-        public int RefCount => Interlocked.CompareExchange(ref _refCount, 0, 0);
+                // Unity scene loading holds at 0.9 while activation is disabled. YooAsset keeps its
+                // provider task pending at that barrier, so task completion cannot identify this state.
+                if ((taskStatus == UniTaskStatus.Pending || taskStatus == UniTaskStatus.Succeeded) &&
+                    _progress >= MANUAL_ACTIVATION_READY_PROGRESS)
+                {
+                    _activationState = SceneActivationState.WaitingForActivation;
+                }
+
+                return;
+            }
+
+            if (taskStatus == UniTaskStatus.Succeeded)
+            {
+                _activationState = SceneActivationState.Activated;
+            }
+        }
 
         public void Retain()
         {
-            if (_disposed) { CLogger.LogError("[YooSceneHandle] Retain called on a disposed handle."); return; }
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
+            {
+                Log.Error("[YooSceneHandle] Retain called on a disposed handle.");
+                return;
+            }
+
             Interlocked.Increment(ref _refCount);
         }
 
         public void Release()
         {
-            int newCount = Interlocked.Decrement(ref _refCount);
-            if (newCount < 0)
+            if (ProviderReleaseStateMachine.IsOwnerRetired(ref _releaseState))
             {
-                Interlocked.Increment(ref _refCount);
-                CLogger.LogError("[YooSceneHandle] Release called more times than Retain. Ignoring extra release.");
                 return;
             }
-            if (newCount == 0)
+
+            int count = Interlocked.Decrement(ref _refCount);
+            if (count < 0)
             {
-                if (_onReleaseToCache != null) _onReleaseToCache(null, this);
-                else DisposeInternal();
+                Interlocked.Increment(ref _refCount);
+                Log.Error("[YooSceneHandle] Release called more times than Retain.");
+            }
+            else if (count == 0)
+            {
+                Log.Warning("[YooSceneHandle] Dispose releases caller ownership only. Use IAssetSceneLoader.UnloadSceneAsync to unload the scene.");
             }
         }
 
-        public void Dispose() => Release();
-
-        internal void DisposeInternal()
+        public void Dispose()
         {
-            _disposed = true;
-            SceneTracker.Unregister(_id);
-            if (Raw != null)
+            AssetRuntimeGuard.EnsureMainThread();
+            if (Interlocked.Exchange(ref _callerDisposed, 1) == 0)
             {
-                if (Raw.IsValid)
+                Release();
+            }
+        }
+
+        private void DisposeInternal(bool providerHandleAlreadyReleased)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            if (!ProviderReleaseStateMachine.TryBeginRelease(ref _releaseState))
+            {
+                return;
+            }
+
+            _completion.TryCancelByOwner();
+            try
+            {
+                if (!providerHandleAlreadyReleased && Raw != null && Raw.IsValid)
                 {
+                    _progress = Raw.Progress;
+                    _error = Raw.Error ?? string.Empty;
+                    _scene = Raw.SceneObject;
                     Raw.Dispose();
                 }
-                Raw = null;
             }
-            ActivationMode = SceneActivationMode.ActivateOnLoad;
-            _activationState = SceneActivationState.Loading;
-            _onReleaseToCache = null;
-            if (HandleTracker.Enabled) HandleTracker.Unregister(_id);
-            AdaptiveHandlePool<YooSceneHandle>.Release(this);
-        }
+            catch
+            {
+                ProviderReleaseStateMachine.MarkReleaseFailed(ref _releaseState);
+                throw;
+            }
 
-        void IInternalCacheable.ForceDispose() => DisposeInternal();
+            Raw = null;
+
+            _scenePath = string.Empty;
+            _activationTask = default;
+            _unloadTask = default;
+            ProviderReleaseStateMachine.MarkReleased(ref _releaseState);
+            Interlocked.Exchange(ref _refCount, 0);
+            SceneTracker.Unregister(_id);
+            HandleTracker.Unregister(_id);
+        }
     }
 
-    public sealed class YooRawFileHandle : IRawFileHandle, IInternalCacheable
+    internal sealed class YooDownloader : IDownloader
     {
-        private int _id;
-        private RawFileHandle _raw;
-        private int _refCount;
-        private string _cacheKey;
-        private Action<string, IReferenceCounted> _onReleaseToCache;
-        private volatile bool _disposed;
+        private readonly CancellationTokenSource _sharedCancellation = new CancellationTokenSource();
+        private readonly UniTaskCompletionSource _disposeCompletion = new UniTaskCompletionSource();
+        private ResourceDownloaderOperation _operation;
+        private Action<YooDownloader> _onDisposed;
+        private bool _startStarted;
+        private UniTask _startTask;
+        private UniTask _startCallerTask;
+        private int _disposed;
+        private bool _cancelled;
+        private bool _succeeded;
+        private float _progress;
+        private int _totalCount;
+        private int _currentCount;
+        private long _totalBytes;
+        private long _currentBytes;
+        private string _error = string.Empty;
 
-        public YooRawFileHandle() { }
-
-        internal void Initialize(int id, string cacheKey, RawFileHandle raw, Action<string, IReferenceCounted> onReleaseToCache, CancellationToken cancellationToken)
+        public YooDownloader(
+            ResourceDownloaderOperation operation,
+            Action<YooDownloader> onDisposed,
+            int scopeValueCount)
         {
-            _id = id;
-            _cacheKey = cacheKey;
-            _raw = raw;
-            _onReleaseToCache = onReleaseToCache;
-            _disposed = false;
-            _refCount = 1;
+            _operation = operation ?? throw new ArgumentNullException(nameof(operation));
+            _onDisposed = onDisposed;
+            ScopeValueCount = scopeValueCount;
         }
 
-        public static YooRawFileHandle Create(int id, string cacheKey, RawFileHandle raw, Action<string, IReferenceCounted> onReleaseToCache, CancellationToken cancellationToken)
+        internal int ScopeValueCount { get; }
+
+        public bool IsDone
         {
-            var h = AdaptiveHandlePool<YooRawFileHandle>.Get();
-            h.Initialize(id, cacheKey, raw, onReleaseToCache, cancellationToken);
-            return h;
-        }
-
-        public bool IsDone => _raw == null || _raw.IsDone;
-        public float Progress => _raw?.Progress ?? 0f;
-        public string Error => _raw?.LastError ?? string.Empty;
-        // Use System.Threading.Tasks.Task (supports multiple awaiters) instead of IEnumerator.ToUniTask() (one-shot).
-        public UniTask Task => IsDone ? UniTask.CompletedTask : (_raw?.Task.AsUniTask() ?? UniTask.CompletedTask);
-        public void WaitForAsyncComplete() => _raw?.WaitForAsyncComplete();
-
-        public string FilePath => _raw?.GetRawFilePath() ?? string.Empty;
-
-        public string ReadText()
-        {
-            if (_raw == null || !_raw.IsDone) return string.Empty;
-            return _raw.GetRawFileText();
-        }
-
-        public byte[] ReadBytes()
-        {
-            if (_raw == null || !_raw.IsDone) return null;
-            return _raw.GetRawFileData();
-        }
-
-        public int RefCount => Interlocked.CompareExchange(ref _refCount, 0, 0);
-
-        public void Retain()
-        {
-            if (_disposed) { CLogger.LogError("[YooRawFileHandle] Retain called on a disposed handle."); return; }
-            Interlocked.Increment(ref _refCount);
-        }
-
-        public void Release()
-        {
-            int newCount = Interlocked.Decrement(ref _refCount);
-            if (newCount < 0)
+            get
             {
-                Interlocked.Increment(ref _refCount);
-                CLogger.LogError("[YooRawFileHandle] Release called more times than Retain. Refcount underflow prevented.");
-                return;
-            }
-            if (newCount == 0)
-            {
-                if (_onReleaseToCache != null) _onReleaseToCache(_cacheKey, this);
-                else DisposeInternal();
+                AssetRuntimeGuard.EnsureMainThread();
+                return IsDoneOnMainThread();
             }
         }
 
-        public void Dispose() => Release();
-
-        internal void DisposeInternal()
+        public bool Succeed
         {
-            _disposed = true;
-            _raw?.Dispose();
-            _raw = null;
-            _cacheKey = null;
-            _onReleaseToCache = null;
-            if (HandleTracker.Enabled) HandleTracker.Unregister(_id);
-            AdaptiveHandlePool<YooRawFileHandle>.Release(this);
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                return !_cancelled &&
+                       (_startStarted
+                           ? _startCallerTask.Status == UniTaskStatus.Succeeded && _succeeded
+                           : _succeeded);
+            }
         }
 
-        void IInternalCacheable.ForceDispose() => DisposeInternal();
-    }
-
-    public sealed class YooDownloader : IDownloader
-    {
-        private ResourceDownloaderOperation _op;
-
-        public YooDownloader() { }
-
-        internal void Initialize(ResourceDownloaderOperation op) => _op = op;
-
-        public static YooDownloader Create(ResourceDownloaderOperation op)
+        public float Progress
         {
-            var d = AdaptiveHandlePool<YooDownloader>.Get();
-            d.Initialize(op);
-            return d;
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                return _operation?.Progress ?? _progress;
+            }
         }
 
-        public bool IsDone => _op == null || _op.IsDone;
-        public bool Succeed => _op != null && _op.Status == EOperationStatus.Succeed;
-        public float Progress => _op?.Progress ?? 1f;
-        public int TotalDownloadCount => _op?.TotalDownloadCount ?? 0;
-        public int CurrentDownloadCount => _op?.CurrentDownloadCount ?? 0;
-        public long TotalDownloadBytes => _op?.TotalDownloadBytes ?? 0;
-        public long CurrentDownloadBytes => _op?.CurrentDownloadBytes ?? 0;
-        public string Error => _op?.Error ?? string.Empty;
+        public int TotalDownloadCount
+        {
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                return _operation?.TotalDownloadCount ?? _totalCount;
+            }
+        }
 
-        public void Begin() => _op?.BeginDownload();
+        public int CurrentDownloadCount
+        {
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                return _operation?.CurrentDownloadCount ?? _currentCount;
+            }
+        }
+
+        public long TotalDownloadBytes
+        {
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                return _operation?.TotalDownloadBytes ?? _totalBytes;
+            }
+        }
+
+        public long CurrentDownloadBytes
+        {
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                return _operation?.CurrentDownloadBytes ?? _currentBytes;
+            }
+        }
+
+        public string Error
+        {
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                return _cancelled ? "Cancelled" : _operation?.Error ?? _error;
+            }
+        }
+
+        public UniTask PrepareAsync(CancellationToken cancellationToken = default)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                throw new ObjectDisposedException(nameof(YooDownloader));
+            }
+
+            if (_cancelled)
+            {
+                throw new OperationCanceledException("The YooAsset download was cancelled.");
+            }
+
+            return UniTask.CompletedTask;
+        }
 
         public async UniTask StartAsync(CancellationToken cancellationToken = default)
         {
-            Begin();
-            while (!IsDone)
+            AssetRuntimeGuard.EnsureMainThread();
+            cancellationToken.ThrowIfCancellationRequested();
+            ThrowIfDisposed();
+            if (_cancelled)
             {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    _op?.CancelDownload();
-                    throw new OperationCanceledException(cancellationToken);
-                }
-                await UniTask.Yield(cancellationToken);
+                throw new OperationCanceledException("The YooAsset download was cancelled.");
+            }
+
+            if (!_startStarted)
+            {
+                _startStarted = true;
+                _startTask = AssetOperationBroadcast.Create(StartCoreAsync());
+                _startCallerTask = AssetOperationBroadcast.CreateCallerView(
+                    _startTask,
+                    _sharedCancellation.Token);
+            }
+
+            await WaitWithCallerCancellationOnMainThreadAsync(_startCallerTask, cancellationToken);
+        }
+
+        private async UniTask StartCoreAsync()
+        {
+            ResourceDownloaderOperation operation = _operation;
+            operation.StartDownload();
+            await operation;
+
+            CaptureSnapshot();
+            if (_cancelled)
+            {
+                throw new OperationCanceledException("The YooAsset download was cancelled.");
+            }
+
+            if (operation.Status != EOperationStatus.Succeeded)
+            {
+                throw new InvalidOperationException(
+                    string.IsNullOrEmpty(operation.Error)
+                        ? "YooAsset dependency download failed."
+                        : operation.Error);
             }
         }
 
-        public void Pause() => _op?.PauseDownload();
-        public void Resume() => _op?.ResumeDownload();
-        public void Cancel() => _op?.CancelDownload();
-
-        public void Combine(IDownloader other)
+        public void Cancel()
         {
-            if (_op == null) return;
-            if (other is YooDownloader yd && yd._op != null) _op.Combine(yd._op);
+            AssetRuntimeGuard.EnsureMainThread();
+            if (_cancelled || Volatile.Read(ref _disposed) != 0 || HasTerminalCallerResult())
+            {
+                return;
+            }
+
+            _cancelled = true;
+            _operation?.CancelDownload();
+            CaptureSnapshot();
+            _sharedCancellation.Cancel();
+        }
+
+        public void Dispose()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            if (!_cancelled && !HasTerminalCallerResult())
+            {
+                _cancelled = true;
+            }
+
+            try
+            {
+                if (_cancelled)
+                {
+                    _operation?.CancelDownload();
+                }
+                CaptureSnapshot();
+                if (_cancelled)
+                {
+                    _sharedCancellation.Cancel();
+                }
+            }
+            finally
+            {
+                CompleteDisposeAfterProviderTerminalAsync().Forget();
+            }
+        }
+
+        internal UniTask WaitForDisposeCompletionAsync()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            return Volatile.Read(ref _disposed) != 0
+                ? _disposeCompletion.Task
+                : UniTask.CompletedTask;
+        }
+
+        private async UniTask CompleteDisposeAfterProviderTerminalAsync()
+        {
+            try
+            {
+                if (_startStarted)
+                {
+                    try
+                    {
+                        await _startTask;
+                    }
+                    catch (Exception ex) when (AssetRuntimeGuard.IsRecoverableException(ex))
+                    {
+                        // Cancellation/failure is already published by the caller-visible task. Disposal waits
+                        // only until the provider wrapper has observed terminal abort and captured its snapshot.
+                    }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    CaptureSnapshot();
+                    _operation = null;
+                    _sharedCancellation.Dispose();
+                }
+                finally
+                {
+                    try
+                    {
+                        Action<YooDownloader> onDisposed = _onDisposed;
+                        _onDisposed = null;
+                        onDisposed?.Invoke(this);
+                    }
+                    finally
+                    {
+                        _disposeCompletion.TrySetResult();
+                    }
+                }
+            }
+        }
+
+        private void CaptureSnapshot()
+        {
+            if (_operation == null)
+            {
+                return;
+            }
+
+            _succeeded = _operation.Status == EOperationStatus.Succeeded;
+            _progress = _operation.Progress;
+            _totalCount = _operation.TotalDownloadCount;
+            _currentCount = _operation.CurrentDownloadCount;
+            _totalBytes = _operation.TotalDownloadBytes;
+            _currentBytes = _operation.CurrentDownloadBytes;
+            _error = _operation.Error ?? string.Empty;
+        }
+
+        private bool IsDoneOnMainThread()
+        {
+            return _cancelled ||
+                   Volatile.Read(ref _disposed) != 0 ||
+                   HasTerminalCallerResult();
+        }
+
+        private bool HasTerminalCallerResult()
+        {
+            return _startStarted && _startCallerTask.Status != UniTaskStatus.Pending;
+        }
+
+        private static async UniTask WaitWithCallerCancellationOnMainThreadAsync(
+            UniTask sharedTask,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await AssetOperationBroadcast.CreateCallerView(sharedTask, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                if (!PlayerLoopHelper.IsMainThread)
+                {
+                    await UniTask.SwitchToMainThread();
+                }
+
+                throw;
+            }
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                throw new ObjectDisposedException(nameof(YooDownloader));
+            }
         }
     }
 }

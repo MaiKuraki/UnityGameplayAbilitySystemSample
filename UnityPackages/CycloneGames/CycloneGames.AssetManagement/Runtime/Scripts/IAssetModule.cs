@@ -1,9 +1,9 @@
-using Cysharp.Threading.Tasks;
 using System;
 using System.Collections.Generic;
 using System.Threading;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using Cysharp.Threading.Tasks;
 
 namespace CycloneGames.AssetManagement.Runtime
 {
@@ -17,13 +17,14 @@ namespace CycloneGames.AssetManagement.Runtime
 		/// <summary>
 		/// Initializes the module asynchronously. Idempotent. Safe to call multiple times.
 		/// </summary>
-		/// <param name="options">Global options (time slice, concurrency, logger etc.).</param>
+		/// <param name="options">Provider-independent module default cache tuning.</param>
 		UniTask InitializeAsync(AssetManagementOptions options = default);
 
 		/// <summary>
-		/// Destroys the module and releases all resources.
+		/// Destroys the module and releases all resources asynchronously.
+		/// Production composition roots should prefer this method so provider cleanup can finish deterministically.
 		/// </summary>
-		void Destroy();
+		UniTask DestroyAsync();
 
 		/// <summary>
 		/// Creates a new logical package. Package must be initialized via <see cref="IAssetPackage.InitializeAsync"/> before use.
@@ -45,17 +46,13 @@ namespace CycloneGames.AssetManagement.Runtime
 		/// </summary>
 		IReadOnlyList<string> GetAllPackageNames();
 
-		/// <summary>
-		/// Creates a patch service for the specified package to manage the update workflow.
-		/// </summary>
-		IPatchService CreatePatchService(string packageName);
 	}
 
 	/// <summary>
-	/// Base interface for handles supporting explicit Automatic Reference Counting (ARC).
-	/// Required for sharing resources safely between multiple consumers (e.g. UI layers, Object Pools).
+	/// Internal handle lease used by the cache to pin shared provider handles.
+	/// Public callers use IDisposable only; Retain/Release must stay inside the ownership layer.
 	/// </summary>
-	public interface IReferenceCounted : IDisposable
+	internal interface IReferenceCounted : IDisposable
 	{
 		int RefCount { get; }
 		
@@ -75,8 +72,24 @@ namespace CycloneGames.AssetManagement.Runtime
 		void ForceDispose();
 	}
 
+	internal interface IAssetBackendLifetime
+	{
+		bool IsDisposed { get; }
+	}
+
 	/// <summary>
-	/// Abstraction of a package (catalog + bundles). Provider specific implementation should be zero-GC in hot paths.
+	/// Optional contract implemented by cacheable asset handles to report an approximate
+	/// runtime memory footprint (bytes). The cache uses this for memory-budget eviction in
+	/// addition to entry-count limits. Non-asset handles (scene/instantiate) do not implement this.
+	/// </summary>
+	internal interface IAssetMemoryFootprint
+	{
+		long EstimateRuntimeBytes();
+	}
+
+	/// <summary>
+	/// Abstraction of a loaded asset package. Unity-facing methods are main-thread-affine unless a member explicitly
+	/// states otherwise. Provider-specific implementations must not imply cross-thread safety with collection locks.
 	/// </summary>
 	public interface IAssetPackage
 	{
@@ -89,64 +102,48 @@ namespace CycloneGames.AssetManagement.Runtime
 		UniTask<bool> InitializeAsync(AssetPackageInitOptions options, CancellationToken cancellationToken = default);
 
 		/// <summary>
-		/// Destroys the package and releases all provider resources.
+		/// Destroys the package and releases all provider resources. Successful completion is not published until
+		/// provider operations and adapter continuations retained by the package have reached a terminal state.
 		/// </summary>
 		UniTask DestroyAsync();
 
-		// --- Update & Download ---
-		UniTask<string> RequestPackageVersionAsync(bool appendTimeTicks = true, int timeoutSeconds = 60, CancellationToken cancellationToken = default);
-		UniTask<bool> UpdatePackageManifestAsync(string packageVersion, int timeoutSeconds = 60, CancellationToken cancellationToken = default);
-		UniTask<bool> ClearCacheFilesAsync(ClearCacheMode clearMode = ClearCacheMode.All, object clearParam = null, CancellationToken cancellationToken = default);
-
-		// Downloaders based on ACTIVE manifest
-		IDownloader CreateDownloaderForAll(int downloadingMaxNumber, int failedTryAgain);
-		IDownloader CreateDownloaderForTags(string[] tags, int downloadingMaxNumber, int failedTryAgain);
-		IDownloader CreateDownloaderForLocations(string[] locations, bool recursiveDownload, int downloadingMaxNumber, int failedTryAgain);
-
-		// Pre-download for a SPECIFIC manifest version (without switching active manifest)
-		UniTask<IDownloader> CreatePreDownloaderForAllAsync(string packageVersion, int downloadingMaxNumber, int failedTryAgain, CancellationToken cancellationToken = default);
-		UniTask<IDownloader> CreatePreDownloaderForTagsAsync(string packageVersion, string[] tags, int downloadingMaxNumber, int failedTryAgain, CancellationToken cancellationToken = default);
-		UniTask<IDownloader> CreatePreDownloaderForLocationsAsync(string packageVersion, string[] locations, bool recursiveDownload, int downloadingMaxNumber, int failedTryAgain, CancellationToken cancellationToken = default);
-
 		// --- Asset Loading ---
-		IAssetHandle<TAsset> LoadAssetSync<TAsset>(string location, string bucket = null, string tag = null, string owner = null) where TAsset : UnityEngine.Object;
 		IAssetHandle<TAsset> LoadAssetAsync<TAsset>(string location, string bucket = null, string tag = null, string owner = null, CancellationToken cancellationToken = default) where TAsset : UnityEngine.Object;
 
 		/// <summary>
-		/// Loads all sub-assets for a location (e.g., sprites in an atlas).
+		/// Instantiates a prefab using a successfully completed, active <see cref="GameObject"/> lease owned by
+		/// this package. The returned instance handle has independent ownership and must be disposed.
 		/// </summary>
-		IAllAssetsHandle<TAsset> LoadAllAssetsAsync<TAsset>(string location, string bucket = null, string tag = null, string owner = null, CancellationToken cancellationToken = default) where TAsset : UnityEngine.Object;
-
-		/// <summary>
-		/// Loads a raw file synchronously. Returns null on error.
-		/// Raw files are not compressed and suitable for JSON, text files, binary data, etc.
-		/// </summary>
-		IRawFileHandle LoadRawFileSync(string location, string bucket = null, string tag = null, string owner = null);
-
-		/// <summary>
-		/// Loads a raw file asynchronously.
-		/// Raw files are not compressed and suitable for JSON, text files, binary data, etc.
-		/// </summary>
-		IRawFileHandle LoadRawFileAsync(string location, string bucket = null, string tag = null, string owner = null, CancellationToken cancellationToken = default);
-
-		/// <summary>
-		/// Instantiates a prefab synchronously using a previously loaded handle. Returns null on error.
-		/// </summary>
-		GameObject InstantiateSync(IAssetHandle<GameObject> handle, Transform parent = null, bool worldPositionStays = false);
-
-		/// <summary>
-		/// Instantiates a prefab asynchronously using a previously loaded handle.
-		/// </summary>
+		/// <exception cref="ArgumentException">
+		/// The handle is null, disposed, not an AssetManagement caller lease, or belongs to another package.
+		/// </exception>
+		/// <exception cref="InvalidOperationException">
+		/// The prefab load has not completed successfully or has no asset value.
+		/// </exception>
 		IInstantiateHandle InstantiateAsync(IAssetHandle<GameObject> handle, Transform parent = null, bool worldPositionStays = false, bool setActive = true);
 
-		// --- Scene Loading ---
-		ISceneHandle LoadSceneSync(string sceneLocation, LoadSceneMode loadMode = LoadSceneMode.Single, string bucket = null);
-		ISceneHandle LoadSceneAsync(string sceneLocation, LoadSceneMode loadMode, SceneActivationMode activationMode, int priority = 100, string bucket = null);
-		ISceneHandle LoadSceneAsync(string sceneLocation, LoadSceneMode loadMode = LoadSceneMode.Single, bool activateOnLoad = true, int priority = 100, string bucket = null);
-		UniTask UnloadSceneAsync(ISceneHandle sceneHandle);
+		// --- Query ---
+		/// <summary>
+		/// Returns true if an asset of type <typeparamref name="TAsset"/> at <paramref name="location"/> is
+		/// currently held by the cache (either retained/in-use or pooled idle). Does not trigger a load and
+		/// does not affect reference counts or LRU ordering.
+		/// </summary>
+		bool IsAssetCached<TAsset>(string location) where TAsset : UnityEngine.Object;
 
-		// --- Maintenance ---
-		UniTask UnloadUnusedAssetsAsync();
+		/// <summary>
+		/// Overrides the cache's idle (RefCount == 0) memory budget at runtime, in bytes. Pass a positive
+		/// value to set an explicit budget, or 0 to restore the automatic platform-aware default. Immediately
+		/// evicts idle handles to honor the new budget. Lets a host project tune memory pressure on the fly
+		/// (e.g. tighten before a heavy scene) without modifying the asset module.
+		/// </summary>
+		void SetCacheIdleMemoryBudget(long maxIdleBytes);
+
+		/// <summary>
+		/// Evicts idle (RefCount == 0) cached handles matched by <paramref name="policy"/>, disposing each and
+		/// returning how many were evicted. Active (in-use) handles are never touched.
+		/// The package carries no timer or frame driver; callers own the retention schedule and rule composition.
+		/// </summary>
+		int TrimIdleCache(AssetCacheRetentionPolicy policy);
 
 		/// <summary>
 		/// Forces the evaluation and clearing of handles associated with a specific logical bucket group. 
@@ -161,7 +158,103 @@ namespace CycloneGames.AssetManagement.Runtime
 		void ClearBucketsByPrefix(string bucketPrefix);
 	}
 
-	public interface IDownloader
+	/// <summary>
+	/// Optional capability for scheduling Unity's process-wide unused-asset collection pass.
+	/// Separate from <see cref="IAssetPackage"/>: the operation is not package-local, and provider
+	/// adapters cannot implement equivalent semantics.
+	/// </summary>
+	public interface IUnityUnusedAssetCollector
+	{
+		/// <summary>
+		/// Clears idle framework ownership and awaits Unity's process-wide unused-asset collection pass.
+		/// The call is main-thread-affine and can cause a visible frame hitch. Keep framework leases alive
+		/// for every asset that must remain owned; a bare reference on the managed execution stack is not
+		/// an ownership guarantee for this operation.
+		/// </summary>
+		UniTask CollectUnusedUnityAssetsAsync();
+	}
+
+	/// <summary>
+	/// Optional capability for reclaiming every provider-owned asset in a package, including assets the provider
+	/// still considers in use. Implementations release framework-owned leases before asking the provider to unload,
+	/// and can optionally wait for the engine's native unload pass to reach a terminal state.
+	/// </summary>
+	public interface IAssetProviderMemoryReclamation
+	{
+		/// <summary>
+		/// Releases every provider-owned asset in this package.
+		/// </summary>
+		/// <param name="waitForEngineUnload">
+		/// True to additionally wait for the engine's native unused-asset unload pass to complete. This makes
+		/// memory reclamation deterministic and observable, at the cost of a potentially long wait. Keep false
+		/// on frame-time sensitive paths.
+		/// </param>
+		/// <remarks>
+		/// Main-thread-affine and not cancellable once provider mutation starts; cancellation is honored only
+		/// before the provider operation begins.
+		/// </remarks>
+		UniTask UnloadAllProviderAssetsAsync(
+			bool waitForEngineUnload,
+			CancellationToken cancellationToken = default);
+	}
+
+	/// <summary>Optional synchronous asset operations. Addressables does not implement this capability.</summary>
+	public interface IAssetSyncOperations
+	{
+		IAssetHandle<TAsset> LoadAssetSync<TAsset>(string location, string bucket = null, string tag = null, string owner = null) where TAsset : UnityEngine.Object;
+	}
+
+	/// <summary>Optional asynchronous bulk/sub-asset loading capability.</summary>
+	public interface IAssetBulkLoader
+	{
+		IAllAssetsHandle<TAsset> LoadAllAssetsAsync<TAsset>(string location, string bucket = null, string tag = null, string owner = null, CancellationToken cancellationToken = default) where TAsset : UnityEngine.Object;
+	}
+
+	/// <summary>Optional raw-file loading capability for provider-owned file content.</summary>
+	public interface IAssetRawFileLoader
+	{
+		IRawFileHandle LoadRawFileSync(string location, string bucket = null, string tag = null, string owner = null);
+		IRawFileHandle LoadRawFileAsync(string location, string bucket = null, string tag = null, string owner = null, CancellationToken cancellationToken = default);
+	}
+
+	/// <summary>Optional asynchronous scene loading and unloading capability.</summary>
+	public interface IAssetSceneLoader
+	{
+		/// <summary>
+		/// Loads a scene with explicit Unity load parameters. Any local 2D or 3D physics world is owned
+		/// by the loaded scene and follows that scene's lifetime.
+		/// </summary>
+		ISceneHandle LoadSceneAsync(string sceneLocation, LoadSceneParameters loadParameters, SceneActivationMode activationMode, int priority = 100, string bucket = null);
+		ISceneHandle LoadSceneAsync(string sceneLocation, LoadSceneMode loadMode = LoadSceneMode.Single, bool activateOnLoad = true, int priority = 100, string bucket = null);
+		/// <summary>
+		/// Unloads an owned scene. Cancellation is accepted only before provider mutation starts; once started,
+		/// the operation completes deterministically so provider and wrapper ownership cannot diverge.
+		/// </summary>
+		UniTask UnloadSceneAsync(ISceneHandle sceneHandle, CancellationToken cancellationToken = default);
+	}
+
+	/// <summary>
+	/// Optional low-frequency provider catalog query contract. Querying by catalog tag may scan provider manifests and
+	/// allocate inside provider SDKs, so callers must keep this out of gameplay/UI hot paths and use explicit lifetime
+	/// buckets for loads. Catalog tags are provider-side labels, not the runtime cache metadata tags passed to load APIs.
+	/// </summary>
+	public interface IAssetCatalogQuery
+	{
+		/// <summary>
+		/// Fills <paramref name="results"/> with provider-normalized load locations for assets that match
+		/// <paramref name="tag"/>. Implementations clear the list before adding results.
+		/// </summary>
+		UniTask<bool> TryGetAssetLocationsByTagAsync(string tag, List<string> results, CancellationToken cancellationToken = default);
+	}
+
+	/// <summary>
+	/// Caller-owned provider download operation. The creator transfers one ownership lease to the caller.
+	/// <see cref="Dispose"/> is idempotent and retires wrapper ownership exactly once. A provider operation that
+	/// supports abort may be stopped immediately; otherwise the adapter retains internal ownership until that
+	/// operation reaches a terminal state. Provider handles with an explicit release contract are released only at
+	/// that provider-safe terminal point.
+	/// </summary>
+	public interface IDownloader : IDisposable
 	{
 		bool IsDone { get; }
 		bool Succeed { get; }
@@ -172,35 +265,80 @@ namespace CycloneGames.AssetManagement.Runtime
 		long CurrentDownloadBytes { get; }
 		string Error { get; }
 
-		void Begin();
+		/// <summary>
+		/// Resolves the bounded download plan and total byte estimate without starting payload writes.
+		/// Must be idempotent. Normal completion means provider preparation succeeded; provider failures fault
+		/// the task and caller cancellation throws <see cref="OperationCanceledException"/>. Totals are
+		/// authoritative only after this task succeeds.
+		/// </summary>
+		UniTask PrepareAsync(CancellationToken cancellationToken = default);
+
+		/// <summary>
+		/// Starts or joins the memoized provider download. Normal completion means the provider download
+		/// succeeded. Provider failures fault the task. The passed token cancels only this caller's wait.
+		/// <see cref="Cancel"/> or <see cref="Dispose"/> cancels every caller-visible wait for this downloader;
+		/// physical provider abort is capability-specific. An adapter whose provider cannot abort must drain the
+		/// operation to a terminal state before releasing it. Either form of caller-visible cancellation causes
+		/// <see cref="OperationCanceledException"/> for the affected wait.
+		/// <see cref="Succeed"/> and <see cref="Error"/> are retained for state inspection and diagnostics,
+		/// not as substitutes for awaiting this method.
+		/// </summary>
 		UniTask StartAsync(CancellationToken cancellationToken = default);
-		void Pause();
-		void Resume();
 		void Cancel();
-		void Combine(IDownloader other);
 	}
 
+	/// <summary>
+	/// Provider-independent operation state. <see cref="Task"/> is the authoritative terminal contract;
+	/// progress and diagnostic text are observational only.
+	/// </summary>
 	public interface IOperation
 	{
+		/// <summary>
+		/// True after this caller-visible operation reaches its first terminal state.
+		/// </summary>
 		bool IsDone { get; }
 		float Progress { get; }
+		/// <summary>
+		/// Provider diagnostic text. This value may be empty or become available only after completion;
+		/// callers must await <see cref="Task"/> to determine whether the operation succeeded.
+		/// </summary>
 		string Error { get; }
+		/// <summary>
+		/// Memoized completion task that is safe for repeated and concurrent awaiters. Its first terminal
+		/// transition is stable: provider and adapter success completes it, a real provider or adapter failure
+		/// faults it, and cancellation cancels it. Cancellation includes the caller's load-wait token, provider
+		/// cancellation, or authoritative package/module retirement while the operation is pending.
+		/// </summary>
+		/// <remarks>
+		/// Caller-visible cancellation does not imply that a provider can physically abort its operation.
+		/// The owning package retains and observes any remaining provider/adapter tail, and successful package
+		/// destruction does not complete until those tails drain. <see cref="Error"/> remains diagnostic context
+		/// and is never a substitute for observing this task.
+		/// </remarks>
 		UniTask Task { get; }
 		void WaitForAsyncComplete();
 	}
 
-	public interface IAssetHandle<out TAsset> : IOperation, IReferenceCounted where TAsset : UnityEngine.Object
+	/// <summary>
+	/// Caller-owned asset lease. Package-created leases clear their backend ownership only after
+	/// disposal succeeds; if disposal throws, call Dispose again on the main thread to retry.
+	/// </summary>
+	public interface IAssetHandle<out TAsset> : IOperation, IDisposable where TAsset : UnityEngine.Object
 	{
 		TAsset Asset { get; }
 		UnityEngine.Object AssetObject { get; }
 	}
 
-	public interface IAllAssetsHandle<out TAsset> : IOperation, IReferenceCounted where TAsset : UnityEngine.Object
+	/// <summary>
+	/// Caller-owned bulk-asset lease with the same retryable disposal contract as
+	/// <see cref="IAssetHandle{TAsset}"/>.
+	/// </summary>
+	public interface IAllAssetsHandle<out TAsset> : IOperation, IDisposable where TAsset : UnityEngine.Object
 	{
 		IReadOnlyList<TAsset> Assets { get; }
 	}
 
-	public interface IInstantiateHandle : IOperation, IReferenceCounted
+	public interface IInstantiateHandle : IOperation, IDisposable
 	{
 		GameObject Instance { get; }
 	}
@@ -232,15 +370,24 @@ namespace CycloneGames.AssetManagement.Runtime
 		Activated = 2,
 	}
 
-	public interface ISceneHandle : IOperation, IReferenceCounted
+	/// <summary>
+	/// Provider-normalized scene operation and ownership handle.
+	/// For <see cref="SceneActivationMode.Manual"/>, call <see cref="ActivateAsync"/> to resume and await
+	/// activation. The inherited <see cref="IOperation.Task"/> is the provider load completion and is not a
+	/// provider-neutral pre-activation readiness barrier; some providers keep it pending until activation resumes.
+	/// Scene handles never enter asset idle-cache retention. Cache trim and low-memory maintenance do not unload scenes.
+	/// <see cref="IDisposable.Dispose"/> must be idempotent and releases only the caller's wrapper ownership;
+	/// authoritative scene lifetime remains with <see cref="IAssetSceneLoader.UnloadSceneAsync"/> and package shutdown.
+	/// </summary>
+	public interface ISceneHandle : IOperation, IDisposable
 	{
 		string ScenePath { get; }
 		Scene Scene { get; }
 		/// <summary>
 		/// Scene handles use explicit unload semantics.
-		/// Calling <see cref="IReferenceCounted.Release"/> / <see cref="IDisposable.Dispose"/> only releases
+		/// Calling <see cref="IDisposable.Dispose"/> only releases
 		/// the caller's ownership of the handle wrapper; it does NOT unload the scene itself.
-		/// Use <see cref="IAssetPackage.UnloadSceneAsync"/> as the single cross-provider unload path.
+		/// Use <see cref="IAssetSceneLoader.UnloadSceneAsync"/> as the scene-capability unload path.
 		/// </summary>
 		SceneActivationMode ActivationMode { get; }
 		/// <summary>
@@ -261,6 +408,7 @@ namespace CycloneGames.AssetManagement.Runtime
 		/// Implementations may internally resume suspended loading rather than calling a distinct provider API
 		/// literally named "activate".
 		/// If manual activation is unsupported, implementations should throw <see cref="NotSupportedException"/>.
+		/// Cancellation is accepted only before activation starts; an in-progress activation completes deterministically.
 		/// </summary>
 		UniTask ActivateAsync(CancellationToken cancellationToken = default);
 	}
@@ -268,8 +416,9 @@ namespace CycloneGames.AssetManagement.Runtime
 	/// <summary>
 	/// Handle for raw file operations. Raw files are non-compressed files suitable for JSON, text, binary data, etc.
 	/// Thread-safe for read operations after loading completes. Dispose must be called on the main thread.
+	/// Package-created leases retain their backend ownership if disposal throws; retry Dispose on the main thread.
 	/// </summary>
-	public interface IRawFileHandle : IOperation, IReferenceCounted
+	public interface IRawFileHandle : IOperation, IDisposable
 	{
 		/// <summary>
 		/// Gets the file path. Returns empty string if not available.
@@ -283,28 +432,85 @@ namespace CycloneGames.AssetManagement.Runtime
 		string ReadText();
 
 		/// <summary>
-		/// Reads the file contents as bytes. Returns null if not loaded or error occurred.
+		/// Reads the file contents as a caller-owned byte-array snapshot. Returns null if not loaded
+		/// or an error occurred. A successful call must not expose provider-owned mutable storage;
+		/// the caller may retain or mutate the returned array after this handle is disposed.
 		/// Thread-safe: Can be called from any thread after IsDone is true.
 		/// </summary>
 		byte[] ReadBytes();
 	}
 
 	/// <summary>
-	/// Global configuration for the module.
+	/// Optional capability for ensuring the provider bundle file that backs a location is present locally, and
+	/// for obtaining its provider-local file path. This is the sanctioned boundary for handing content to native
+	/// consumers (native video players, native plugins, external file IO) without copying bytes through managed
+	/// memory. Path availability is provider and file-system specific: sandbox, cache, and editor file systems
+	/// expose a real path, while a streaming/web file system may report an error instead of a path. The returned
+	/// handle is a one-shot IO operation and is not cached.
+	/// </summary>
+	public interface IAssetBundleFileProvisioner
+	{
+		/// <summary>
+		/// Starts (or joins) the provider's ensure-file operation for <paramref name="location"/>. The operation
+		/// is memoized by the returned handle: repeated callers of the same handle share one provider operation.
+		/// Cancellation is accepted only before provider mutation starts; once started, the operation completes
+		/// deterministically and the owning package drains it before destruction. Dispose must be called on the
+		/// main thread.
+		/// </summary>
+		IBundleFileProvisionHandle EnsureBundleFileAsync(string location, CancellationToken cancellationToken = default);
+	}
+
+	/// <summary>
+	/// Caller-owned one-shot lease for a provider bundle-file provision operation. <see cref="IOperation.Task"/>
+	/// is the authoritative terminal contract; diagnostic members are observational. Paths and flags are only
+	/// meaningful after the task succeeds. Dispose is idempotent and retires wrapper ownership exactly once.
+	/// </summary>
+	public interface IBundleFileProvisionHandle : IOperation, IDisposable
+	{
+		/// <summary>
+		/// The provider-local path of the ensured bundle file. Empty string until the task succeeds or when the
+		/// provider file system cannot expose a path. Treat as read-only: the caller must not move, rename, or
+		/// delete the file; the provider owns the storage.
+		/// </summary>
+		string BundleFilePath { get; }
+
+		/// <summary>
+		/// Provider-reported bundle encryption state. A true value means the on-disk bytes are provider-encrypted
+		/// and only the provider runtime can interpret them.
+		/// </summary>
+		bool IsEncrypted { get; }
+
+		/// <summary>
+		/// Provider-reported bundle type identifier. Interpretation is provider-specific; it exists so products
+		/// can route the file to the correct native consumer without string parsing.
+		/// </summary>
+		int BundleType { get; }
+	}
+
+	/// <summary>
+	/// Provider-independent module configuration.
 	/// </summary>
 	public readonly struct AssetManagementOptions
 	{
-		public readonly long OperationSystemMaxTimeSliceMs;
-		public readonly int BundleLoadingMaxConcurrency;
-		public readonly ILogger Logger;
-		public readonly bool EnableHandleTracking;
+		private readonly byte _configured;
 
-		public AssetManagementOptions(long operationSystemMaxTimeSliceMs = 16, int bundleLoadingMaxConcurrency = int.MaxValue, ILogger logger = null, bool enableHandleTracking = true)
+		/// <summary>
+		/// Module-wide default cache tuning applied to every package. A default value resolves to the conservative
+		/// platform fallback; a per-package <see cref="AssetPackageInitOptions.CacheTuningOverride"/> takes precedence.
+		/// </summary>
+		public readonly AssetCacheTuning DefaultCacheTuning;
+
+		public AssetManagementOptions(AssetCacheTuning defaultCacheTuning = default)
 		{
-			OperationSystemMaxTimeSliceMs = operationSystemMaxTimeSliceMs < 10 ? 10 : operationSystemMaxTimeSliceMs;
-			BundleLoadingMaxConcurrency = bundleLoadingMaxConcurrency;
-			Logger = logger;
-			EnableHandleTracking = enableHandleTracking;
+			_configured = 1;
+			DefaultCacheTuning = defaultCacheTuning.Normalized();
+		}
+
+		public static AssetManagementOptions Default => new AssetManagementOptions();
+
+		internal AssetManagementOptions Normalized()
+		{
+			return _configured == 0 ? Default : this;
 		}
 	}
 
@@ -313,40 +519,20 @@ namespace CycloneGames.AssetManagement.Runtime
 	/// </summary>
 	public readonly struct AssetPackageInitOptions
 	{
-		public readonly AssetPlayMode PlayMode;
 		public readonly object ProviderOptions;
-		public readonly int? BundleLoadingMaxConcurrencyOverride;
 
-		public AssetPackageInitOptions(AssetPlayMode playMode, object providerOptions, int? bundleLoadingMaxConcurrencyOverride = null)
+		/// <summary>
+		/// Optional package-specific cache tuning. Null uses the module default.
+		/// </summary>
+		public readonly AssetCacheTuning? CacheTuningOverride;
+
+		public AssetPackageInitOptions(
+			object providerOptions = null,
+			AssetCacheTuning? cacheTuningOverride = null)
 		{
-			PlayMode = playMode;
 			ProviderOptions = providerOptions;
-			BundleLoadingMaxConcurrencyOverride = bundleLoadingMaxConcurrencyOverride;
+			CacheTuningOverride = cacheTuningOverride;
 		}
 	}
 
-	public enum AssetPlayMode
-	{
-		EditorSimulate,
-		Offline,
-		Host,
-		Web,
-		Custom
-	}
-
-	public enum ClearCacheMode
-	{
-		/// <summary>
-		/// Clear all cached files, including asset bundles and manifests.
-		/// </summary>
-		All,
-		/// <summary>
-		/// Clear only the cached files that are no longer in use by the current manifest.
-		/// </summary>
-		Unused,
-		/// <summary>
-		/// Clear cached files associated with specific tags. The tags should be provided via the `clearParam`.
-		/// </summary>
-		ByTags
-	}
 }

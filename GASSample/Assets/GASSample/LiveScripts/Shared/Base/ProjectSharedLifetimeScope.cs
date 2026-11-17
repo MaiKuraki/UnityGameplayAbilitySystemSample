@@ -4,7 +4,6 @@ using UnityEngine;
 using CycloneGames.AssetManagement.Runtime;
 using CycloneGames.Factory.Runtime;
 using CycloneGames.UIFramework.Runtime;
-using CycloneGames.Service.Runtime;
 using GASSample.APIGateway;
 using GASSample.AssetManagement;
 using GASSample.UI;
@@ -42,8 +41,6 @@ namespace GASSample
             base.Configure(builder);
 
             builder.Register<ISceneManagementAPIGateway, SceneManagementAPIGateway>(Lifetime.Singleton);
-            builder.Register<IMainCameraService, MainCameraService>(Lifetime.Singleton);
-            builder.Register<IGraphicsSettingService, GraphicsSettingService>(Lifetime.Singleton);
 
             builder.RegisterComponentInNewPrefab(assetResolver, Lifetime.Singleton).UnderTransform(transform);
             builder.RegisterBuildCallback(resolver =>
@@ -64,7 +61,7 @@ namespace GASSample
             public void Start()
             {
 
-                // CLogger.LogInfo("[ProjectSharedLifetimeScope] Initiated");
+                // LogChannel.Create("GASSample").Info("[ProjectSharedLifetimeScope] Initiated");
             }
         }
     }

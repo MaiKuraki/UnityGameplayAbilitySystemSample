@@ -1,48 +1,41 @@
+schemaVersion: 1
+schemaFingerprint: 40628b15b7039e25
 playerSlots:
 - playerId: 0
+  # 单人同时配对键鼠与手柄且不声明控制方案：所有 binding 常驻，切换设备无需重新 join。
+  # deviceSwitchDebounceMs 抑制快速交替设备时的图标抖动。
+  pairAllMatchingDevices: true
+  maxDevicesPerLayout: 1
+  deviceSwitchDebounceMs: 120
   contexts:
   - name: Gameplay
     actionMap: PlayerActions
     bindings:
+    - type: button
+      action: Attack
+      deviceBindings:
+      - "<Mouse>/leftButton"
+      - "<Gamepad>/buttonSouth"
+      updateMode: eventDriven
+      longPressMs: 0
+      longPressValueThreshold: 0.5
     - type: vector2
       action: Move
       deviceBindings:
       - "<Gamepad>/leftStick"
-      - "2DVector(mode=2,up=<Keyboard>/w,down=<Keyboard>/s,left=<Keyboard>/a,right=<Keyboard>/d)"
-      - "<Mouse>/delta"
+      compositeBindings:
+      - name: 2DVector
+        parameters: mode=2
+        parts:
+        - name: up
+          path: "<Keyboard>/w"
+        - name: down
+          path: "<Keyboard>/s"
+        - name: left
+          path: "<Keyboard>/a"
+        - name: right
+          path: "<Keyboard>/d"
+      updateMode: polling
       longPressMs: 0
-      longPressValueThreshold: 0
-    - type: button
-      action: Confirm
-      deviceBindings:
-      - "<Gamepad>/buttonSouth"
-      - "<Keyboard>/space"
-      longPressMs: 500
-      longPressValueThreshold: 0
-- playerId: 1
-  contexts:
-  - name: Gameplay
-    actionMap: PlayerActions
-    bindings:
-    - type: vector2
-      action: Move
-      deviceBindings:
-      - "<Gamepad>/leftStick"
-      - "2DVector(mode=2,up=<Keyboard>/w,down=<Keyboard>/s,left=<Keyboard>/a,right=<Keyboard>/d)"
-      longPressMs: 0
-      longPressValueThreshold: 0
-    - type: button
-      action: Confirm
-      deviceBindings:
-      - "<Gamepad>/buttonSouth"
-      - "<Keyboard>/space"
-      longPressMs: 500
-      longPressValueThreshold: 0
-joinAction:
-  type: button
-  action: JoinGame
-  deviceBindings:
-  - "<Keyboard>/enter"
-  - "<Gamepad>/start"
-  longPressMs: 0
-  longPressValueThreshold: 0
+      longPressValueThreshold: 0.5
+joinAction: null

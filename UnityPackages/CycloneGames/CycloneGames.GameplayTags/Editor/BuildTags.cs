@@ -1,81 +1,163 @@
-using System.Collections.Generic;
+using System;
 using System.IO;
-using UnityEditor;
+using System.Text;
+using CycloneGames.GameplayTags.Core;
 using UnityEditor.Build;
 using UnityEditor.Build.Reporting;
-using CycloneGames.GameplayTags.Core;
 
 namespace CycloneGames.GameplayTags.Unity.Editor
 {
-   public class BuildTags : IPreprocessBuildWithReport, IPostprocessBuildWithReport
+   /// <summary>
+   /// Publishes the runtime gameplay-tag catalog for the duration of a Player build.
+   /// </summary>
+   public sealed class BuildTags : IPreprocessBuildWithReport, IPostprocessBuildWithReport
    {
-      public int callbackOrder => 0;
+      public const string RecoveryStateDirectoryRelativePath =
+         ".buildpipeline/transactions/gameplay-tags";
 
-      private const string GeneratedAssetPath = "Assets/Resources/GameplayTags.bytes";
+      private static readonly UTF8Encoding s_StrictUtf8 = new(false, true);
+      private static GameplayTagsBuildAssetTransaction s_ActiveTransaction;
+
+      public int callbackOrder => 0;
 
       public void OnPreprocessBuild(BuildReport report)
       {
-         string resourcesPath = Path.Combine(Directory.GetCurrentDirectory(), "Assets", "Resources");
-         if (!Directory.Exists(resourcesPath))
+         if (s_ActiveTransaction != null)
          {
-            Directory.CreateDirectory(resourcesPath);
+            throw new BuildFailedException(
+               "A gameplay-tag build asset transaction is already active in this Unity process.");
          }
 
-         GameplayTagManager.ReloadTags();
+         GameplayTagManagerEditorInitialization.ConfigureEditorSources();
+         GameplayTagManager.Reload();
 
-         string filePath = Path.Combine(resourcesPath, "GameplayTags.bytes");
-
-         // Collect leaf tags
-         List<string> leafTags = new();
-         foreach (GameplayTag tag in GameplayTagManager.GetAllTags())
-         {
-            if (tag.IsLeaf)
-               leafTags.Add(tag.Name);
-         }
-
-         using (FileStream file = File.Create(filePath))
-         {
-            using (BinaryWriter writer = new(file))
-            {
-               // v1 format: [byte version] [int tagCount] [string × tagCount] [uint crc32]
-               writer.Write(BuildTagBinaryFormat.CurrentVersion);
-               writer.Write(leafTags.Count);
-
-               long dataStart = file.Position;
-               foreach (string tagName in leafTags)
-               {
-                  writer.Write(tagName);
-               }
-               long dataEnd = file.Position;
-
-               // Compute CRC32 over the tag data region
-               writer.Flush();
-               file.Position = dataStart;
-               byte[] tagData = new byte[dataEnd - dataStart];
-               file.Read(tagData, 0, tagData.Length);
-               uint crc = BuildTagBinaryFormat.ComputeCrc32(tagData, 0, tagData.Length);
-
-               file.Position = dataEnd;
-               writer.Write(crc);
-            }
-         }
-
-         AssetDatabase.ImportAsset(GeneratedAssetPath, ImportAssetOptions.ForceSynchronousImport);
+         string projectRoot = GameplayTagsBuildAssetTransaction.GetCurrentProjectRoot();
+         byte[] data = CreateBuildData();
+         s_ActiveTransaction = GameplayTagsBuildAssetTransaction.Begin(
+            projectRoot,
+            data,
+            synchronizeAssetDatabase: true);
       }
 
       public void OnPostprocessBuild(BuildReport report)
       {
-         // Clean up generated build-time asset to avoid polluting version control
-         if (File.Exists(GeneratedAssetPath))
+         GameplayTagsBuildAssetTransaction transaction = s_ActiveTransaction;
+         s_ActiveTransaction = null;
+         if (transaction == null)
          {
-            AssetDatabase.DeleteAsset(GeneratedAssetPath);
+            string projectRoot = GameplayTagsBuildAssetTransaction.GetCurrentProjectRoot();
+            if (GameplayTagsBuildAssetTransaction.HasPendingState(projectRoot))
+            {
+               throw new BuildFailedException(
+                  "Gameplay-tag build state is pending, but the in-process transaction owner was lost. " +
+                  "Run BuildTags.Recover(projectRoot) before starting another build.");
+            }
+            return;
          }
 
-         string metaPath = GeneratedAssetPath + ".meta";
-         if (File.Exists(metaPath))
+         try
          {
-            File.Delete(metaPath);
+            transaction.Complete();
          }
+         finally
+         {
+            transaction.Dispose();
+         }
+      }
+
+      /// <summary>
+      /// Explicitly recovers a pending gameplay-tag build asset transaction.
+      /// This method is intentionally dependency-free so a build orchestrator can invoke it through reflection.
+      /// </summary>
+      public static void Recover(string projectRoot)
+      {
+         GameplayTagsBuildAssetTransaction.Recover(
+            projectRoot,
+            synchronizeAssetDatabase: true);
+      }
+
+      internal static byte[] CreateBuildData()
+      {
+         GameplayTag[] tags = GameplayTagManager.Current.CreateAllTagsArray();
+         if (tags.Length == 0)
+            throw new BuildFailedException("Gameplay tag build data must contain at least one definition.");
+
+         int dataSize = CalculateBuildDataSize(tags);
+         byte[] data = new byte[dataSize];
+         using MemoryStream stream = new(data, 0, data.Length, writable: true, publiclyVisible: true);
+         using BinaryWriter writer = new(stream, s_StrictUtf8, true);
+         writer.Write(BuildTagBinaryFormat.FileSignature);
+         writer.Write(tags.Length);
+         for (int i = 0; i < tags.Length; i++)
+         {
+            GameplayTag tag = tags[i];
+            BuildTagBinaryFormat.ValidateEntry(tag.Name, tag.Description, tag.Flags);
+            writer.Write(tag.Name);
+            writer.Write(tag.Description ?? string.Empty);
+            writer.Write((int)tag.Flags);
+         }
+         writer.Flush();
+
+         if (!stream.TryGetBuffer(out ArraySegment<byte> contentBuffer))
+            throw new InvalidOperationException("Gameplay tag build buffer is not accessible.");
+         int contentLength = checked((int)stream.Position);
+         ulong contentHash = BuildTagBinaryFormat.ComputeContentHash64(
+            contentBuffer.Array,
+            contentBuffer.Offset,
+            contentLength);
+         writer.Write(contentHash);
+         writer.Flush();
+         if (stream.Position != dataSize)
+            throw new InvalidOperationException("Gameplay tag build buffer did not match its precomputed size.");
+         return data;
+      }
+
+      internal static int CalculateBuildDataSize(ReadOnlySpan<GameplayTag> tags)
+      {
+         long size = sizeof(uint) + sizeof(int) + BuildTagBinaryFormat.ContentHashSize;
+         try
+         {
+            for (int i = 0; i < tags.Length; i++)
+            {
+               GameplayTag tag = tags[i];
+               BuildTagBinaryFormat.ValidateEntry(tag.Name, tag.Description, tag.Flags);
+               int nameByteCount = s_StrictUtf8.GetByteCount(tag.Name);
+               int descriptionByteCount = s_StrictUtf8.GetByteCount(tag.Description ?? string.Empty);
+               size += Get7BitEncodedIntSize(nameByteCount) + nameByteCount;
+               size += Get7BitEncodedIntSize(descriptionByteCount) + descriptionByteCount;
+               size += sizeof(int);
+               ValidateBuildDataSize(size);
+            }
+         }
+         catch (EncoderFallbackException exception)
+         {
+            throw new BuildFailedException(
+               $"Gameplay tag build text contains invalid UTF-16 data: {exception.Message}");
+         }
+
+         ValidateBuildDataSize(size);
+         return checked((int)size);
+      }
+
+      internal static void ValidateBuildDataSize(long size)
+      {
+         if (size <= 0 || size > BuildTagBinaryFormat.MaxDataSizeBytes)
+         {
+            throw new BuildFailedException(
+               $"Generated gameplay tag data exceeds the {BuildTagBinaryFormat.MaxDataSizeBytes}-byte build budget.");
+         }
+      }
+
+      internal static int Get7BitEncodedIntSize(int value)
+      {
+         if (value < 0)
+            throw new ArgumentOutOfRangeException(nameof(value));
+
+         int size = 1;
+         uint remaining = (uint)value;
+         while ((remaining >>= 7) != 0)
+            size++;
+         return size;
       }
    }
 }

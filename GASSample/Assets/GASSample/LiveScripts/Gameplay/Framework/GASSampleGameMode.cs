@@ -1,25 +1,16 @@
-using System.Threading;
-using CycloneGames.Factory.Runtime;
 using CycloneGames.GameplayFramework.Runtime;
-using Cysharp.Threading.Tasks;
-using VContainer;
 
 namespace GASSample.Gameplay
 {
+    /// <summary>
+    /// The World is sealed by the framework: it is created and owned by <see cref="GameInstance"/>.
+    /// The sample only extends the GameMode, which the World instantiates from WorldSettings.
+    /// </summary>
     public class GASSampleGameMode : GameMode
     {
-        private const string DEBUG_FLAG = "[GASSampleGameMode]";
-
-        [Inject]
-        public override void Initialize(IUnityObjectSpawner objectSpawner, IWorldSettings worldSettings)
+        public override void Initialize(World targetWorld, IGameSession session = null)
         {
-            base.Initialize(objectSpawner, worldSettings);
-
-        }
-
-        public override UniTask LaunchGameModeAsync(CancellationToken cancellationToken = default)
-        {
-            return base.LaunchGameModeAsync(cancellationToken);
+            base.Initialize(targetWorld, session);
         }
     }
 }

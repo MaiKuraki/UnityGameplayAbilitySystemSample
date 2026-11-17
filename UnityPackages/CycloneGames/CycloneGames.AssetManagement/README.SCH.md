@@ -1,776 +1,597 @@
 # CycloneGames.AssetManagement
 
-[English](./README.md) | 简体中文
+[English](README.md) | 简体中文
 
-一个为 Unity 设计的 DI 优先、接口驱动的统一资源管理抽象层。它将游戏逻辑与底层资源系统（YooAsset、Addressables 或 Resources）解耦，让您编写更清晰、更易移植的高性能代码。
-
-基于 **W-TinyLFU** 架构，它提供了确定性的内存管理、细粒度的资源追踪（通过 Tag/Owner 元数据），并配备了强大的可视化编辑器调试工具（缓存调试器与句柄泄漏追踪器），助您彻底告别内存泄漏。
+CycloneGames.AssetManagement 是一个 provider-neutral 的 Unity 资产运行时，提供显式 package 组合、调用方持有的 handle、有界内存缓存、内容校验、诊断，以及可选的 provider 桥接。长期会话和持续负载下所有权与失败行为保持可预测。应用代码不绑定到某个资产 SDK 或 DI 容器。
 
 ## 目录
 
-- [环境要求](#环境要求)
-- [安装](#安装)
-- [快速开始](#快速开始)
+- [概述](#概述)
+- [架构](#架构)
+- [快速上手](#快速上手)
 - [核心概念](#核心概念)
-- [提供器对比](#提供器对比)
-- [使用示例](#使用示例)
-  - [YooAsset 提供器](#yooasset-提供器)
-  - [Addressables 提供器](#addressables-提供器)
-  - [Resources 提供器](#resources-提供器)
-- [热更新工作流](#热更新工作流)
-- [高级功能](#高级功能)
-- [资源引用 (AssetRef / SceneRef)](#资源引用-assetref--sceneref)
-- [API 参考](#api-参考)
+- [使用指南](#使用指南)
+- [进阶主题](#进阶主题)
+- [常见场景](#常见场景)
+- [性能与内存](#性能与内存)
+- [故障排查](#故障排查)
 
----
+## 概述
 
-## 环境要求
+模块处理 module 和 package 生命周期；asset/sub-asset/raw-file/instance/scene handle；调用方 lease 所有权；package 本地 active 和 idle 内存缓存；逻辑 bucket/tag/owner metadata；窄而专一的 provider 维护与 downloader 原语；存储容量预检；有界且带版本的内容信任 manifest 与校验；有界运行时 telemetry；以及可选的 Addressables、YooAsset、Navigathena 与 VContainer 桥接。
 
-| 依赖项       | 必需    | 说明                                         |
-| ------------ | ------- | -------------------------------------------- |
-| Unity        | 2022.3+ | 最低版本要求                                 |
-| UniTask      | 是      | `com.cysharp.unitask` - 异步支持             |
-| YooAsset     | 可选    | `com.tuyoogame.yooasset` - 推荐的提供器      |
-| Addressables | 可选    | `com.unity.addressables` - 备选提供器        |
-| VContainer   | 可选    | `jp.hadashikick.vcontainer` - DI 集成        |
-| R3           | 可选    | `com.cysharp.r3` - 用于 `IPatchService` 事件 |
+Provider adapter 在共享契约上归一化并暴露可选能力。资产导入规则、bundle 布局、Addressables group、YooAsset collection 规则、CDN 拓扑、认证、授权、DRM、存档、平台认证与发布运营归产品层负责。
 
-## 安装
+### 主要特性
 
-1. 将包导入您的 Unity 项目
-2. 模块会通过程序集定义引用自动检测可用的提供器
-3. 无需手动配置脚本定义符号
+- **Provider-neutral 核心**：`IAssetModule` 与 `IAssetPackage`，提供调用方持有、只 Dispose 一次的 handle。
+- **有界 SLRU 缓存**：package 本地的 Active、Probation、Protected 与 generation-Detached 状态，带数量与估算字节预算。
+- **可选 provider**：Resources、Addressables（`[2.11.1,2.11.2)`）、YooAsset（`[3.0.6,4.0.0)`），通过接口转换进行能力协商。
+- **维护原语**：`IYooAssetPackageMaintenance` 与 `IAddressablesCatalogMaintenance`，用于 manifest/catalog 激活、缓存清理与 All/Tags/Locations downloader。
+- **内容信任**：schema-2 `ContentTrustManifest`，使用 SHA-256 校验与 `RequireSignature` 或 `IntegrityOnly` policy。
+- **存储预检**：`IAssetStoragePreflight`，提供 `Available`/`Insufficient`/`Unknown`/`Failed` 结果。
+- **有界诊断**：`HandleTracker`、`SceneTracker`、`AssetRuntimeTelemetryRecorder` 与 Editor 窗口，具有容量上限与 drop 计数。
 
----
+聚焦指南：
 
-## 快速开始
+- [Provider 与集成](Documents~/Providers.SCH.md)：provider 选择、runtime-location 规则、Resources、Addressables、YooAsset、VContainer、Navigathena 与自定义 provider 边界。
+- [内存、所有权与生命周期](Documents~/MemoryAndLifetime.SCH.md)：handle/instance/scene 所有权、取消与线程规则、SLRU、预算、retention、低内存行为。
+- [内容操作](Documents~/ContentOperations.SCH.md)：downloader 所有权、存储与磁盘门、release mutation、内容信任、telemetry、持久化、恢复。
 
-本节将指导您快速上手加载第一个资源。
+## 架构
 
-### 第一步：初始化（游戏启动时执行一次）
-
-```csharp
-using CycloneGames.AssetManagement.Runtime;
-using Cysharp.Threading.Tasks;
-using YooAsset;
-
-public class GameBootstrap
-{
-    // 存储模块引用以便后续访问
-    public static IAssetModule AssetModule { get; private set; }
-
-    public async UniTask Initialize()
-    {
-        // 创建并初始化模块（只执行一次）
-        AssetModule = new YooAssetModule();
-        await AssetModule.InitializeAsync();
-
-        // 创建并初始化资源包（每个包只执行一次）
-        var package = AssetModule.CreatePackage("DefaultPackage");
-
-        var initOptions = new AssetPackageInitOptions(
-            AssetPlayMode.Offline,
-            new OfflinePlayModeParameters()
-        );
-
-        await package.InitializeAsync(initOptions);
-    }
-}
+```mermaid
+flowchart TD
+    App["Composition root"] --> Module["IAssetModule"]
+    Module --> Package["IAssetPackage"]
+    Package --> Lease["Caller-owned handle lease"]
+    Package --> Cache["Bounded package cache"]
+    Package -. YooAsset assembly .-> YooMaintenance["IYooAssetPackageMaintenance"]
+    Package -. Addressables assembly .-> CatalogMaintenance["IAddressablesCatalogMaintenance"]
+    Package -. optional .-> Storage["IAssetStoragePreflight"]
+    Package -. optional .-> Query["IAssetCatalogQuery"]
+    Package -. optional .-> Diagnostics["IAssetRuntimeDiagnostics"]
+    YooMaintenance --> Maintenance["Product-owned maintenance / quiescence"]
+    CatalogMaintenance --> Maintenance
+    Storage --> Maintenance
+    Maintenance --> Trust["Content trust"]
+    Providers["Resources / Addressables / YooAsset"] --> Module
+    Integrations["Navigathena / VContainer"] --> App
 ```
 
-### 第二步：加载资源（在游戏任意位置）
+应用组合选择一个 provider module，并把 `IAssetPackage` 传给消费者。核心消费者不从进程全局状态发现 package。可选集成依赖 runtime 契约；runtime 不依赖这些集成。
+
+### 程序集布局
+
+| 程序集 | `autoReferenced` | 启用条件 |
+| --- | ---: | --- |
+| `CycloneGames.AssetManagement.Runtime` | yes | 始终 |
+| `CycloneGames.AssetManagement.Runtime.CacheRetention` | yes | 始终 |
+| `CycloneGames.AssetManagement.Editor` | yes | 仅 Unity Editor |
+| `CycloneGames.AssetManagement.Tests.Editor` | no | Unity Test Runner |
+| `CycloneGames.AssetManagement.Tests.PlayMode` | no | Unity PlayMode Test Runner |
+| `CycloneGames.AssetManagement.Runtime.Providers.Addressables` | no | `com.unity.addressables` `[2.11.1,2.11.2)` 加显式 consumer reference |
+| `CycloneGames.AssetManagement.Providers.Addressables.Tests.Editor` | no | Addressables 2.11.1 加 Unity Test Runner |
+| `CycloneGames.AssetManagement.Runtime.Providers.YooAsset` | no | `com.tuyoogame.yooasset` `[3.0.6,4.0.0)` 加显式 consumer reference |
+| `YooAsset.Custom`（文件 `CycloneGames.AssetManagement.Runtime.Providers.YooAsset.Custom.asmdef`） | no | 同样的 YooAsset 范围。程序集名固定：YooAsset 只向 `YooAsset.Custom` 开放内部成员 |
+| `CycloneGames.AssetManagement.Providers.YooAsset.Tests.Editor` | no | 稳定版 YooAsset `[3.0.6,4.0.0)` 加 Unity Test Runner |
+| `CycloneGames.AssetManagement.Runtime.Integrations.Navigathena` | no | `com.mackysoft.navigathena` `[1.1.0,1.1.1)` 加显式 consumer reference |
+| `CycloneGames.AssetManagement.Runtime.Integrations.VContainer` | no | `jp.hadashikick.vcontainer` 加显式 consumer reference |
+
+核心 Runtime 直接依赖 UniTask、`CycloneGames.Logging.Core`、CycloneGames.IO Core/SystemIO 与 CycloneGames.Hash Core。仅安装可选包不够：其 `versionDefines` 范围必须匹配，且 consumer asmdef 必须引用条件 Assembly。不要在 PlayerSettings 中手工添加 `CYCLONEGAMES_HAS_*` 符号。
+
+AssetManagement 通过 `CycloneGames.AssetManagement` 下的稳定 `LogChannel` category 输出诊断。本包不会初始化、flush、替换或关闭日志 backend。仅安装 `com.cyclone-games.logging` 时，诊断会安全地进入 `NullLogWriter`；应用 composition root 可以按需安装 `CycloneGames.Logging.Pipeline`、组合 `CycloneGames.Logging.Unity`，或提供其他 `ILogWriter` backend。
+
+每个产生诊断的 asmdef 都在 `Diagnostics/` 下持有唯一命名的 internal `<FeatureName>Log` facade。Facade 统一定义 `Category`、ambient `Channel` 和严格绑定的 `Create(ILogWriter logWriter)`；消费端以 `Log` 表示 class-local ambient channel，以 `_log` 表示显式注入的实例 channel。
+
+YooAsset 3.0.6 是最低稳定版，支持范围为 `[3.0.6,4.0.0)`（与 asmdef 的 `versionDefines` 一致）。activation test 会拒绝 prerelease 包，产品选择的确切稳定版 3.x 在发布前必须完成编译并通过 YooAsset provider test assembly。provider 使用 `UnloadAllAssetsOptions.ShouldWaitUnloadUnused`，并依赖名为 `YooAsset.Custom` 的友元程序集来接入 Web 预下载。
+
+## 快速上手
+
+使用内置 Resources provider 在选择远程 provider 前学习所有权模型。下面的地址相对于 Unity `Resources` 文件夹。
 
 ```csharp
-using UnityEngine;
+var module = new ResourcesModule();
+IAssetPackage package = await AssetManager.InitializeDefaultPackageAsync(
+    module,
+    "BaseContent",
+    moduleOptions: default,
+    packageOptions: default,
+    cancellationToken);
 
-public class PlayerSpawner
+using (IAssetHandle<Texture2D> icon =
+       package.LoadAssetAsync<Texture2D>("UI/Icons/Inventory", cancellationToken: cancellationToken))
 {
-    public async UniTask SpawnPlayer()
-    {
-        // 获取已存在的资源包（不要重复创建！）
-        var package = GameBootstrap.AssetModule.GetPackage("DefaultPackage");
-
-        // 加载并使用资源
-        using (var handle = package.LoadAssetAsync<GameObject>("Prefabs/Player"))
-        {
-            await handle.Task;
-
-            if (handle.Asset != null)
-            {
-                GameObject player = package.InstantiateSync(handle);
-            }
-        }
-    }
+    await icon.Task;
+    UseTextureWhileHandleIsAlive(icon.Asset);
 }
+
+await module.DestroyAsync();
 ```
 
-> [!TIP]
-> **CreatePackage 与 GetPackage 的区别**
->
-> - `CreatePackage(name)` - 初始化时调用一次，创建新资源包
-> - `GetPackage(name)` - 在其他任意位置调用，获取已存在的资源包
+四条规则：
 
----
+1. Composition root 持有 module 和 package。
+2. 调用方持有每个返回的 handle。
+3. 读取值之前 await `handle.Task`。
+4. 关闭 module 之前 Dispose handle。
+
+远程 provider 使用同样的面向消费者的所有权模型。
 
 ## 核心概念
 
-### 架构概览
+### 所有权层级
 
-```
-游戏逻辑
-    |
-    v
-IAssetModule（接口）
-    |
-    +-- YooAssetModule（推荐）
-    +-- AddressablesModule
-    +-- ResourcesModule
-    |
-    v
-IAssetPackage（接口）
-    |
-    v
-资源加载 / 实例化 / 场景管理
+```text
+Application lifetime
+  -> IAssetModule
+       -> one or more IAssetPackage instances
+            -> shared provider handles held by the package cache
+                 -> one caller-owned lease per load call
 ```
 
-### 关键接口
+应用 owner 构造并关闭 module。Module 持有命名的 package。Package 持有共享 provider handle 与其有界 idle 缓存。每次 load 调用返回一个新的、非池化的调用方 lease。Instance、scene 与 downloader 拥有独立于 asset lease 的所有权。Package shutdown 会遏制泄漏，但不等于允许省略调用方清理。所有改变所有权的调用都受 Unity 主线程约束。
 
-| 接口              | 用途                                 |
-| ----------------- | ------------------------------------ |
-| `IAssetModule`    | 资源系统入口，创建和管理资源包       |
-| `IAssetPackage`   | 处理所有资源操作：加载、实例化、场景 |
-| `IAssetHandle<T>` | 表示已加载的资源，可释放以管理内存   |
-| `IPatchService`   | 高层热更新工作流（仅 YooAsset）      |
+### Handle、取消与线程模型
 
-### 句柄生命周期
+Asset、all-assets 与 raw-file load 调用返回非池化的调用方 lease。Lease 会钉住一个共享 provider handle，直到 Lease 被 Dispose。成功的 Lease Dispose 幂等，之后访问会抛出 `ObjectDisposedException`。如果后端 Dispose 抛出异常，Lease 会保留该确切后端所有权边，并要求调用方在主线程重试 `Dispose()`；不会先清空引用，再把清理失败静默转化为泄漏。`IOperation.Task` 是 memoized 的，可安全重复或并发 await。第一次终态转换胜出：provider 与 adapter 后处理成功会完成它，真实 provider 或 adapter 失败会使其 fault；调用方等待取消、provider 取消，或 pending 时权威 owner 退役会使其 canceled。`Error` 是诊断文本，不能替代 await `Task`。
 
-句柄代表已加载的资源，必须正确释放：
+`WaitForAsyncComplete` 不是 async flow 的可移植替代品。Addressables 与 YooAsset 对每个 pending 操作都拒绝它；terminal 调用是 no-op。应 await `Task`。同步单资产加载仍是可选的 `IAssetSyncOperations` 能力；scene 只暴露异步生命周期。
+
+Pending 的 YooAsset 操作在被要求同步推进时以 `NotSupportedException` 失败；应 await `IOperation.Task`。`IAssetSyncOperations` 是提供同步单资产访问的独立能力。
+
+调用方取消只取消该调用方的等待，不取消可能被其他调用方使用的共享后端加载。调用方仍必须 Dispose 其 lease。这把请求取消与共享资源所有权分离。
+
+调用方可见的 canceled 并不能证明 provider 已物理终止。当 package 或 module 退役使 pending 的自有操作取消时，adapter 会继续观察其 provider/adapter 尾任务。Package 成功销毁只有在全部保留尾任务排空后才完成，包括迟到的成功、取消或已观察失败。之后到达的 provider 结果不能覆盖已经发布的公开 canceled 状态。普通 `ISceneHandle.Dispose` 不属于权威退役：它只释放调用方 wrapper 所有权，既不取消 load，也不 unload scene。
+
+Unity object、provider API、缓存 mutation、handle dispose、scene 操作、module/package 生命周期与维护编排都受主线程约束。允许的 worker-thread 工作很窄：已完成的 `IRawFileHandle.ReadText` 与 `ReadBytes` 读取、telemetry ring-buffer 操作，以及支持平台上产品调度的纯文件哈希。每次成功的 `ReadBytes()` 调用都会返回 caller-owned 的可变快照，该快照在 handle dispose 后仍然有效；应保留这份快照，避免再次申请整份复制。不要从后台任务调用 Unity object 属性、provider handle、`Dispose` 或缓存 mutation。
+
+### 能力协商
+
+显式测试能力；不要无失败路径地转换。
 
 ```csharp
-// 方式一：using 语句（推荐）
-using (var handle = package.LoadAssetAsync<Texture2D>("Textures/Icon"))
+if (package is not IYooAssetPackageMaintenance maintenance)
 {
-    await handle.Task;
-    // 在这里使用 handle.Asset
+    return; // 该 composition assembly 没有 YooAsset maintenance 能力。
 }
-// 自动释放
 
-// 方式二：手动释放
-var handle = package.LoadAssetAsync<Texture2D>("Textures/Icon");
-await handle.Task;
-// ... 使用资源 ...
-handle.Dispose(); // 不要忘记这一步！
+bool activated = await maintenance.UpdatePackageManifestAsync(
+    authenticatedPackageVersion,
+    cancellationToken: cancellationToken);
 ```
 
----
+| 能力 | Resources | Addressables | YooAsset |
+| --- | ---: | ---: | ---: |
+| 异步单资产加载与 instance handle | yes | yes | yes |
+| `IAssetSyncOperations` | yes | no | yes |
+| `IAssetBulkLoader` | no | yes | yes |
+| `IAssetRawFileLoader` | no | no | yes |
+| `IAssetSceneLoader` | no | yes | yes |
+| `IAssetCatalogQuery` | no | yes | yes |
+| `IAssetStoragePreflight` | no | 仅桌面卷 | 桌面与服务器的 sandbox/editor 缓存卷；其余平台返回精确 `Unknown` |
+| `IUnityUnusedAssetCollector` | yes | no | no |
+| `IAssetProviderMemoryReclamation` | no | no | yes |
+| Provider maintenance/downloader | no | `IAddressablesCatalogMaintenance` | `IYooAssetPackageMaintenance` |
+| `IAssetRuntimeDiagnostics` | yes | yes | yes |
 
-## 提供器对比
+`IAssetPackage` 不提供通用 unload-unused 操作：各 provider 无法实现同一种语义。通用框架缓存驱逐使用 `TrimIdleCache(AssetCacheRetentionPolicy.EvictAllIdle)`；Resources 的 Unity 进程全局扫描使用 `IUnityUnusedAssetCollector.CollectUnusedUnityAssetsAsync`；YooAsset 的 package-local 操作使用 `IYooAssetPackageMaintenance.UnloadUnusedProviderAssetsAsync`。Addressables 除框架缓存 trim 外没有对应操作。
 
-| 功能         | YooAsset | Addressables | Resources |
-| ------------ | -------- | ------------ | --------- |
-| 同步加载     | 支持     | 不支持       | 支持      |
-| 异步加载     | 支持     | 支持         | 支持      |
-| 热更新       | 支持     | 有限         | 不支持    |
-| 场景加载     | 支持     | 支持         | 不支持    |
-| 原生文件加载 | 支持     | 不支持       | 不支持    |
-| 推荐用途     | 正式项目 | 已有项目     | 原型开发  |
+`IAssetProviderMemoryReclamation.UnloadAllProviderAssetsAsync(waitForEngineUnload)` 是确定性回收出口：它会释放单个 package 内所有 provider 持有的资产，包括 provider 仍视为在用者。当调用方必须确认 native 内存已真正回收时（例如内存门禁式场景切换前，或抓取 Memory Profiler 基线时），传 `waitForEngineUnload: true`；帧时间敏感路径传 `false`，此时 provider 会在引擎底层卸载完成前就上报终态。
 
----
+Addressables 与 YooAsset 不能同时通过这些 adapter 激活。Module 级 AssetBundle runtime guard 建立唯一的框架控制 provider authority，直到共存、shutdown 顺序与内存行为作为完整产品配置得到验证。
 
-## 使用示例
+## 使用指南
 
-### YooAsset 提供器
-
-YooAsset 是推荐的提供器，具有完整的功能支持。
-
-#### 离线模式（单机游戏）
+### 应用持有的组合
 
 ```csharp
-public async UniTask InitializeOffline()
+public sealed class GameAssetLifetime
 {
-    // 1. 创建并初始化模块
-    var assetModule = new YooAssetModule();
-    await assetModule.InitializeAsync();
+    private IAssetModule _module;
+    private IAssetPackage _package;
 
-    // 2. 创建资源包
-    var package = assetModule.CreatePackage("DefaultPackage");
-
-    // 3. 初始化为离线模式
-    var initOptions = new AssetPackageInitOptions(
-        AssetPlayMode.Offline,
-        new OfflinePlayModeParameters()
-    );
-
-    await package.InitializeAsync(initOptions);
-
-    // 4. 加载资源
-    using (var handle = package.LoadAssetAsync<GameObject>("Prefabs/Enemy"))
+    public async UniTask InitializeAsync(CancellationToken cancellationToken)
     {
-        await handle.Task;
-        var enemy = package.InstantiateSync(handle);
+        _module = new ResourcesModule();
+        _package = await AssetManager.InitializeDefaultPackageAsync(
+            _module,
+            "BaseContent",
+            new AssetManagementOptions(defaultCacheTuning: default),
+            new AssetPackageInitOptions(providerOptions: null, cacheTuningOverride: null),
+            cancellationToken);
     }
-}
-```
 
-#### 主机模式（在线游戏带热更新）
-
-```csharp
-public async UniTask InitializeOnline()
-{
-    var assetModule = new YooAssetModule();
-    await assetModule.InitializeAsync();
-
-    var package = assetModule.CreatePackage("DefaultPackage");
-
-    // 配置主机模式，指向您的 CDN
-    var hostParams = new HostPlayModeParameters
+    public async UniTask<IAssetHandle<Texture2D>> LoadIconAsync(CancellationToken cancellationToken)
     {
-        BuildinQueryServices = new DefaultBuildinQueryServices(),
-        RemoteServices = new DefaultRemoteServices("https://cdn.example.com/bundles")
-    };
-
-    var initOptions = new AssetPackageInitOptions(AssetPlayMode.Host, hostParams);
-    await package.InitializeAsync(initOptions);
-}
-```
-
-### Addressables 提供器
-
-适用于已经使用 Unity Addressables 的项目。
-
-```csharp
-public async UniTask UseAddressables()
-{
-    // 1. 创建并初始化
-    var assetModule = new AddressablesModule();
-    await assetModule.InitializeAsync();
-
-    // 2. 创建资源包
-    var package = assetModule.CreatePackage("DefaultPackage");
-
-    // 3. 加载资源（仅异步）
-    using (var handle = package.LoadAssetAsync<GameObject>("MyAddressableKey"))
-    {
-        await handle.Task;
-        if (handle.Asset != null)
-        {
-            var instance = await package.InstantiateAsync(handle).Task;
-        }
-    }
-}
-```
-
-> [!NOTE]
-> Addressables 的限制：
->
-> - 不支持同步操作
-> - 不支持 `IPatchService`
-> - 不支持原生文件加载
-
-### Resources 提供器
-
-最适合快速原型开发或小型项目。
-
-```csharp
-public async UniTask UseResources()
-{
-    // 1. 创建并初始化（同步）
-    var assetModule = new ResourcesModule();
-    await assetModule.InitializeAsync();
-
-    // 2. 创建资源包
-    var package = assetModule.CreatePackage("DefaultPackage");
-
-    // 3. 从 Resources 文件夹加载
-    using (var handle = package.LoadAssetAsync<Sprite>("Icons/Coin"))
-    {
-        await handle.Task;
-        myImage.sprite = handle.Asset;
-    }
-}
-```
-
-> [!WARNING]
-> Resources 的限制：
->
-> - 无法加载场景
-> - 不支持热更新
-> - 资源无法单独卸载
-> - 不推荐用于正式项目
-
----
-
-## 热更新工作流
-
-### 高层 API（推荐）
-
-`IPatchService` 提供完整的更新工作流，采用事件驱动架构：
-
-```csharp
-public async UniTask RunPatchFlow()
-{
-    // 获取补丁服务
-    var patchService = assetModule.CreatePatchService("DefaultPackage");
-
-    // 订阅事件
-    patchService.PatchEvents.Subscribe(evt =>
-    {
-        var (eventType, args) = evt;
-
-        switch (eventType)
-        {
-            case PatchEvent.FoundNewVersion:
-                var versionArgs = (FoundNewVersionEventArgs)args;
-                Debug.Log($"发现新版本！大小：{versionArgs.TotalDownloadSizeBytes} 字节");
-                // 显示确认对话框，然后调用：
-                // patchService.Download();
-                break;
-
-            case PatchEvent.DownloadProgress:
-                var progressArgs = (DownloadProgressEventArgs)args;
-                Debug.Log($"进度：{progressArgs.Progress:P0}");
-                break;
-
-            case PatchEvent.PatchDone:
-                Debug.Log("更新完成！");
-                break;
-
-            case PatchEvent.PatchFailed:
-                Debug.LogError("更新失败！");
-                break;
-        }
-    });
-
-    // 启动补丁流程
-    await patchService.RunAsync(autoDownloadOnFoundNewVersion: false);
-}
-```
-
-### 底层 API（精细控制）
-
-用于自定义更新流程：
-
-```csharp
-// 检查更新
-string latestVersion = await package.RequestPackageVersionAsync();
-
-// 更新清单
-bool updated = await package.UpdatePackageManifestAsync(latestVersion);
-
-// 创建下载器
-var downloader = package.CreateDownloaderForAll(downloadingMaxNumber: 10, failedTryAgain: 3);
-
-// 监控进度
-while (!downloader.IsDone)
-{
-    Debug.Log($"已下载：{downloader.CurrentDownloadBytes}/{downloader.TotalDownloadBytes}");
-    await UniTask.Yield();
-}
-
-// 清理未使用的缓存
-await package.ClearCacheFilesAsync(ClearCacheMode.Unused);
-```
-
----
-
-## 高级功能
-
-### 原生文件加载
-
-加载非 Unity 文件，如 JSON、XML 或二进制数据：
-
-```csharp
-// 异步加载
-using (var handle = package.LoadRawFileAsync("Config/settings.json"))
-{
-    await handle.Task;
-    string jsonText = handle.ReadText();
-    var settings = JsonUtility.FromJson<GameSettings>(jsonText);
-}
-
-// 同步加载
-var handle = package.LoadRawFileSync("Data/level.bin");
-byte[] data = handle.ReadBytes();
-handle.Dispose();
-```
-
-### 场景管理
-
-```csharp
-// 加载场景
-var sceneHandle = package.LoadSceneAsync("Assets/Scenes/Gameplay.unity");
-await sceneHandle.Task;
-
-// 场景现在已激活
-
-// 卸载场景
-await package.UnloadSceneAsync(sceneHandle);
-```
-
-当底层提供器支持延迟进入场景时，也可以使用手动激活模式：
-
-```csharp
-var sceneHandle = package.LoadSceneAsync(
-    "Assets/Scenes/Gameplay.unity",
-    LoadSceneMode.Single,
-    SceneActivationMode.Manual);
-
-// 等待提供器控制的预加载阶段。
-await sceneHandle.Task;
-
-// 当 FadeOut 或其他过渡完成后，再执行最终激活。
-await sceneHandle.ActivateAsync();
-```
-
-说明：
-
-- `SceneActivationState` 是跨 Provider 统一后的归一化状态，不保证与底层 SDK 的原始状态一一对应。
-- Addressables 在加载完成后，通常可以报告 `WaitingForActivation`。
-- YooAsset 的延迟进入本质上是“挂起加载再恢复”，因此在调用 `ActivateAsync()` 之前，句柄可能一直保持在 `Loading`。
-
-### 批量加载
-
-加载多个资源并追踪进度：
-
-```csharp
-using CycloneGames.AssetManagement.Runtime.Batch;
-
-var group = new GroupOperation();
-
-// 添加操作，可选权重
-group.Add(package.LoadAssetAsync<Texture2D>("Tex1"), weight: 1f);
-group.Add(package.LoadAssetAsync<Texture2D>("Tex2"), weight: 1f);
-group.Add(package.LoadAssetAsync<AudioClip>("Music"), weight: 2f);
-
-// 追踪进度
-_ = TrackProgress(group);
-
-await group.StartAsync();
-
-async UniTask TrackProgress(GroupOperation op)
-{
-    while (!op.IsDone)
-    {
-        loadingBar.value = op.Progress;
-        await UniTask.Yield();
-    }
-}
-```
-
-### 高性能资源缓存 (W-TinyLFU 架构)
-
-资源管理系统内置了零 GC、三级分层（Active、Trial、Main）的缓存架构，最大化缓存命中率，同时提供确定性的内存管理策略，且没有任何运行时开销：
-
-- **Active (活跃池)**: 当前被游戏逻辑显式引用的资源（Refs > 0）。
-- **Trial (试用池 - LRU)**: 被释放资产的观察期缓存池。
-- **Main (主池 - LFU/LRU)**: 经过试用期且被频繁访问的"热"资源缓存。
-
-你可以通过 **Bucket (内存桶)** 来实现确定性的分组内存释放：
-
-```csharp
-// 加载资源并将其分配到 "UI" 桶中
-using (var handle = package.LoadAssetAsync<GameObject>("Prefabs/MainMenu", bucket: "UI"))
-{
-    // ...
-}
-
-// 稍后，仅清理 "UI" 桶中的空闲资源来强制释放内存
-package.ClearBucket("UI");
-```
-
-> [!NOTE]
-> `ClearBucket` / `ClearBucketsByPrefix` 只会驱逐 `RefCount` 已归零的空闲句柄（位于 Trial 或 Main 池中）。仍在使用中的 Active 句柄**永远不会**被桶清理操作驱逐 —— 这是为了从设计上避免悬垂引用。
-
-#### 层级式桶路径
-
-桶名称支持**以 `.` 分隔的层级命名**（如 `"UI.Scene.MainCity"`）。使用 `AssetBucketPath` 安全地组合和匹配路径：
-
-```csharp
-using CycloneGames.AssetManagement.Runtime;
-
-// 组合层级桶名称（非空段时零分配）
-string bucket = AssetBucketPath.Combine("UI", "Scene");           // → "UI.Scene"
-string sub    = AssetBucketPath.Combine("UI", "Scene", "MainCity"); // → "UI.Scene.MainCity"
-
-// 清理单个精确匹配的桶
-package.ClearBucket("UI.Scene.MainCity");
-
-// 一次性清理某个桶及其所有后代
-package.ClearBucketsByPrefix("UI");
-// → 清理 "UI"、"UI.Scene"、"UI.Scene.MainCity" 等
-```
-
-#### AssetBucketScope（作用域加载）
-
-`AssetBucketScope` 是一个轻量包装器，会为所有加载调用**预填充** `bucket`、`tag` 和 `owner`，消除重复的参数传递：
-
-```csharp
-// 创建作用域 —— 所有加载自动继承其 bucket/tag/owner
-var uiScope = package.CreateBucketScope("UI", tag: "UIAsset", owner: "UIManager");
-
-// 通过作用域加载 —— 无需重复传递 bucket/tag/owner
-using (var handle = uiScope.LoadAssetAsync<GameObject>("Prefabs/MainMenu"))
-{
-    await handle.Task;
-    var menu = uiScope.Package.InstantiateSync(handle);
-}
-
-// 为子系统创建子作用域（桶名变为 "UI.Shop"）
-var shopScope = uiScope.CreateChild("Shop", owner: "ShopUI");
-using (var handle = shopScope.LoadAssetAsync<Sprite>("Icons/Coin"))
-{
-    await handle.Task;
-}
-
-// 离开 UI 时，仅清理该作用域的桶层级
-uiScope.ClearHierarchy();  // 清理 "UI" 及所有后代
-// 或者只清理精确匹配的桶：
-shopScope.Clear();          // 仅清理 "UI.Shop"
-```
-
-### 资源追踪与元数据 (Metadata Tracking)
-
-为了让运行时资源的追踪变得极其简单，所有加载 API 均支持零 GC 的 `tag` 和 `owner` 参数。这让你能够细粒度地追踪**是谁**加载了该资源，以及该资源的**用途**。
-
-```csharp
-// 加载资源并加上追踪标记
-var handle = package.LoadAssetAsync<GameObject>("Prefabs/Hero",
-    tag: "Character",
-    owner: "PlayerSpawner"
-);
-```
-
-**应用案例：UIFramework 集成**
-`CycloneGames.UIFramework` 完美地应用了此设计。当打开 UI 窗口时，底层会自动为加载的资源打上标签：
-
-- `owner`: 具体的 UI 窗口名称（如 `HomeUI`）
-- `tag`: 资源分类（如 `UIConfig` 或 `UIPrefab`）
-
-这样在调试器中，你可以一眼看出是哪个 UI 占用了内存。
-
-### 高级编辑器调试工具
-
-`CycloneGames.AssetManagement` 提供了开发者友好的编辑器窗口，帮助你可视化缓存健康度并精准定位内存泄漏。
-
-#### 1. 资源缓存调试器 (Asset Cache Debugger)
-
-提供对整个 W-TinyLFU 缓存系统全局的透视。(`Tools/CycloneGames/AssetManagement/Asset Cache Debugger`)
-
-- **层级 (Tier) 可视化**: 直观显示资源当前是处于 Active 状态、Trial 试用池，还是 Main 热缓存区。
-- **元数据显示**: 直接显示和过滤 `Tag`、`Owner` 以及 `Bucket`。
-- **引用计数异常警告**: 自动高亮显示引用计数异常偏高（> 8）的资源，警告你可能遗漏了 `Dispose()` 调用。
-- **智能汇总**: 按资源提供者、Tag 和 Owner 统计内存分布。
-
-#### 2. 句柄泄漏追踪追踪器 (Handle Tracker)
-
-微观级别监控每一个活动句柄的分配，并自动与缓存系统交叉比对。(`Tools/CycloneGames/AssetManagement/Asset Handle Tracker`)
-
-- **智能状态识别**: 自动判断引用计数为 0 的句柄是安全驻留在空闲缓存中 (`Cached`)，还是真正的内存泄漏 (`Leaked`)。
-- **内存泄漏堆栈**: 点击展开任何泄露的句柄，直接跳转到分配该句柄的精准 C# 代码行。
-
-<img src="./Documents~/Doc_01.png" style="width: 100%; height: auto; max-width: 900px;" />
-<img src="./Documents~/Doc_02.png" style="width: 100%; height: auto; max-width: 900px;" />
-<img src="./Documents~/Doc_03.png" style="width: 100%; height: auto; max-width: 900px;" />
-<img src="./Documents~/Doc_04.png" style="width: 100%; height: auto; max-width: 900px;" />
-<img src="./Documents~/Doc_05.png" style="width: 100%; height: auto; max-width: 900px;" />
-
----
-
-## 资源引用 (AssetRef / SceneRef)
-
-### 为什么需要 AssetRef？
-
-在实际项目中，使用裸字符串 `"Prefabs/Enemy"` 来引用资源是脆弱的：
-
-- **没有类型安全** — 没有任何机制阻止你将一个 Texture 路径传给期望 Prefab 的方法。
-- **无法追踪重命名** — 如果美术移动或重命名了资源，你只会在运行时得到静默失败。
-- **不支持 Inspector** — 策划必须手动输入路径，无法拖拽。
-- **直接的 `UnityEngine.Object` 引用** 会将资源拉入同一个 bundle，导致内存膨胀，并且无法实现按语言/按版本分包。
-
-`AssetRef<T>` 和 `SceneRef` 解决了以上所有问题，同时在**运行时零开销**（struct 类型，仅存储两个字符串）。
-
-### 设计原则
-
-| 原则                        | 实现方式                                                                                                                |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| **纯数据键**                | `AssetRef` 存储 `location` + `guid`。它永远不加载、不缓存、不持有句柄。                                                 |
-| **零 GC**                   | `struct` 而非 `class`。10 万个引用 = 零堆对象。                                                                         |
-| **通过 IAssetPackage 加载** | `package.LoadAsync(assetRef)` 返回 `IAssetHandle<T>`，复用已有的 ARC + W-TinyLFU 缓存。                                 |
-| **GUID 自动修复**           | 编辑器 PropertyDrawer 每次显示时从 GUID 反查路径。如果资源被移动/重命名，存储的 location 会自动更新。                   |
-| **SceneRef 独立类型**       | `SceneAsset` 是 editor-only 的，场景使用 `LoadSceneAsync` 而非 `LoadAssetAsync`。独立的 `SceneRef` 类型承载正确的语义。 |
-| **构建时验证**              | `AssetRefValidator` 在发包前扫描所有 Prefab 和 ScriptableObject，检测失效的 GUID。                                      |
-
-### 可用类型
-
-| 类型          | 用途                                                                                        |
-| ------------- | ------------------------------------------------------------------------------------------- |
-| `AssetRef<T>` | 带类型的引用。Inspector 的 ObjectField 按 `T` 过滤（如 `AssetRef<AudioClip>` 只接受音频）。 |
-| `AssetRef`    | 非泛型引用。用于数据驱动的配置表或运行时动态解析类型的场景。                                |
-| `SceneRef`    | 场景引用。Inspector 的 ObjectField 过滤为 `SceneAsset`。                                    |
-
-### 快速上手
-
-#### 1. 在 Inspector 中声明引用
-
-```csharp
-using CycloneGames.AssetManagement.Runtime;
-using UnityEngine;
-
-public class EnemyConfig : ScriptableObject
-{
-    [Header("视觉")]
-    [SerializeField] private AssetRef<GameObject> prefab;
-    [SerializeField] private AssetRef<Material>   material;
-
-    [Header("音频")]
-    [SerializeField] private AssetRef<AudioClip> spawnSound;
-    [SerializeField] private AssetRef<AudioClip> deathSound;
-
-    [Header("场景")]
-    [SerializeField] private SceneRef bossArena;
-
-    // 供其他系统读取的只读访问器
-    public AssetRef<GameObject> Prefab     => prefab;
-    public AssetRef<AudioClip>  SpawnSound => spawnSound;
-    public SceneRef             BossArena  => bossArena;
-}
-```
-
-在 Inspector 中，每个字段都渲染为标准的 ObjectField —— 直接从 Project 窗口拖拽即可，按类型自动过滤。无需手动输入路径。
-
-#### 2. 运行时加载资源
-
-```csharp
-public class EnemySpawner
-{
-    private readonly IAssetPackage package;
-    private readonly EnemyConfig config;
-
-    public async UniTask SpawnEnemy(Vector3 position)
-    {
-        // AssetRef<T> → IAssetHandle<T>，完全集成 ARC + 缓存
-        using (var handle = package.LoadAsync(config.Prefab, bucket: "Gameplay"))
+        IAssetHandle<Texture2D> handle = _package.LoadAssetAsync<Texture2D>(
+            "UI/Icons/Inventory",
+            bucket: "UI.Inventory",
+            tag: "UI",
+            owner: "InventoryScreen",
+            cancellationToken);
+        try
         {
             await handle.Task;
-            var enemy = package.InstantiateSync(handle);
-            enemy.transform.position = position;
+            return handle;
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
         }
     }
-}
-```
 
-#### 3. 加载场景（Navigathena 集成）
-
-```csharp
-using CycloneGames.AssetManagement.Runtime;
-using CycloneGames.AssetManagement.Runtime.Integrations.Navigathena;
-
-public class LevelLoader
-{
-    private readonly IAssetPackage package;
-    private readonly ISceneNavigator navigator;
-
-    public async UniTask LoadBossArena(EnemyConfig config)
+    public async UniTask ShutdownAsync()
     {
-        // 方式 A：通过 IAssetPackage 直接加载场景
-        var sceneHandle = package.LoadSceneAsync(config.BossArena);
-        await sceneHandle.Task;
-
-        // 方式 B：通过 Navigathena 进行场景导航（push/pop/change）
-        await navigator.Push(config.BossArena.ToSceneIdentifier(package));
+        if (_module != null) await _module.DestroyAsync();
     }
 }
 ```
 
-#### 4. 向后兼容
+接收 `LoadIconAsync` 的调用方持有返回的 handle，并在纹理使用期间保持其存活。在调用方的 `finally`、`OnDisable` 或 `OnDestroy` 路径中在主线程 Dispose 它。
 
-`AssetRef<T>`、`AssetRef` 和 `SceneRef` 都支持 `implicit operator string`，因此可以直接用于已有的基于 `string` 的 API：
+### 实例化 Prefab
 
-```csharp
-// 以下写法完全等价：
-package.LoadAssetAsync<GameObject>(config.Prefab.Location);
-package.LoadAssetAsync<GameObject>(config.Prefab);  // 隐式 string 转换
-package.LoadAsync(config.Prefab);                    // 扩展方法（推荐）
-```
-
-#### 5. 支持所有资源类型
-
-任何继承自 `UnityEngine.Object` 的类型都可使用：
+`InstantiateAsync` 只接受由同一 package 持有、已成功完成的活跃 `IAssetHandle<GameObject>` lease。Prefab lease 与返回的 instance handle 具有独立生命周期：请求 instance 时保留 prefab lease，然后在每条路径上 Dispose 两个 owner。
 
 ```csharp
-[SerializeField] AssetRef<GameObject>       prefab;          // 预制体
-[SerializeField] AssetRef<ScriptableObject> config;          // 任意 ScriptableObject
-[SerializeField] AssetRef<YarnProject>      dialogue;        // Yarn Spinner 对话项目
-[SerializeField] AssetRef<Sprite>           icon;            // 精灵图
-[SerializeField] AssetRef<AudioClip>        clip;            // 音频
-[SerializeField] AssetRef<Material>         mat;             // 材质
-[SerializeField] AssetRef<AnimationClip>    anim;            // 动画片段
-[SerializeField] AssetRef<TextAsset>        textFile;        // 文本资源
-[SerializeField] SceneRef                   scene;           // 场景
+IAssetHandle<GameObject> prefab = package.LoadAssetAsync<GameObject>(
+    "Characters/Npc",
+    bucket: "Gameplay.Level01",
+    owner: "NpcSpawner",
+    cancellationToken: cancellationToken);
+
+try
+{
+    await prefab.Task;
+    IInstantiateHandle instance = package.InstantiateAsync(
+        prefab, parent: spawnRoot, worldPositionStays: false, setActive: true);
+    try
+    {
+        await instance.Task;
+        UseInstance(instance.Instance);
+    }
+    finally
+    {
+        instance.Dispose();
+    }
+}
+finally
+{
+    prefab.Dispose();
+}
 ```
 
-### 构建验证
+### Scene 生命周期
 
-发包前，通过菜单验证所有引用：
+协商 `IAssetSceneLoader`；Resources 没有 scene 能力。Scene handle wrapper 不卸载 scene。创建它的 loader 才是卸载权威。调用 `UnloadSceneAsync(sceneHandle, cancellationToken)`；只 Dispose `ISceneHandle` 不会卸载 scene。
 
-**`Tools > CycloneGames > AssetManagement > Validate All AssetRefs`**
+高级重载接受 Unity `LoadSceneParameters`，使 Addressables 与 YooAsset 可以请求 `None`、`Physics2D`、`Physics3D` 或合法的 `Physics2D | Physics3D` 组合。加载的 scene 持有其 local physics world，并在卸载时销毁。对 manual scene，直接调用并 await `ActivateAsync`；不要先 await `Task` 作为 readiness barrier，因为 YooAsset 在允许激活前会保持其 provider 操作 pending。
 
-该功能会扫描项目中的所有 Prefab 和 ScriptableObject：
+手动激活是过渡门，不是可回滚的暂存。Unity 必须释放激活屏障，held scene 才能完成卸载，因此即使过渡被取消，startup callback 也可能短暂运行。把权威副作用放在产品的 transition-commit 决策之后。任何卡在 Unity 手动激活屏障的 scene 都会阻塞后续排队的 async scene 操作；在开始新的 unload 前，按创建顺序解决每个 manual scene。
 
-- **失效引用**: GUID 无法解析 → 以 Error 形式输出日志。
-- **过期路径**: 资源被移动/重命名但 GUID 仍然有效 → 自动修复 location。
+### Bucket、tag 与 owner
 
-可通过在构建脚本中调用 `AssetRefValidator.ValidateAll()` 将其集成到 CI/CD 流水线。
+- `bucket` 定义逻辑生命周期域，支持层级 eviction，如 `UI`、`UI.Inventory`、`UI.Inventory.Tooltip`。
+- `tag` 为 policy 与诊断分类 runtime 缓存用法；它不是 provider catalog label。
+- `owner` 标识持有资产的 product system 或 screen。
 
----
+```csharp
+AssetBucketScope ui = package.CreateBucketScope(
+    "UI", tag: "UI", owner: "UIScreenHost");
+AssetBucketScope inventory = ui.CreateChild("Inventory");
 
-## API 参考
+using IAssetHandle<Sprite> icon = inventory.LoadAssetAsync<Sprite>(
+    "UI/Icons/Inventory", cancellationToken: cancellationToken);
+await icon.Task;
 
-### IAssetModule
+inventory.Clear();       // 精确 bucket，仅 idle 条目
+ui.ClearHierarchy();     // UI 及子 bucket，仅 idle 条目
+```
 
-| 方法                       | 说明                        |
-| -------------------------- | --------------------------- |
-| `InitializeAsync(options)` | 初始化资源系统              |
-| `Destroy()`                | 清理并释放资源              |
-| `CreatePackage(name)`      | 创建新的资源包              |
-| `GetPackage(name)`         | 获取已存在的资源包          |
-| `RemovePackageAsync(name)` | 移除并销毁资源包            |
-| `CreatePatchService(name)` | 创建补丁服务（仅 YooAsset） |
+Active lease 绝不会被 bucket clear 失效。一个 key 每种 metadata 最多累积 8 个不同值；超出某种 metadata 会让条目在最后一个 active lease 后绕过 idle retention。
 
-### IAssetPackage
+### Asset 与 Scene 引用
 
-| 方法                           | 说明                                                 |
-| ------------------------------ | ---------------------------------------------------- |
-| `InitializeAsync(options)`     | 初始化资源包                                         |
-| `DestroyAsync()`               | 销毁资源包                                           |
-| `LoadAssetAsync<T>(...)`       | 异步加载资源 (支持 `bucket`/`tag`/`owner`)           |
-| `LoadAssetSync<T>(...)`        | 同步加载资源 (支持 `bucket`/`tag`/`owner`)           |
-| `LoadAllAssetsAsync<T>(...)`   | 加载指定位置的所有资源 (支持 `bucket`/`tag`/`owner`) |
-| `InstantiateAsync(handle)`     | 异步实例化预制体                                     |
-| `InstantiateSync(handle)`      | 同步实例化（零 GC）                                  |
-| `LoadSceneAsync(location)`     | 加载场景                                             |
-| `UnloadSceneAsync(handle)`     | 卸载场景                                             |
-| `LoadRawFileAsync(location)`   | 加载原生文件                                         |
-| `UnloadUnusedAssetsAsync()`    | 全局清扫所有未使用的资源                             |
-| `ClearBucket(bucket)`          | 驱逐精确匹配桶名的空闲句柄                           |
-| `ClearBucketsByPrefix(prefix)` | 驱逐匹配桶前缀及其所有后代的空闲句柄                 |
+`AssetRef<T>`、`AssetRef` 与 `SceneRef` 是序列化数据键，包含显式 provider runtime location 与 Editor GUID。它们不持有已加载资产，也不触发加载。Property drawer 只用 GUID 保留并显示 Unity authoring 引用；第二行显式编辑 `Runtime Location`。Validator 报告缺失的 GUID 目标与空的 runtime location，但绝不重写 provider 地址。
 
-### 脚本定义符号
+`IAssetPathBuilder` 与 `IAssetPathBuilderFactory` 是消费者持有的 string-location hook，供 UIFramework 等 integration 使用。在 composition 或其他冷路径构建稳定的规范地址；避免逐帧构造字符串。
 
-这些符号会根据已安装的包自动定义：
+## 进阶主题
 
-| 符号                   | 定义时机               |
-| ---------------------- | ---------------------- |
-| `YOOASSET_PRESENT`     | 已安装 YooAsset 包     |
-| `ADDRESSABLES_PRESENT` | 已安装 Addressables 包 |
-| `VCONTAINER_PRESENT`   | 已安装 VContainer 包   |
+### 内存缓存与 SLRU
 
----
+每个 package 使用有界的分段 LRU 缓存，以 `(location, asset type, operation kind)` 为键：
 
-## 最佳实践
+- **Active** 持有带一个或多个调用方引用的 handle；被钉住，绝不驱逐。
+- **Probation** 持有首次使用的 idle handle；容量与字节压力优先驱逐其 LRU 尾部。
+- **Protected** 持有被复用过的 idle handle；溢出时把 LRU 尾部降级到 Probation。
+- **Detached** 是其 catalog 或 manifest generation 已不再是当前的 active handle。现有调用方 lease 仍然有效；后续 load 解析当前 generation。
 
-1. **始终释放句柄** - 使用 `using` 语句或手动调用 `Dispose()`
-2. **优先使用异步加载** - 同步加载会阻塞主线程
-3. **选择合适的提供器** - 正式项目用 YooAsset，原型开发用 Resources
-4. **开发时启用句柄追踪** - 帮助尽早发现内存泄漏
-5. **使用 DI 容器** - 将 `IAssetModule` 注册为单例以保持架构清晰
+查询是平均 O(1) 的 Dictionary 操作。Catalog 或 manifest generation 变更会从 keyed SLRU 查询中移除每个 active handle，但不失效其当前调用方 lease。这样的 handle 仍计为 Active，在 Asset Cache Debugger 中显示为 `Detached`，并在最终释放或 package shutdown 时 Dispose。只有成功完成的后端操作才能进入 idle retention。
+
+### 数量与字节预算
+
+`AssetCacheTuning` 控制 `ProbationEntryLimit`、`ProtectedEntryLimit`、`IdleByteBudget` 与 `ClearIdleOnLowMemory`。显式限制允许每个 idle 段 1-131,072 个条目，`IdleByteBudget` 至少 1 MiB。这些是输入安全边界，不是推荐容量。
+
+内存估算在每次 Active 到 idle 转换时使用 `Profiler.GetRuntimeMemorySizeLong` 与 `Texture2D`、`Cubemap`、其他 `Texture`、`Mesh`、`AudioClip` 的无分配 fallback。如果无法建立正占用，handle 绕过 idle retention。大于 idle 字节预算的候选会在准入前被拒绝。估算仍排除传递性 AssetBundle 内存、重复 native 内存、GPU 常驻、streaming mip 状态、provider metadata、allocator overhead 与 driver 分配。使用 Memory Profiler 与平台工具设置产品预算。
+
+Module 级默认通过 `AssetManagementOptions.DefaultCacheTuning` 配置。Package 可通过 `AssetPackageInitOptions.CacheTuningOverride` 覆盖。`SetCacheIdleMemoryBudget` 支持临时 runtime 覆盖并立即 trim idle 条目。
+
+### Retention
+
+`TrimIdleCache` 按 age、byte 估算、tier、kind、asset type、bucket、tag、owner 或自定义谓词，把可组合的保留与驱逐规则应用到 idle 条目。`ClearBucket` 与 `ClearBucketsByPrefix` 提供确定的生命周期域清理。
+
+核心缓存没有 timer。`AssetCacheRetentionScheduler` 是可选的 UniTask scheduler；`AssetCacheRetentionBehaviour` 是 scene bridge，必须显式调用 `Bind(package)`。预构建周期性 policy 与谓词，保持周期性线性扫描低频且远离帧关键工作。
+
+### 内容信任
+
+`ContentTrustManifest` 构造后不可变。它校验并防御性复制条目、归一化 Unicode 与 `/` 分隔符、拒绝 rooted/traversal/非可移植路径、拒绝大小写不敏感的重复 location，并按规范排序。JSON wire 契约是 schema version 2；`ContentTrustManifestCodec` 只接受 schema 2，不提供迁移。
+
+`ContentTrustVerifier` 在两种内置 policy 下只接受 SHA-256 条目。默认 `ContentTrustPolicy.RequireSignature` 在文件校验前先校验签名，缺失或被拒绝时 fail-closed。`IntegrityOnly` 必须显式选择；它检测相对于所提供 manifest 的字节变化，但不认证其发布者。签名算法与密钥托管是 `IContentTrustSignatureVerifier` 背后的应用/基础设施职责。私钥不得放入客户端。
+
+规范签名 payload 绑定 schema version、manifest version、content root 与条目。它不绑定 product、package、channel 或 platform。签名只认证这些规范字节；不提供跨发布域授权、防重放或防回滚。产品必须持久化并执行自己的可信版本 policy。
+
+### 产品持有的维护工作流
+
+模块把 provider 操作、`IDownloader`、存储预检与内容信任校验作为独立原语暴露。产品代码组合完整的发布工作流。Addressables 与 YooAsset 不保证隔离的预激活下载或原子 manifest/catalog 激活。
+
+必需顺序：
+
+1. 进入维护模式，停止依赖加载，隔离受影响内容。
+2. 解析已认证的产品发布 metadata，并计算保守的 `RequiredFreeBytes`。
+3. 在 provider manifest/catalog mutation 前运行第一道存储门。
+4. 通过 owning adapter 边界修改 provider 状态，并持久化记录 provider 可能已变化。
+5. 创建作用域 downloader，await `PrepareAsync`，用权威 `TotalDownloadBytes` 运行第二道存储门。
+6. 调用 `StartAsync`；产品拥有可枚举 staging 树时，用可信 `ContentTrustManifest` 校验。
+7. 校验与产品 commit policy 成功后才重新启用依赖内容。每条路径都 Dispose downloader。
+
+`PrepareAsync` 绝不启动 payload 写入。provider mutation 后的失败必须保持内容隔离，直到产品恢复 policy 达到已知状态。所有 Addressables catalog mutation 必须通过其 owning package adapter；直接 `Addressables.UpdateCatalogs` 调用会创建不支持的分裂 authority。
+
+### Provider options 透传：解密与文件系统（YooAsset）
+
+`AssetPackageInitOptions.ProviderOptions` 原样携带 provider 原生 options 对象，适配器不做拷贝或过滤。对 YooAsset 而言就是 `YooAsset.InitializePackageOptions` 及其派生类型（`EditorSimulateModeOptions`、`OfflinePlayModeOptions`、`HostPlayModeOptions`、`WebPlayModeOptions`、`CustomPlayModeOptions`），因此 provider 的全部能力都无需改动适配器即可触达。自定义解密与自定义文件系统走同一条接缝：
+
+```csharp
+var hostOptions = new HostPlayModeOptions
+{
+    // 按产品配置 builtin/cache 文件系统参数
+};
+hostOptions.CacheFileSystemParameters.AddParameter(
+    EFileSystemParameter.AssetBundleDecryptor, new MyAssetBundleDecryptor());
+hostOptions.CacheFileSystemParameters.AddParameter(
+    EFileSystemParameter.RawBundleDecryptor, new MyRawBundleDecryptor());
+hostOptions.CacheFileSystemParameters.AddParameter(
+    EFileSystemParameter.ManifestDecryptor, new MyManifestDecryptor());
+```
+
+自定义文件系统通过 `new FileSystemParameters("命名空间.类型名,程序集", packageRoot)` 声明；provider 用反射实例化它，并通过 `AddParameter` 注入全部参数。bundle 级策略（`DownloadUrlPolicy`、`DownloadRetryPolicy`、`WebPlatformStrategy`、`BundleUnpackPolicy`、`BuiltinFileAccessor`）使用同样的参数键。由于适配器原样转发 options 对象，只要引用的 YooAsset 版本包含对应类型，新增的 playmode 与参数在适配器升级后继续可用。`EnsureBundleFileAsync` 结果的 `IsEncrypted` 标志让产品在把路径交给原生消费方之前识别加密内容。
+
+### 小游戏平台缓存预下载
+
+Web 网络文件系统可在受支持的 YooAsset 范围内（最低稳定版 3.0.6，兼容 `[3.0.6,4.0.0)`）把 bundle 预下载到平台托管缓存。该策略接口在 YooAsset 内部是 `internal`，只能从名为 `YooAsset.Custom` 的程序集访问，因此 provider 提供了一个使用该名称的友元程序集，并对外暴露公共契约：
+
+```csharp
+// 每个平台实现一次（微信、抖音……）。两个成员都在主线程、YooAsset 加载路径内执行：
+// 用平台已知状态直接回答，绝不阻塞 IO。
+public sealed class WechatPreloadPlatform : IWebPreloadPlatform
+{
+    public bool IsBundleCached(WebPreloadBundleQuery query) =>
+        WechatCache.Contains(query.BundleName, query.FileHash);
+
+    public UnityWebRequest CreatePreloadRequest(string url) =>
+        WechatCache.CreateRequest(url);
+}
+
+var webOptions = new WebPlayModeOptions
+{
+    WebNetworkFileSystemParameters =
+        FileSystemParameters.CreateDefaultWebNetworkFileSystemParameters(remoteService)
+};
+YooWebPreload.AttachPreloadStrategy(
+    webOptions.WebNetworkFileSystemParameters, new WechatPreloadPlatform());
+```
+
+预下载只被 YooAsset 的 Web 网络文件系统读取；挂到 sandbox 或 builtin 参数集上没有任何效果。`WebPreloadBundleQuery` 由所属策略跨查询复用，因此必须同步读取，且不要持有引用。
+
+xasset 等自定义 provider 适配器实现 `IAssetPackage` 加可选能力接口即可；它们按设计被 CG0014 豁免，并自动获得同一套 cache、lease、tracker 与 telemetry 基础设施。
+
+### 面向原生消费方的 bundle 文件供给
+
+`IAssetBundleFileProvisioner.EnsureBundleFileAsync(location)`（由 YooAsset 适配器实现）确保某 location 背后的 provider bundle 文件在本地就绪，并返回 `IBundleFileProvisionHandle`：
+
+- `BundleFilePath` 是 provider 本地路径，仅在 `Task` 成功后有效。sandbox、cache、editor 文件系统会给出真实路径；流式/web 文件系统以错误代替路径。
+- `IsEncrypted` 报告 provider 侧加密状态；为 true 时只有 provider 运行时能解释磁盘字节。
+- `BundleType` 是 provider 上报的 bundle 类型，用于把文件路由给正确的原生消费方。
+- 该 handle 是一次性 IO 操作，不是缓存资产：不入池、Dispose 幂等，仍在运行的供给操作由操作尾部（operation tails）在包销毁前排空。
+
+内存态的原始内容继续使用 `LoadRawFileSync`/`LoadRawFileAsync`（由 `RawFileObject` 的字节/文本承载）。当原生消费方需要的是文件路径本身时使用供给能力：原生视频播放器、原生插件或外部文件 IO。调用方必须把路径视为 provider 拥有的存储：不得移动、重命名或删除文件。
+
+### 释放失败重试驱动
+
+可恢复的 provider 释放失败会被缓存收容（park），并在后续 cache 操作时重试。当释放失败可能发生在业务静默期时，启用外部驱动：向 `AssetCacheRetentionScheduler`（或 VContainer 安装器的 `AssetCacheRetentionOptions`）传入 `retryPendingReleaseFailures: true`。此后每轮先通过包的 `IAssetReleaseRetryDriver` 能力重试至多 64 个收容失败，再应用保留策略；仍有滞留时输出 Warning 日志。重试有界、主线程亲和、对可恢复失败绝不抛出；失败计数继续通过 release-failure telemetry 可见。
+
+### 运行时 telemetry
+
+`IAssetRuntimeDiagnostics.GetRuntimeCacheSnapshot` 返回 active/idle 占用、字节预算，以及生命周期 hit/miss、admission/rejection、eviction-reason、estimated-byte、release-failure 与 peak 计数，不暴露 provider handle 或资产地址。`AssetRuntimeTelemetryRecorder` 存储固定容量 ring buffer；`AssetRuntimeTelemetryFileSink` 用原子文件替换把调用方提供的窗口导出为 JSON Lines。每条记录携带 `"schemaVersion":1`。不包含资产地址、账号 token 或内容 payload；package/provider 名称仍可能敏感。
+
+## 常见场景
+
+### 引导 Resources package
+
+```csharp
+_module = new ResourcesModule();
+_package = await AssetManager.InitializeDefaultPackageAsync(
+    _module, "BaseContent", new AssetManagementOptions(), new AssetPackageInitOptions(),
+    cancellationToken);
+```
+
+Resources 地址相对于 `Resources/` 文件夹，省略前缀与文件扩展名。`Assets/Game/Resources/UI/Icons/Inventory.png` 加载为 `UI/Icons/Inventory`。释放 wrapper 不保证立即回收 native 内存。在经过测量的阶段边界，把 package 转换为 `IUnityUnusedAssetCollector` 并 await `CollectUnusedUnityAssetsAsync`；它会清理框架 idle 所有权并调用 Unity 可能卡顿的进程全局未使用资源扫描。每个必须继续持有的资产都要保留框架 lease。
+
+### 加载图标的有界所有权
+
+```csharp
+IAssetHandle<Sprite> handle = _package.LoadAssetAsync<Sprite>(
+    "UI/Icons/Inventory",
+    bucket: "UI.Inventory",
+    tag: "UI",
+    owner: nameof(InventoryIconPresenter),
+    cancellationToken);
+try
+{
+    await handle.Task;
+    target.sprite = handle.Asset;
+    _iconHandle = handle;
+}
+catch
+{
+    handle.Dispose();
+    throw;
+}
+```
+
+调用方取消只取消该 lease 的等待视图，不取消可能被其他调用方共享的后端加载。lease 在成功、provider 失败或取消后仍必须 Dispose。
+
+### YooAsset manifest 激活
+
+```csharp
+if (package is not IYooAssetPackageMaintenance maintenance)
+{
+    throw new NotSupportedException("YooAsset maintenance is unavailable.");
+}
+
+bool manifestUpdated = await maintenance.UpdatePackageManifestAsync(
+    authenticatedPackageVersion, cancellationToken: cancellationToken);
+if (!manifestUpdated)
+{
+    throw new InvalidOperationException("YooAsset manifest activation failed.");
+}
+```
+
+package version 必须来自产品持有的、带硬响应大小上限与防回滚 policy 的已认证 client。成功的 manifest 激活会推进 wrapper 缓存 generation：idle 条目被 Dispose，active 映射被 detach（现有 lease 仍有效），后续 load 解析已激活 manifest。
+
+### Addressables catalog 更新与清理
+
+```csharp
+if (package is not IAddressablesCatalogMaintenance maintenance)
+{
+    throw new NotSupportedException("Addressables maintenance is unavailable.");
+}
+
+bool updated = await maintenance.UpdateLatestCatalogsAsync(cancellationToken);
+bool cleaned = await maintenance.CleanUnusedBundleCacheAsync(cancellationToken);
+```
+
+`CleanUnusedBundleCacheAsync` 移除已加载 catalog 不再引用的缓存 Bundle。`ClearAllCacheFilesAsync` 清理 Unity 进程全局 AssetBundle 缓存，可能影响一个逻辑 package 之外的内容。不要在 owning adapter 之外调用 `Addressables.UpdateCatalogs`。
+
+### 校验 staged release
+
+```csharp
+ContentTrustManifest manifest = ContentTrustManifestCodec.FromJson(manifestJson);
+var failures = new List<ContentTrustVerificationResult>();
+
+int failureCount = await ContentTrustVerifier.Shared
+    .VerifyManifestFilesAsync(
+        stagingRoot, manifest, failures, signatureVerifier, cancellationToken);
+
+if (failureCount != 0)
+{
+    throw new InvalidDataException($"Content verification failed: {failures[0].Failure}");
+}
+```
+
+`VerifyManifestFilesAsync` 在读取 payload 文件前校验 manifest policy 与签名。`VerifyBytes` 与 `VerifyFile` 只校验单个条目的 size/hash，没有 manifest 时不能认证发布者。
+
+## 性能与内存
+
+### Player 默认值
+
+以下缓存值是按编译期平台与报告的系统内存选择的启发式值。这些是起点，不是通用最优值。
+
+| Player 分组 | Probation | Protected | Idle 估算字节 |
+| --- | ---: | ---: | ---: |
+| WebGL | 16 | 96 | 64 MiB |
+| Android/iOS 低于 3 GiB | 16 | 128 | 64 MiB |
+| Android/iOS 3-6 GiB | 32 | 256 | 128 MiB |
+| Android/iOS 6 GiB 或以上 | 48 | 384 | 256 MiB |
+| Dedicated Server 低于 8 GiB | 16 | 128 | 96 MiB |
+| Dedicated Server 8 GiB 或以上 | 32 | 256 | 256 MiB |
+| Desktop/其他 低于 8 GiB | 32 | 256 | 192 MiB |
+| Desktop/其他 8-16 GiB | 64 | 512 | 512 MiB |
+| Desktop/其他 16 GiB 或以上 | 96 | 768 | 768 MiB |
+
+Headless server 应减少或禁用表现层内容。主机平台应使用通过 approved SDK 测得的平台持有者预算替换通用 fallback。
+
+### 性能工程
+
+Runtime 保持热路径内部缓存查询紧凑：value cache key 避免组合字符串缓存、Dictionary 查询平均 O(1)、链表 recency 更新常数时间、scratch collection 在缓存 trim 时复用。公共调用方 lease 为每次 load 调用分配一个小型非池化对象，以防止 ABA 与陈旧引用复用。
+
+`AssetCachePerformanceTests` 包含两个测量 harness：active cache hit/retain/release（5 次 warmup、20 次测量、每次 50,000 迭代，带 GC 测量）与 10,000 条目的完整 idle trim。它们建立不变量，不是通用通过阈值。为代表性硬件与内容 trace 建立产品预算，在 CI 中保存基线，并在统计上有意义的回归时失败。测量主线程 median/p95/p99 时间、每条公共 load 路径的分配字节、provider load/download 并发、cache hit rate、总 native/GPU 内存，以及 Mono 与 IL2CPP Player 上 8-24 小时 soak 行为。
+
+### 诊断与 Editor 工具
+
+| 菜单或工具 | 用途 |
+| --- | --- |
+| `Tools/CycloneGames/AssetManagement/Validate All AssetRefs` | 流式扫描序列化引用，报告缺失 GUID 目标或空 runtime location，不写入资产 |
+| `Tools/CycloneGames/AssetManagement/Asset Cache Debugger` | 检查 keyed Active、`Detached`、Probation、Protected、bucket 与 provider 汇总 |
+| `Tools/CycloneGames/AssetManagement/Asset Handle Tracker` | 检查 caller/provider handle 生命周期、ownership metadata、registry 容量与 dropped registration |
+| `Tools/CycloneGames/AssetManagement/Scene Tracker` | 检查 scene load、activation、unload 状态、registry 容量与 dropped registration |
+| `Tools/CycloneGames/AssetManagement/Runtime Governance` | 聚合 cache、handle、scene 与长期持有所有权信号 |
+
+Handle tracking 默认关闭，且有 runtime 成本。Handle registry 默认 16,384 条（最大 65,536）；scene registry 默认 4,096 条（最大 16,384）。满容量时，tracker 会丢弃新诊断注册、递增 `DroppedRegistrationCount` 并标记 observation epoch 不完整。Editor 窗口只在可见且 Play Mode 时刷新，频率不超过 2 Hz；cache detail 每层上限 4,096 行。
+
+`HandleTracker.Enabled`、`HandleTracker.EnableStackTrace` 与 `HandleTracker.ConfigureCapacity` 是进程级诊断设置。从一个 composition root 或 Editor 诊断工具配置；它们不是 `AssetManagementOptions` 字段。
+
+运行告警、provider 失败、cache-retention 事件和 Editor 校验结果均使用共享日志契约，而不直接调用 `UnityEngine.Debug`。异常记录保留原始 `Exception`；频繁执行的 load-profiler 消息使用 deferred state formatting，关闭 channel 后不会构建消息。
+
+### 平台与硬件指引
+
+- **桌面（Windows/Linux/macOS）**：只有 provider 缓存解析到普通文件系统卷时，free-space 预检才可靠。校验 `StorageLocation` 与报告容量属于确切目标挂载点。在 Linux 上测试大小写敏感，在 Windows/macOS 上测试大小写保留行为。
+- **Android 与 iOS**：把报告的系统内存当作粗略信号，用真实峰值 native/GPU 内存按设备档位调优。App sandbox free space、OS purge 行为、quota、温控与 suspend/resume 可能使预检假设失效。
+- **WebGL**：浏览器存储 quota 与 eviction 由浏览器/用户控制；存储预检通常为 `Unknown`。不能假定通用 worker thread。单个大文件哈希在无法放入单帧预算时需要产品专属分块。
+- **Dedicated Server**：只使用服务端模拟所需的 loading-only 内容，避免客户端表现资产。即使周边 server 有 worker pool，Unity object API 也保持在 Unity 主线程。
+- **主机平台**：使用通过 approved SDK 测得的平台持有者预算提供平台专属 profile。通用 fallback 不代表任何主机 SDK、Player build、IL2CPP 或认证结果。
+
+## 故障排查
+
+| 现象 | 可能原因 | 解决方法 |
+| --- | --- | --- |
+| Package 没有 provider-maintenance 能力 | 未引用 provider assembly 或选择了 Resources | 检查 `package is IYooAssetPackageMaintenance` / `IAddressablesCatalogMaintenance`；Resources 暴露独立的 `IUnityUnusedAssetCollector` engine-global 能力 |
+| 存储容量为 `Unknown` | 平台无法报告可靠容量 | 除非有显式验证的产品 policy 提供等价决策，否则停止 |
+| Download scope 不支持 | Downloader factory 选错 | YooAsset：All/Tags/Locations 带显式 recursion；Addressables：仅 Tags 或递归 Locations |
+| 失败后 provider 状态可能已变化 | 操作越过 mutation 边界 | 隔离依赖内容，保留恢复证据，重试前要求显式 owner 决策 |
+| 成功检查后存储不足 | 预检不是预约 | 用实测峰值放大重算 `RequiredFreeBytes` 并重试 |
+| 文件哈希前签名校验失败 | 缺少 verifier、缺少签名或签名被拒 | 校验规范 payload 生成、密钥选择、签名编码；不要为绕过而切换到 `IntegrityOnly` |
+| 所有调用方 Dispose 后资产仍在内存 | Idle 缓存条目由 retention policy 保留 | 检查 Cache Debugger，调用定向 bucket clear 或 retention policy，与 Memory Profiler 证据对比 |
+| Handle 看起来泄漏 | 某条路径未 Dispose lease | 启用 handle tracking，确认每条成功/异常/取消路径都 Dispose 调用方 lease；取消 `handle.Task` 不会 Dispose 它 |
+| YooAsset raw 读取返回空值 | Provider load 未完成或失败 | await `IRawFileHandle.Task`；检查 `Error`；保留 `ReadBytes()` 结果而非反复调用 |
+| Scene 卸载被取消 | 取消只在 mutation 开始前接受 | 加入不可取消的 provider completion；失败的 unload 仍可重试 |
+| 可选集成类型不可用 | 依赖未安装或版本不匹配 | 确认依赖在 `manifest.json`/`packages-lock.json` 中、满足 `versionDefines`、被 composition asmdef 引用 |
+
+## 验证
+
+运行时变更的最低验证：
+
+1. 从 Unity 生成的工程构建 `CycloneGames.AssetManagement.Runtime` 与 `CycloneGames.AssetManagement.Runtime.CacheRetention`。
+2. 运行全部 `CycloneGames.AssetManagement.Tests.Editor` EditMode test、`CycloneGames.AssetManagement.Tests.PlayMode` PlayMode test 与两个 `AssetCachePerformanceTests` harness。
+3. Play Mode 下演练 package initialize/load/cancel/dispose、Resources deferred-destruction 屏障、重复 await memoized task、provider-fault 传播、owner 退役取消及迟到 provider 成功/失败与尾任务排空、跨 package 拒绝、手动 activation/unload、低内存 idle 清理、downloader prepare/start 失败与取消、泄漏操作的 shutdown 清理与 shutdown 重试。
+4. 对每个可选 provider，安装确切锁定的依赖，编译 provider assembly，运行 provider 专属测试，演练干净 Player 缓存。对 YooAsset 的 asset、all-assets、raw-file、instance 与 scene wrapper，验证 pending 同步等待会抛出且不调用 provider wait API；succeeded、faulted 与 canceled 终态调用都是 no-op；Dispose、迟到 completion 与 source release 保持 exactly-once。验证 `PrepareAsync` 不执行 payload 写入、total 只在 prepare 后才权威、Dispose 幂等。
+5. 对每个声明的 Windows、Linux、macOS、iOS、Android、WebGL、Dedicated Server 与批准的主机配置运行 clean-clone CI 与目标 Player build。在 Mono 与 IL2CPP、低存储、磁盘满、权限拒绝、网络丢失、suspend/resume 与禁用 domain reload 下重复关键场景。
+
+Editor 或 CLI assembly 结果不能证明 Player、IL2CPP、长期会话、存储设备或跨平台正确性。在发布验证记录中显式记录每个未执行的验证维度。
+
+```text
+<UnityEditor> -batchmode -nographics -projectPath <repo-root>/UnityStarter \
+  -runTests -testPlatform EditMode \
+  -testFilter CycloneGames.AssetManagement \
+  -testResults <result-path>
+```
+
+对 deferred Unity object-destruction 契约，改用 `-testPlatform PlayMode -assemblyNames CycloneGames.AssetManagement.Tests.PlayMode` 再运行一次。
+
+## 内存限制与有界维护
+
+实现 `IAssetCacheMaintenanceOwner` 的 asset package 会提供 allocation-free runtime snapshot 与 `TrimIdleCacheStep(maxWork)`。该有界步骤在 owner thread 上执行，最多移除 `maxWork` 个 idle cache handle，并且绝不会释放 active lease。释放 bytes 只能标记为近似值，因为此包无法拥有或精确测量 asset handle 背后的全部 engine/native allocation。
+
+`AssetCacheService` 暴露固定的 owner-local 指标与仅清理 idle entry 的有界维护。权威 hard cache/admission limit 仍属于 AssetManagement；外部 diagnostics 不得创建第二份缓存或改变 active asset ownership。请运行 AssetManagement EditMode suite，覆盖准入、所有权与维护行为。

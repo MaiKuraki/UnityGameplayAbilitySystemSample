@@ -34,11 +34,11 @@ namespace GASSample.AOT
             builder.RegisterBuildCallback(async resolver =>
             {
                 var assetModule = resolver.Resolve<IAssetModule>();
-                await assetModule.InitializeAsync(new AssetManagementOptions(operationSystemMaxTimeSliceMs: 16));
-                await AssetPackageFactory.CreateAndInitializePackageAsync(
-                    module: assetModule,
-                    packageName: DefaultPackage,
-                    options: new AssetPackageInitOptions(AssetPlayMode.Offline, null, bundleLoadingMaxConcurrencyOverride: 8));
+                await AssetManager.InitializeDefaultPackageAsync(
+                    assetModule,
+                    DefaultPackage,
+                    new AssetManagementOptions(),
+                    new AssetPackageInitOptions());
             });
         }
     }

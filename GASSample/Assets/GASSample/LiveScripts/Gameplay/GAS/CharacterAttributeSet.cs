@@ -1,11 +1,13 @@
+using CycloneGames.GameplayAbilities.Core;
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayTags.Core;
-using CycloneGames.Logger;
+using CycloneGames.Logging;
 
 namespace GASSample.Gameplay
 {
     public class CharacterAttributeSet : AttributeSet
     {
+        private static readonly LogChannel Log = LogChannel.Create("GASSample");
         public GameplayAttribute Level { get; } = new GameplayAttribute(GASSampleTags.Attribute_Primary_Level);
 
         public GameplayAttribute Experience { get; } = new GameplayAttribute(GASSampleTags.Attribute_Meta_Experience);
@@ -22,17 +24,44 @@ namespace GASSample.Gameplay
 
         public CharacterAttributeSet() { }
 
-        public override void PreAttributeChange(GameplayAttribute attribute, ref float newValue)
+        protected override void RegisterAttributes()
+        {
+            RegisterAttribute(Level);
+            RegisterAttribute(Experience);
+            RegisterAttribute(AttackPower);
+            RegisterAttribute(Defense);
+            RegisterAttribute(MoveSpeed);
+            RegisterAttribute(Health);
+            RegisterAttribute(MaxHealth);
+            RegisterAttribute(Stamina);
+            RegisterAttribute(MaxStamina);
+            RegisterAttribute(Damage);
+        }
+
+        public override void PreAttributeChange(GameplayAttribute attribute, ref GASFixedValue newValue)
         {
             base.PreAttributeChange(attribute, ref newValue);
 
             if (attribute == Health)
             {
-                newValue = System.Math.Clamp(newValue, 0.0f, GetCurrentValue(MaxHealth));
+                ClampToRange(ref newValue, MaxHealth);
             }
             else if (attribute == Stamina)
             {
-                newValue = System.Math.Clamp(newValue, 0.0f, GetCurrentValue(MaxStamina));
+                ClampToRange(ref newValue, MaxStamina);
+            }
+        }
+
+        private void ClampToRange(ref GASFixedValue value, GameplayAttribute maxAttribute)
+        {
+            GASFixedValue max = GetCurrentFixedValue(maxAttribute);
+            if (value > max)
+            {
+                value = max;
+            }
+            else if (value < GASFixedValue.Zero)
+            {
+                value = GASFixedValue.Zero;
             }
         }
 
@@ -61,8 +90,8 @@ namespace GASSample.Gameplay
                 if (newHealth <= 0 && currentHealth > 0)
                 {
                     var targetASC = data.Target;
-                    targetASC.AddLooseGameplayTag(GameplayTagManager.RequestTag(GASSampleTags.State_Dead));
-                    CLogger.LogWarning($"{targetASC.OwnerActor} has died!");
+                    targetASC.AddLooseGameplayTag(GameplayTagManager.Request(GASSampleTags.State_Dead));
+                    Log.Warning($"{targetASC.OwnerActor} has died!");
 
                     var killerASC = data.EffectSpec.Source;
                     if (killerASC != null && killerASC != targetASC)
@@ -113,7 +142,7 @@ namespace GASSample.Gameplay
             {
                 if (data.Target.OwnerActor is GASSampleCharacter character)
                 {
-                    bool hasExpGainTag = data.EffectSpec.Def.AssetTags.HasTag(GameplayTagManager.RequestTag(GASSampleTags.Event_Experience_Gain));
+                    bool hasExpGainTag = data.EffectSpec.Def.AssetTags.HasTag(GameplayTagManager.Request(GASSampleTags.Event_Experience_Gain));
                     if (hasExpGainTag)
                     {
                         character.CheckForLevelUp();

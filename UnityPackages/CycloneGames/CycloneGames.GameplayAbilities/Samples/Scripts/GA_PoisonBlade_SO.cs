@@ -1,11 +1,13 @@
 using CycloneGames.GameplayAbilities.Runtime;
-using CycloneGames.Logger;
+using CycloneGames.Logging;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Sample
 {
     public class GA_PoisonBlade : GameplayAbility
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private readonly GameplayEffect impactDamageEffect;
         private readonly GameplayEffect poisonEffect;
 
@@ -17,8 +19,11 @@ namespace CycloneGames.GameplayAbilities.Sample
 
         public override void ActivateAbility(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, GameplayAbilityActivationInfo activationInfo)
         {
-            // This ability is now cast by an Enemy, so we commit it first.
-            CommitAbility(actorInfo, spec);
+            if (!CommitAbility(actorInfo, spec).Succeeded)
+            {
+                EndAbility();
+                return;
+            }
             
             var caster = actorInfo.AvatarGameObject;
             
@@ -27,7 +32,7 @@ namespace CycloneGames.GameplayAbilities.Sample
             if (target != null && target.TryGetComponent<AbilitySystemComponentHolder>(out var holder))
             {
                 var targetASC = holder.AbilitySystemComponent;
-                CLogger.LogInfo($"{caster.name} strikes {target.name} with Poison Blade.");
+                Log.Info($"{caster.name} strikes {target.name} with Poison Blade.");
 
                 // --- Apply Effects in Sequence ---
 
@@ -47,7 +52,7 @@ namespace CycloneGames.GameplayAbilities.Sample
             }
             else
             {
-                CLogger.LogWarning($"{caster.name}'s Poison Blade found no valid target.");
+                Log.Warning($"{caster.name}'s Poison Blade found no valid target.");
             }
 
             EndAbility();
@@ -56,19 +61,31 @@ namespace CycloneGames.GameplayAbilities.Sample
         // A placeholder for a real AI targeting system.
         private GameObject FindTarget(GameObject caster)
         {
-            // For this example, we'll simply find the Player object by name.
-            // A real game would use a more robust system (e.g., threat table, proximity checks).
+            // Sample-scene placeholder: the target is resolved by name for this demo only. A real game
+            // would use a more robust system (e.g., a threat table or proximity checks). CG0010
+            // (GameObject.Find in production code) is suppressed for exactly this statement;
+            // production abilities must inject a project targeting service.
+#pragma warning disable CG0010
             return GameObject.Find("Player");
+#pragma warning restore CG0010
         }
 
-        public override GameplayAbility CreatePoolableInstance()
+        public override GameplayAbility CreateRuntimeInstance()
         {
-            // CHANGED: Pass both effects to the new instance.
-            return new GA_PoisonBlade(this.impactDamageEffect, this.poisonEffect);
+            return new GA_PoisonBlade(impactDamageEffect, poisonEffect);
         }
     }
 
-    [CreateAssetMenu(fileName = "GA_PoisonBlade", menuName = "CycloneGames/GameplayAbilitySystem/Samples/Ability/PoisonBlade")]
+    /// <summary>
+    /// [BASIC] Melee hit that applies two effects: instant impact damage plus a periodic
+    /// poison debuff. Introduces HasDuration effects and periodic execution.
+    ///
+    /// Key Concepts:
+    /// - HasDuration effects with a Period (damage over time)
+    /// - Applying multiple effects from one activation
+    /// - CommitAbility with cost and cooldown
+    /// </summary>
+    [CreateAssetMenu(fileName = "GA_PoisonBlade", menuName = "CycloneGames/GameplayAbilities/Samples/Ability/PoisonBlade")]
     public class GA_PoisonBlade_SO : GameplayAbilitySO
     {
         [Tooltip("The initial, one-time damage applied on hit.")]
@@ -77,25 +94,13 @@ namespace CycloneGames.GameplayAbilities.Sample
         [Tooltip("The lingering Damage-over-Time effect applied after the initial impact.")]
         public GameplayEffectSO PoisonEffect;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
             var impactDamage = ImpactDamageEffect ? ImpactDamageEffect.GetGameplayEffect() : null;
             var poison = PoisonEffect ? PoisonEffect.GetGameplayEffect() : null;
-            
+
             var ability = new GA_PoisonBlade(impactDamage, poison);
-            
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
+            InitializeAbility(ability);
             return ability;
         }
     }

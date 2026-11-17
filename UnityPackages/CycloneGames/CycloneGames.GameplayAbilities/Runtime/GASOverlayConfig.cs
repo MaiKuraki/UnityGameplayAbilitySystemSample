@@ -4,16 +4,24 @@ using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
+    internal static class GameplayAbilitiesAssetMenuPaths
+    {
+        public const string Root = "CycloneGames/GameplayAbilities";
+        public const string GameplayEffectDefinition = Root + "/Definitions/Gameplay Effect";
+        public const string OverlayConfig = Root + "/Diagnostics/GAS Overlay Config";
+    }
+
     /// <summary>
-    /// Configuration asset for the GAS Debug Overlay.
-    /// Stores tag-color mapping rules and visual settings.
-    /// Create via Assets menu: Create > CycloneGames > GAS Overlay Config.
-    /// Place in a Resources folder to enable auto-loading at runtime.
+    /// Configuration asset for the GAS Debug Overlay. Stores tag-color mapping rules and visual
+    /// settings. The asset is optional: the overlay falls back to <see cref="CreateDefault"/> when
+    /// no configuration is supplied.
+    /// Create via Assets menu: Create > CycloneGames > GameplayAbilities > Diagnostics > GAS Overlay Config.
+    /// Bind it explicitly through <see cref="ActiveConfiguration"/> or the configuration parameter
+    /// of <c>GASDebugOverlay.Initialize</c>.
     /// </summary>
-    [CreateAssetMenu(fileName = "GASOverlayConfig", menuName = "CycloneGames/GameplayAbilitySystem/GAS Overlay Config", order = 200)]
+    [CreateAssetMenu(fileName = "GASOverlayConfig", menuName = GameplayAbilitiesAssetMenuPaths.OverlayConfig, order = 200)]
     public class GASOverlayConfig : ScriptableObject
     {
-        private const string ResourcePath = "GASOverlayConfig";
 
         [Serializable]
         public struct ResourceBarRule
@@ -120,7 +128,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
         [Range(0.15f, 1f)]
         public float PanelAlpha = 0.8f;
 
-        [Tooltip("Maximum number of panels to display at once.")]
+        [Tooltip("Maximum number of explicitly registered panels. The overlay captures this capacity when it initializes.")]
         [Range(1, 32)]
         public int MaxPanels = 8;
 
@@ -172,10 +180,20 @@ namespace CycloneGames.GameplayAbilities.Runtime
         [Tooltip("Vertical offset in screen pixels above the object's head.")]
         public float WorldTrackingOffsetY = 30f;
 
-        /// <summary>Loads the config from Resources. Returns null if not found.</summary>
-        public static GASOverlayConfig Load()
+        /// <summary>
+        /// Process-wide configuration supplied explicitly by the composition root. Set to null to
+        /// use defaults. The overlay clones this instance, so the settings panel never modifies a
+        /// project asset.
+        /// </summary>
+        public static GASOverlayConfig ActiveConfiguration { get; set; }
+
+        /// <summary>
+        /// Creates a mutable configuration instance populated by this type's field initializers.
+        /// The caller owns the returned instance and must destroy it when it is no longer needed.
+        /// </summary>
+        public static GASOverlayConfig CreateDefault()
         {
-            return Resources.Load<GASOverlayConfig>(ResourcePath);
+            return CreateInstance<GASOverlayConfig>();
         }
 
         /// <summary>

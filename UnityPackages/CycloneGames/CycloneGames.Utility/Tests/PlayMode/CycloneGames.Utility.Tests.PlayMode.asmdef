@@ -1,0 +1,20 @@
+{
+    "name": "CycloneGames.Utility.Tests.PlayMode",
+    "rootNamespace": "CycloneGames.Utility.Tests.PlayMode",
+    "references": [
+        "CycloneGames.Utility.Runtime",
+        "CycloneGames.Logging.Core"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ],
+    "noEngineReferences": false
+}

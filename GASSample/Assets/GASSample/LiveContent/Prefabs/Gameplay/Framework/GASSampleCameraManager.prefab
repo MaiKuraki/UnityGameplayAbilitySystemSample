@@ -11,6 +11,7 @@ GameObject:
   - component: {fileID: 7094289168631456052}
   - component: {fileID: 4889576264116274839}
   - component: {fileID: 5044011934468441067}
+  - component: {fileID: 1661652310007454089}
   m_Layer: 0
   m_Name: GASSampleCameraManager
   m_TagString: Untagged
@@ -92,8 +93,25 @@ MonoBehaviour:
   bCanBeDamaged: 1
   bHidden: 0
   tags: []
+  PrimaryTickPhase: 0
+  StartWithTickEnabled: 1
   DefaultFOV: 60
   defaultBlendDuration: 0.15
-  bootstrapVirtualCamera: {fileID: 4889576264116274839}
-  bootstrapBrain: {fileID: 0}
+  cameraOutput: {fileID: 1661652310007454089}
   animator: {fileID: 0}
+--- !u!114 &1661652310007454089
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8366307557638833791}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1e496957beba4ad2bc5740689dd36267, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  bootstrapVirtualCamera: {fileID: 4889576264116274839}
+  bootstrapBrain: {fileID: 3239740349652733683, guid: 4d3cc6a818645f048be23214b448d159,
+    type: 3}
+  allowSceneDiscovery: 1

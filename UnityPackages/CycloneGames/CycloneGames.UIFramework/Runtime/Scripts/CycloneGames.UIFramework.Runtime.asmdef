@@ -3,39 +3,15 @@
     "rootNamespace": "",
     "references": [
         "UniTask",
-        "CycloneGames.Logger",
-        "CycloneGames.Service.Runtime",
-        "CycloneGames.Factory.Runtime",
-        "CycloneGames.AssetManagement.Runtime",
-        "LitMotion",
-        "UniTask.DOTween",
-        "DOTween.Modules",
-        "VContainer",
-        "PrimeTween.Runtime"
+        "CycloneGames.Logging.Core"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
-    "allowUnsafeCode": true,
+    "allowUnsafeCode": false,
     "overrideReferences": false,
     "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
-    "versionDefines": [
-        {
-            "name": "com.annulusgames.lit-motion",
-            "expression": "",
-            "define": "LIT_MOTION_PRESENT"
-        },
-        {
-            "name": "jp.hadashikick.vcontainer",
-            "expression": "",
-            "define": "VCONTAINER_PRESENT"
-        },
-        {
-            "name": "com.kyrylokuzyk.primetween",
-            "expression": "",
-            "define": "PRIME_TWEEN_PRESENT"
-        }
-    ],
+    "versionDefines": [],
     "noEngineReferences": false
 }

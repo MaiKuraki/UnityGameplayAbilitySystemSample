@@ -1,4 +1,5 @@
 using CycloneGames.GameplayAbilities.Runtime;
+using CycloneGames.Logging;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Samples
@@ -11,7 +12,7 @@ namespace CycloneGames.GameplayAbilities.Samples
     /// - Abilities granted temporarily by effects
     /// - High damage finisher ability
     /// </summary>
-    [CreateAssetMenu(menuName = "CycloneGames/GameplayAbilitySystem/Samples/Ability/Execute (Granted)")]
+    [CreateAssetMenu(menuName = "CycloneGames/GameplayAbilities/Samples/Ability/Execute (Granted)")]
     public class GA_Execute_SO : GameplayAbilitySO
     {
         [Header("Execute Configuration")]
@@ -21,30 +22,19 @@ namespace CycloneGames.GameplayAbilities.Samples
         [Tooltip("The damage effect to apply")]
         public GameplayEffectSO ExecuteDamageEffect;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
             var damageEffect = ExecuteDamageEffect ? ExecuteDamageEffect.GetGameplayEffect() : null;
             var ability = new GA_Execute(damageEffect, DamageMultiplier);
-            
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
-            
+            InitializeAbility(ability);
             return ability;
         }
     }
 
     public class GA_Execute : GameplayAbility
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private readonly GameplayEffect executeDamageEffect;
         private readonly float damageMultiplier;
 
@@ -56,9 +46,13 @@ namespace CycloneGames.GameplayAbilities.Samples
 
         public override void ActivateAbility(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, GameplayAbilityActivationInfo activationInfo)
         {
-            CommitAbility(actorInfo, spec);
+            if (!CommitAbility(actorInfo, spec).Succeeded)
+            {
+                EndAbility();
+                return;
+            }
             
-            GASLog.Info($"[Execute] EXECUTE! Dealing {damageMultiplier}x damage!");
+            Log.Info($"[Execute] EXECUTE! Dealing {damageMultiplier}x damage!");
             
             // In production, you would get the target from a targeting system
             // and apply the damage effect to them
@@ -75,23 +69,9 @@ namespace CycloneGames.GameplayAbilities.Samples
             EndAbility();
         }
 
-        public override GameplayAbility CreatePoolableInstance()
+        public override GameplayAbility CreateRuntimeInstance()
         {
-            var ability = new GA_Execute(this.executeDamageEffect, this.damageMultiplier);
-            
-            ability.Initialize(
-                this.Name,
-                this.InstancingPolicy,
-                this.NetExecutionPolicy,
-                this.CostEffectDefinition,
-                this.CooldownEffectDefinition,
-                this.AbilityTags,
-                this.ActivationBlockedTags,
-                this.ActivationRequiredTags,
-                this.CancelAbilitiesWithTag,
-                this.BlockAbilitiesWithTag
-            );
-            return ability;
+            return new GA_Execute(executeDamageEffect, damageMultiplier);
         }
     }
 }

@@ -1,26 +1,39 @@
 using System;
+#if UNITY_EDITOR
 using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
-using CycloneGames.Utility.Runtime;
+using CycloneGames.Hash.Core;
 using VYaml.Annotations;
+#endif
 
 namespace CycloneGames.InputSystem.Runtime
 {
     /// <summary>
-    /// Computes a deterministic fingerprint of the InputConfiguration schema using reflection.
-    /// The fingerprint changes automatically when any [YamlMember] property, type, or enum value changes.
-    /// Uses XxHash64 from CycloneGames.Utility.Runtime for cross-platform determinism.
+    /// Optional Editor-only schema diagnostic. Runtime compatibility is governed by InputConfiguration.SchemaVersion.
     /// </summary>
     public static class InputSchemaFingerprint
     {
+#if UNITY_EDITOR
         private static string _cached;
+#endif
 
         /// <summary>
-        /// The current schema fingerprint. Computed once via reflection, then cached.
+        /// Reflection-based Editor diagnostic only. Player builds return an empty string.
         /// </summary>
-        public static string Current => _cached ??= Compute(typeof(InputConfiguration));
+        public static string EditorDiagnosticCurrent
+        {
+            get
+            {
+#if UNITY_EDITOR
+                return _cached ??= Compute(typeof(InputConfiguration));
+#else
+                return string.Empty;
+#endif
+            }
+        }
 
+#if UNITY_EDITOR
         private static string Compute(Type rootType)
         {
             var sb = new StringBuilder(256);
@@ -124,5 +137,6 @@ namespace CycloneGames.InputSystem.Runtime
 
             return null;
         }
+#endif
     }
 }

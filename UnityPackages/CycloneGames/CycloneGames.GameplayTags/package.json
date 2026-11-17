@@ -2,10 +2,14 @@
   "name": "com.cyclone-games.gameplay-tags",
   "version": "1.0.0",
   "displayName": "CycloneGames.GameplayTags",
-  "description": "A simple gameplay tags module similiar with UnrealEngine's GameplayTags.",
+  "description": "A production-oriented gameplay tags module inspired by Unreal Engine GameplayTags.",
   "unity": "2022.3",
   "unityRelease": "0f1",
-  "dependencies": {},
+  "dependencies": {
+    "com.cyclone-games.logging": "1.0.0",
+    "com.cyclone-games.hash": "1.0.0",
+    "com.unity.nuget.newtonsoft-json": "3.2.2"
+  },
   "keywords": [
     "CycloneGames",
     "GameplayTags"

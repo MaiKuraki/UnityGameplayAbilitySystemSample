@@ -15,30 +15,67 @@ MonoBehaviour:
   EffectName: GE_AttackCooldown_3
   DurationPolicy: 1
   Duration: 2.3
+  DurationMagnitude:
+    Enabled: 0
+    CalculationType: 0
+    Magnitude:
+      BaseValue: 1
+      ScalingFactorPerLevel: 0
+    BackingAttributeName: 
+    AttributeCaptureSource: 0
+    AttributeCalculationType: 0
+    AttributeSnapshotPolicy: 0
+    AttributeCoefficient:
+      BaseValue: 1
+      ScalingFactorPerLevel: 0
+    AttributePreMultiplyAdditiveValue:
+      BaseValue: 0
+      ScalingFactorPerLevel: 0
+    AttributePostMultiplyAdditiveValue:
+      BaseValue: 0
+      ScalingFactorPerLevel: 0
+    SetByCallerDataTag:
+      tagName: 
+    SetByCallerDataName: 
+    SetByCallerDefaultValue: 0
+    WarnIfSetByCallerMissing: 1
   Period: 0
   SerializableModifiers: []
   ExecutionDefinition: {fileID: 0}
   Stacking:
     Type: 0
+    LimitMode: 0
     Limit: 0
     DurationPolicy: 0
+    ExpirationPolicy: 0
+    PeriodResetPolicy: 0
+    MagnitudePolicy: 0
   GrantedAbilities: []
+  GrantedAbilityRemovalPolicies: 
   AssetTags:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   GrantedTags:
-    m_SerializedExplicitTags:
+    explicitTagNames:
     - Skill.Cooldown.Attack_3
+  BlockedAbilityTags:
+    explicitTagNames: []
   ApplicationTagRequirements:
-    m_ForbiddenTags:
-      m_SerializedExplicitTags: []
-    m_RequiredTags:
-      m_SerializedExplicitTags: []
+    forbiddenTags:
+      explicitTagNames: []
+    requiredTags:
+      explicitTagNames: []
   OngoingTagRequirements:
-    m_ForbiddenTags:
-      m_SerializedExplicitTags: []
-    m_RequiredTags:
-      m_SerializedExplicitTags: []
+    forbiddenTags:
+      explicitTagNames: []
+    requiredTags:
+      explicitTagNames: []
   RemoveGameplayEffectsWithTags:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   GameplayCues:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
+  SuppressGameplayCues: 0
+  RemoveGameplayEffectsAfterAbilityEnds: 0
+  ExecutePeriodicEffectOnApplication: 1
+  PeriodicInhibitionPolicy: 0
+  OverflowEffects: []
+  DenyOverflowApplication: 0

@@ -2,9 +2,13 @@
     "name": "CycloneGames.GameplayFramework.Tests.Editor",
     "rootNamespace": "CycloneGames.GameplayFramework.Tests.Editor",
     "references": [
+        "CycloneGames.GameplayFramework.Core",
         "CycloneGames.GameplayFramework.Runtime",
+        "CycloneGames.GameplayFramework.Editor",
+        "CycloneGames.Logging.Core",
         "UniTask",
-        "Unity.Mathematics"
+        "Unity.Mathematics",
+        "Unity.PerformanceTesting"
     ],
     "includePlatforms": [
         "Editor"

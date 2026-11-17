@@ -2,16 +2,17 @@ using System.Collections.Generic;
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayFramework.Runtime;
 using CycloneGames.GameplayTags.Core;
-using CycloneGames.Logger;
 using CycloneGames.RPGFoundation;
 using CycloneGames.Utility.Runtime;
 using UnityEngine;
+using CycloneGames.Logging;
 
 namespace GASSample.Gameplay
 {
     [RequireComponent(typeof(MovementComponent))]
     public class GASSampleCharacter : Pawn
     {
+        private static readonly LogChannel Log = LogChannel.Create("GASSample");
         protected MovementComponent movementComponent;
         protected MovementComponent GetMovementComponent => movementComponent;
         public AbilitySystemComponent AbilitySystemComponent { get; protected set; }
@@ -35,14 +36,12 @@ namespace GASSample.Gameplay
 
             movementComponent = GetComponent<MovementComponent>();
             var effectContextFactory = new GameplayEffectContextFactory();
-            this.AbilitySystemComponent = new AbilitySystemComponent(effectContextFactory);
+            this.AbilitySystemComponent = new AbilitySystemComponent(
+                runtimeContext: null,
+                effectContextFactory: effectContextFactory);
             AbilitySystemComponent.InitAbilityActorInfo(this, gameObject);
             AttributeSet = new CharacterAttributeSet();
             AbilitySystemComponent.AddAttributeSet(AttributeSet);
-        }
-        override protected void Update()
-        {
-            base.Update();
         }
 
         public void CheckForLevelUp()
@@ -81,7 +80,7 @@ namespace GASSample.Gameplay
             if (levelsGained > 0)
             {
                 int finalLevel = initialLevel + levelsGained;
-                CLogger.LogInfo($"{name} gained {levelsGained} level(s)! Reached level {finalLevel}.");
+                Log.Info($"{name} gained {levelsGained} level(s)! Reached level {finalLevel}.");
 
                 var mods = new List<ModifierInfo>
                 {

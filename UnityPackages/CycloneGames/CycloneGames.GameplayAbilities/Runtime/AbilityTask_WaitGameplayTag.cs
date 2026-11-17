@@ -1,20 +1,30 @@
 using System;
 using CycloneGames.GameplayTags.Core;
+using CycloneGames.Logging;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
     /// <summary>
     /// AbilityTask that waits for a specific gameplay tag to be added to the owner.
-    /// UE5: UAbilityTask_WaitGameplayTagAdded.
     /// </summary>
     public class AbilityTask_WaitGameplayTagAdded : AbilityTask
     {
+        private static readonly LogChannel Log = GameplayAbilitiesLog.Channel;
+
         public Action OnTagAdded;
         public Action OnCancelled;
 
         private GameplayTag watchedTag;
         private bool onlyTriggerOnce;
         private OnTagCountChangedDelegate tagCallback;
+        private AbilitySystemComponent subscriptionOwner;
+        private bool terminalCallbackStarted;
+
+        public override void InitTask(GameplayAbility ability)
+        {
+            base.InitTask(ability);
+            terminalCallbackStarted = false;
+        }
 
         /// <summary>
         /// Creates a WaitGameplayTagAdded task.
@@ -29,26 +39,40 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         protected override void OnActivate()
         {
-            if (Ability?.AbilitySystemComponent == null || watchedTag.IsNone)
+            subscriptionOwner = Ability?.AbilitySystemComponent;
+            if (subscriptionOwner == null || watchedTag.IsNone)
             {
-                GASLog.Warning("WaitGameplayTagAdded: Invalid ability or tag.");
+                Log.Warning("WaitGameplayTagAdded: Invalid ability or tag.");
                 EndTask();
                 return;
             }
 
-            // If the tag is already present, fire immediately
-            if (Ability.AbilitySystemComponent.HasMatchingGameplayTag(watchedTag))
+            // Subscribe before the immediate notification so no qualifying edge can be lost.
+            // The notification is the final operation in this activation frame because it may end and re-rent this task.
+            tagCallback = HandleTagChanged;
+            subscriptionOwner.RegisterTagEventCallback(watchedTag, GameplayTagEventType.NewOrRemoved, tagCallback);
+
+            if (subscriptionOwner.HasMatchingGameplayTag(watchedTag))
             {
-                OnTagAdded?.Invoke();
                 if (onlyTriggerOnce)
                 {
-                    EndTask();
+                    if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                            this,
+                            ref terminalCallbackStarted,
+                            out ulong leaseGeneration)) return;
+                    try
+                    {
+                        OnTagAdded?.Invoke();
+                    }
+                    finally
+                    {
+                        EndTaskIfCurrentLease(leaseGeneration);
+                    }
                     return;
                 }
-            }
 
-            tagCallback = HandleTagChanged;
-            Ability.AbilitySystemComponent.RegisterTagEventCallback(watchedTag, GameplayTagEventType.NewOrRemoved, tagCallback);
+                OnTagAdded?.Invoke();
+            }
         }
 
         private void HandleTagChanged(GameplayTag tag, int newCount)
@@ -56,45 +80,81 @@ namespace CycloneGames.GameplayAbilities.Runtime
             if (!IsActive || IsCancelled) return;
             if (newCount <= 0) return; // Only fires when tag is added (count goes above 0)
 
-            OnTagAdded?.Invoke();
             if (onlyTriggerOnce)
             {
-                EndTask();
+                if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                        this,
+                        ref terminalCallbackStarted,
+                        out ulong leaseGeneration)) return;
+                try
+                {
+                    OnTagAdded?.Invoke();
+                }
+                finally
+                {
+                    EndTaskIfCurrentLease(leaseGeneration);
+                }
+                return;
             }
+
+            OnTagAdded?.Invoke();
         }
 
         public override void CancelTask()
         {
-            OnCancelled?.Invoke();
-            base.CancelTask();
+            if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                    this,
+                    ref terminalCallbackStarted,
+                    out ulong leaseGeneration)) return;
+            try
+            {
+                OnCancelled?.Invoke();
+            }
+            finally
+            {
+                if (IsCurrentLease(leaseGeneration))
+                {
+                    base.CancelTask();
+                }
+            }
         }
 
         protected override void OnDestroy()
         {
-            if (Ability?.AbilitySystemComponent != null && tagCallback != null)
+            if (subscriptionOwner != null && tagCallback != null)
             {
-                Ability.AbilitySystemComponent.RemoveTagEventCallback(watchedTag, GameplayTagEventType.NewOrRemoved, tagCallback);
+                subscriptionOwner.RemoveTagEventCallback(watchedTag, GameplayTagEventType.NewOrRemoved, tagCallback);
             }
 
             OnTagAdded = null;
             OnCancelled = null;
             tagCallback = null;
+            subscriptionOwner = null;
             base.OnDestroy();
         }
     }
 
     /// <summary>
     /// AbilityTask that waits for a specific gameplay tag to be removed from the owner.
-    /// UE5: UAbilityTask_WaitGameplayTagRemoved.
     /// </summary>
     public class AbilityTask_WaitGameplayTagRemoved : AbilityTask
     {
+        private static readonly LogChannel Log = GameplayAbilitiesLog.Channel;
+
         public Action OnTagRemoved;
         public Action OnCancelled;
 
         private GameplayTag watchedTag;
         private bool onlyTriggerOnce;
         private OnTagCountChangedDelegate tagCallback;
+        private AbilitySystemComponent subscriptionOwner;
+        private bool terminalCallbackStarted;
+
+        public override void InitTask(GameplayAbility ability)
+        {
+            base.InitTask(ability);
+            terminalCallbackStarted = false;
+        }
 
         /// <summary>
         /// Creates a WaitGameplayTagRemoved task.
@@ -109,26 +169,40 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         protected override void OnActivate()
         {
-            if (Ability?.AbilitySystemComponent == null || watchedTag.IsNone)
+            subscriptionOwner = Ability?.AbilitySystemComponent;
+            if (subscriptionOwner == null || watchedTag.IsNone)
             {
-                GASLog.Warning("WaitGameplayTagRemoved: Invalid ability or tag.");
+                Log.Warning("WaitGameplayTagRemoved: Invalid ability or tag.");
                 EndTask();
                 return;
             }
 
-            // If the tag is already absent, fire immediately
-            if (!Ability.AbilitySystemComponent.HasMatchingGameplayTag(watchedTag))
+            // Subscribe before the immediate notification so no qualifying edge can be lost.
+            // The notification is the final operation in this activation frame because it may end and re-rent this task.
+            tagCallback = HandleTagChanged;
+            subscriptionOwner.RegisterTagEventCallback(watchedTag, GameplayTagEventType.NewOrRemoved, tagCallback);
+
+            if (!subscriptionOwner.HasMatchingGameplayTag(watchedTag))
             {
-                OnTagRemoved?.Invoke();
                 if (onlyTriggerOnce)
                 {
-                    EndTask();
+                    if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                            this,
+                            ref terminalCallbackStarted,
+                            out ulong leaseGeneration)) return;
+                    try
+                    {
+                        OnTagRemoved?.Invoke();
+                    }
+                    finally
+                    {
+                        EndTaskIfCurrentLease(leaseGeneration);
+                    }
                     return;
                 }
-            }
 
-            tagCallback = HandleTagChanged;
-            Ability.AbilitySystemComponent.RegisterTagEventCallback(watchedTag, GameplayTagEventType.NewOrRemoved, tagCallback);
+                OnTagRemoved?.Invoke();
+            }
         }
 
         private void HandleTagChanged(GameplayTag tag, int newCount)
@@ -136,29 +210,56 @@ namespace CycloneGames.GameplayAbilities.Runtime
             if (!IsActive || IsCancelled) return;
             if (newCount > 0) return; // Only fires when tag is removed (count goes to 0)
 
-            OnTagRemoved?.Invoke();
             if (onlyTriggerOnce)
             {
-                EndTask();
+                if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                        this,
+                        ref terminalCallbackStarted,
+                        out ulong leaseGeneration)) return;
+                try
+                {
+                    OnTagRemoved?.Invoke();
+                }
+                finally
+                {
+                    EndTaskIfCurrentLease(leaseGeneration);
+                }
+                return;
             }
+
+            OnTagRemoved?.Invoke();
         }
 
         public override void CancelTask()
         {
-            OnCancelled?.Invoke();
-            base.CancelTask();
+            if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                    this,
+                    ref terminalCallbackStarted,
+                    out ulong leaseGeneration)) return;
+            try
+            {
+                OnCancelled?.Invoke();
+            }
+            finally
+            {
+                if (IsCurrentLease(leaseGeneration))
+                {
+                    base.CancelTask();
+                }
+            }
         }
 
         protected override void OnDestroy()
         {
-            if (Ability?.AbilitySystemComponent != null && tagCallback != null)
+            if (subscriptionOwner != null && tagCallback != null)
             {
-                Ability.AbilitySystemComponent.RemoveTagEventCallback(watchedTag, GameplayTagEventType.NewOrRemoved, tagCallback);
+                subscriptionOwner.RemoveTagEventCallback(watchedTag, GameplayTagEventType.NewOrRemoved, tagCallback);
             }
 
             OnTagRemoved = null;
             OnCancelled = null;
             tagCallback = null;
+            subscriptionOwner = null;
             base.OnDestroy();
         }
     }

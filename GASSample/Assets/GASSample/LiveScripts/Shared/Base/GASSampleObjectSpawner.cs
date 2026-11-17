@@ -1,19 +1,20 @@
 using VContainer;
-using CycloneGames.Logger;
 using CycloneGames.Factory.Runtime;
 using UnityEngine;
+using CycloneGames.Logging;
 
 namespace GASSample
 {
     public class GASSampleObjectSpawner : IUnityObjectSpawner
     {
+        private static readonly LogChannel Log = LogChannel.Create("GASSample");
         [Inject] private IObjectResolver objectResolver;
 
         public T Create<T>(T origin) where T : UnityEngine.Object
         {
             if (origin == null)
             {
-                CLogger.LogError($"Invalid prefab to spawn");
+                Log.Error($"Invalid prefab to spawn");
                 return null;
             }
 
@@ -26,7 +27,7 @@ namespace GASSample
         {
             if (origin == null)
             {
-                CLogger.LogError($"Invalid prefab to spawn");
+                Log.Error($"Invalid prefab to spawn");
                 return null;
             }
 

@@ -1,4 +1,5 @@
 using CycloneGames.GameplayAbilities.Runtime;
+using CycloneGames.Logging;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Samples
@@ -12,37 +13,26 @@ namespace CycloneGames.GameplayAbilities.Samples
     /// - Temporary ability granting
     /// - Effect-linked ability lifetime
     /// </summary>
-    [CreateAssetMenu(menuName = "CycloneGames/GameplayAbilitySystem/Samples/Ability/Berserk (Grants Execute)")]
+    [CreateAssetMenu(menuName = "CycloneGames/GameplayAbilities/Samples/Ability/Berserk (Grants Execute)")]
     public class GA_Berserk_SO : GameplayAbilitySO
     {
         [Header("Berserk Configuration")]
         [Tooltip("The berserk buff that grants the Execute ability")]
         public GameplayEffectSO BerserkBuffEffect;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
             var berserkEffect = BerserkBuffEffect ? BerserkBuffEffect.GetGameplayEffect() : null;
             var ability = new GA_Berserk(berserkEffect);
-            
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
-            
+            InitializeAbility(ability);
             return ability;
         }
     }
 
     public class GA_Berserk : GameplayAbility
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private readonly GameplayEffect berserkBuffEffect;
 
         public GA_Berserk(GameplayEffect buffEffect)
@@ -52,7 +42,11 @@ namespace CycloneGames.GameplayAbilities.Samples
 
         public override void ActivateAbility(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, GameplayAbilityActivationInfo activationInfo)
         {
-            CommitAbility(actorInfo, spec);
+            if (!CommitAbility(actorInfo, spec).Succeeded)
+            {
+                EndAbility();
+                return;
+            }
             
             var owner = spec.Owner;
             
@@ -61,29 +55,15 @@ namespace CycloneGames.GameplayAbilities.Samples
                 var effectSpec = GameplayEffectSpec.Create(berserkBuffEffect, owner, spec.Level);
                 owner.ApplyGameplayEffectSpecToSelf(effectSpec);
                 
-                GASLog.Info($"[Berserk] Activated! Execute ability granted.");
+                Log.Info("[Berserk] Activated! Execute ability granted.");
             }
             
             EndAbility();
         }
 
-        public override GameplayAbility CreatePoolableInstance()
+        public override GameplayAbility CreateRuntimeInstance()
         {
-            var ability = new GA_Berserk(this.berserkBuffEffect);
-            
-            ability.Initialize(
-                this.Name,
-                this.InstancingPolicy,
-                this.NetExecutionPolicy,
-                this.CostEffectDefinition,
-                this.CooldownEffectDefinition,
-                this.AbilityTags,
-                this.ActivationBlockedTags,
-                this.ActivationRequiredTags,
-                this.CancelAbilitiesWithTag,
-                this.BlockAbilitiesWithTag
-            );
-            return ability;
+            return new GA_Berserk(berserkBuffEffect);
         }
     }
 }

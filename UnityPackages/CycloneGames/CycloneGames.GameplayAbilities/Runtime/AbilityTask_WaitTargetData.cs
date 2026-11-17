@@ -1,12 +1,22 @@
 using System;
+using CycloneGames.Logging;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
     public class AbilityTask_WaitTargetData : AbilityTask
     {
+        private static readonly LogChannel Log = GameplayAbilitiesLog.Channel;
+
         public Action<TargetData> OnValidData;
         public Action OnCancelled;
         private ITargetActor targetActorInstance;
+        private bool terminalCallbackStarted;
+
+        public override void InitTask(GameplayAbility ability)
+        {
+            base.InitTask(ability);
+            terminalCallbackStarted = false;
+        }
 
         public static AbilityTask_WaitTargetData WaitTargetData(GameplayAbility ability, ITargetActor actorInstance)
         {
@@ -19,7 +29,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
         {
             if (targetActorInstance == null)
             {
-                GASLog.Error("WaitTargetData task failed: ITargetActor instance is null.");
+                Log.Error("WaitTargetData task failed: ITargetActor instance is null.");
                 EndTask();
                 return;
             }
@@ -31,21 +41,62 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         private void HandleTargetDataReady(TargetData data)
         {
-            if (IsActive && !IsCancelled)
+            if (!IsActive || IsCancelled ||
+                !AbilityTaskTerminalCallbackGuard.TryBegin(
+                    this,
+                    ref terminalCallbackStarted,
+                    out ulong leaseGeneration))
+            {
+                data?.Release();
+                return;
+            }
+
+            try
             {
                 data?.StampPrediction(Ability, PredictionKey);
                 OnValidData?.Invoke(data);
             }
-            EndTask(); // Task ends, but actor destruction is handled in OnDestroy
+            finally
+            {
+                // TargetData is a callback-scoped lease. Consumers must copy durable data during the callback.
+                try
+                {
+                    data?.Release();
+                }
+                finally
+                {
+                    EndTaskIfCurrentLease(leaseGeneration);
+                }
+            }
         }
 
         private void HandleCancelled()
         {
-            if (IsActive && !IsCancelled)
+            CancelInternal();
+        }
+
+        public override void CancelTask()
+        {
+            CancelInternal();
+        }
+
+        private void CancelInternal()
+        {
+            if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                    this,
+                    ref terminalCallbackStarted,
+                    out ulong leaseGeneration)) return;
+            try
             {
                 OnCancelled?.Invoke();
             }
-            EndTask();
+            finally
+            {
+                if (IsCurrentLease(leaseGeneration))
+                {
+                    base.CancelTask();
+                }
+            }
         }
 
         protected override void OnDestroy()

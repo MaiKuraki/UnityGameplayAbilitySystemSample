@@ -13,31 +13,31 @@ MonoBehaviour:
   m_Name: GA_Attack_1
   m_EditorClassIdentifier: 
   AbilityName: Attack_1
-  InstancingPolicy: 0
-  NetExecutionPolicy: 0
+  InstancingPolicy: 2
+  ExecutionPolicy: 1
   CostEffect: {fileID: 11400000, guid: b5e19a80b04752e488ef8b81fa7ac8b4, type: 2}
   CooldownEffect: {fileID: 11400000, guid: cef206d602bb88241a2ff01689a68741, type: 2}
   AbilityTags:
-    m_SerializedExplicitTags:
+    explicitTagNames:
     - Skill.Definition.Attack_1
   ActivationBlockedTags:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   ActivationRequiredTags:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   CancelAbilitiesWithTag:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   BlockAbilitiesWithTag:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   ActivationOwnedTags:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   SourceRequiredTags:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   SourceBlockedTags:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   TargetRequiredTags:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   TargetBlockedTags:
-    m_SerializedExplicitTags: []
+    explicitTagNames: []
   ActivateAbilityOnGranted: 0
   AbilityTriggerDataList: []
   animCharacter: {fileID: -203655887218126122, guid: 8ec7625eb1f7b2a439690467e71781c8,

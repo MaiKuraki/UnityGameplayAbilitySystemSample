@@ -1,15 +1,208 @@
+using System;
+using System.Collections;
 using System.Collections.Generic;
+using CycloneGames.GameplayAbilities.Core;
 using CycloneGames.GameplayTags.Core;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
     /// <summary>
+    /// Immutable tag data owned by a Gameplay Ability System definition.
+    /// </summary>
+    public sealed class GameplayDefinitionTagSet : IReadOnlyGameplayTagContainer
+    {
+        private readonly GameplayTagContainer values;
+        private readonly ReadOnlyGameplayTagContainer snapshot;
+
+        internal GameplayDefinitionTagSet(IReadOnlyGameplayTagContainer source = null)
+        {
+            values = source != null ? new GameplayTagContainer(source) : new GameplayTagContainer();
+            snapshot = values.CreateSnapshot();
+        }
+
+        public bool IsEmpty => snapshot.IsEmpty;
+        public int ExplicitTagCount => snapshot.ExplicitTagCount;
+        public int TagCount => snapshot.TagCount;
+
+        internal ReadOnlyGameplayTagContainer Snapshot => snapshot;
+
+        /// <summary>The expanded tag at <paramref name="index"/>, in ascending index order.</summary>
+        public GameplayTag GetTag(int index)
+        {
+            EnsureCompatible();
+            return values.GetTag(index);
+        }
+
+        /// <summary>The explicit tag at <paramref name="index"/>, in ascending index order.</summary>
+        public GameplayTag GetExplicitTag(int index)
+        {
+            EnsureCompatible();
+            return values.GetExplicitTag(index);
+        }
+
+        /// <summary>
+        /// Creates an isolated mutable copy. Changes to the copy never affect the definition.
+        /// </summary>
+        public GameplayTagContainer ToMutableContainer()
+        {
+            EnsureCompatible();
+            return new GameplayTagContainer(values);
+        }
+
+        public GameplayTagEnumerator GetTags()
+        {
+            EnsureCompatible();
+            return values.GetTags();
+        }
+
+        public GameplayTagEnumerator GetExplicitTags()
+        {
+            EnsureCompatible();
+            return values.GetExplicitTags();
+        }
+
+        public void GetParentTags(GameplayTag tag, List<GameplayTag> parentTags)
+        {
+            EnsureCompatible();
+            values.GetParentTags(tag, parentTags);
+        }
+
+        public void GetChildTags(GameplayTag tag, List<GameplayTag> childTags)
+        {
+            EnsureCompatible();
+            values.GetChildTags(tag, childTags);
+        }
+
+        public void GetExplicitParentTags(GameplayTag tag, List<GameplayTag> parentTags)
+        {
+            EnsureCompatible();
+            values.GetExplicitParentTags(tag, parentTags);
+        }
+
+        public void GetExplicitChildTags(GameplayTag tag, List<GameplayTag> childTags)
+        {
+            EnsureCompatible();
+            values.GetExplicitChildTags(tag, childTags);
+        }
+
+        public bool ContainsRuntimeIndex(int runtimeIndex, bool explicitOnly)
+        {
+            EnsureCompatible();
+            return values.ContainsRuntimeIndex(runtimeIndex, explicitOnly);
+        }
+
+        public GameplayTagEnumerator GetEnumerator()
+        {
+            EnsureCompatible();
+            return values.GetTags();
+        }
+
+        IEnumerator<GameplayTag> IEnumerable<GameplayTag>.GetEnumerator() => GetEnumerator();
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+        public static implicit operator GameplayTagContainer(GameplayDefinitionTagSet source)
+        {
+            return source?.ToMutableContainer();
+        }
+
+        private void EnsureCompatible()
+        {
+            if (!snapshot.IsCompatibleWithCurrentRegistry)
+            {
+                throw new InvalidOperationException(
+                "Gameplay definition tag data belongs to an incompatible gameplay tag runtime-index epoch.");
+            }
+        }
+
+    }
+
+    /// <summary>
+    /// Immutable required and forbidden tag data owned by a <see cref="GameplayEffect"/> definition.
+    /// </summary>
+    public sealed class GameplayEffectTagRequirements
+    {
+        internal GameplayEffectTagRequirements(GameplayTagRequirements source)
+        {
+            ForbiddenTags = new GameplayDefinitionTagSet(source.ForbiddenTags);
+            RequiredTags = new GameplayDefinitionTagSet(source.RequiredTags);
+        }
+
+        public GameplayDefinitionTagSet ForbiddenTags { get; }
+        public GameplayDefinitionTagSet RequiredTags { get; }
+        public bool IsEmpty => ForbiddenTags.IsEmpty && RequiredTags.IsEmpty;
+
+        public bool Matches<T>(in T container) where T : IReadOnlyGameplayTagContainer
+        {
+            return !container.HasAny(ForbiddenTags) && container.HasAll(RequiredTags);
+        }
+
+        public bool Matches<T, U>(in T staticContainer, in U dynamicContainer)
+            where T : IReadOnlyGameplayTagContainer
+            where U : IReadOnlyGameplayTagContainer
+        {
+            return !staticContainer.HasAny(ForbiddenTags) &&
+                   !dynamicContainer.HasAny(ForbiddenTags) &&
+                   HasAllAcross(staticContainer, dynamicContainer);
+        }
+
+        /// <summary>
+        /// True when, for every explicitly required tag, at least one of the two containers holds it in
+        /// the expanded sense. The shared-requirement case: part of the requirement is static (the
+        /// effect's own tags) and part is dynamic (the target's).
+        /// </summary>
+        private bool HasAllAcross<T, U>(in T first, in U second)
+            where T : IReadOnlyGameplayTagContainer
+            where U : IReadOnlyGameplayTagContainer
+        {
+            int requiredCount = RequiredTags.ExplicitTagCount;
+            for (int i = 0; i < requiredCount; i++)
+            {
+                GameplayTag required = RequiredTags.GetExplicitTag(i);
+                if (!first.ContainsRuntimeIndex(required.RuntimeIndex, explicitOnly: false) &&
+                    !second.ContainsRuntimeIndex(required.RuntimeIndex, explicitOnly: false))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public bool MeetsRequirements(GameplayTagCountContainer container)
+        {
+            return !container.HasAny(ForbiddenTags) && container.HasAll(RequiredTags);
+        }
+
+        public GameplayTagRequirements ToMutableRequirements()
+        {
+            return new GameplayTagRequirements(
+                ForbiddenTags.ToMutableContainer(),
+                RequiredTags.ToMutableContainer());
+        }
+
+        public static implicit operator GameplayTagRequirements(GameplayEffectTagRequirements source)
+        {
+            return source != null ? source.ToMutableRequirements() : default;
+        }
+    }
+
+    /// <summary>
     /// Defines the immutable data for a gameplay effect. This class is a runtime representation of a GameplayEffectSO.
     /// It is a stateless data container that describes all properties and potential outcomes of an effect,
     /// designed to be shared and reused. An instance of this class is often referred to as a 'GE Definition' or 'CDO'.
     /// </summary>
-    public class GameplayEffect
+    public sealed class GameplayEffect
     {
+        public const int MaxNameLength = 256;
+        public const int MaxDefinitionStringLength = 256;
+        public const int MaxCustomApplicationRequirementCount = 64;
+        public const int MaxOverflowEffectCount = 64;
+        public const int MaxExecutionCaptureCount = 32;
+        public static readonly int MaxModifierCount = GASRuntimeLimits.Default.MaxModifiersPerEffect;
+        public static readonly int MaxGrantedAbilityCount = Math.Min(GASRuntimeLimits.Default.MaxGrantedAbilities, 256);
+        public static readonly int MaxAggregateTagCount = Math.Min(GASRuntimeLimits.Default.MaxTagChangesPerDelta, 256);
+        public static readonly int MaxStackCount = GASRuntimeLimits.Default.MaxActiveEffects;
+
         /// <summary>
         /// The unique name used to identify this effect, primarily for logging and debugging purposes.
         /// </summary>
@@ -22,8 +215,17 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         /// <summary>
         /// The total duration of the effect in seconds. This is only used if DurationPolicy is <c>HasDuration</c>.
+        /// When <see cref="DurationMagnitude"/> is set, the magnitude wins and this value is ignored
         /// </summary>
         public float Duration { get; }
+
+        /// <summary>
+        /// Optional declarative duration source.
+        /// When set, each created spec evaluates this magnitude (level-scalable constant,
+        /// captured attribute, or SetByCaller key) as its duration instead of <see cref="Duration"/>.
+        /// Only valid with <see cref="EDurationPolicy.HasDuration"/>. Null preserves legacy behavior.
+        /// </summary>
+        public DurationMagnitudeInfo DurationMagnitude { get; }
 
         /// <summary>
         /// The interval in seconds at which the effect's instant components are re-applied.
@@ -37,8 +239,12 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         /// <summary>
         /// A custom, non-predictable calculation class that can perform complex, multi-attribute logic.
+        /// Implementations are shared strategy objects and must remain stateless after definition construction.
         /// </summary>
         public GameplayEffectExecutionCalculation Execution { get; }
+
+        /// <summary>Attributes the execution calculation declared beyond the modifier list.</summary>
+        public IReadOnlyList<GameplayAttributeCaptureDefinition> DeclaredCaptures { get; }
 
         /// <summary>
         /// Defines how this effect interacts with other instances of the same effect on a target.
@@ -47,80 +253,94 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         /// <summary>
         /// A list of abilities to grant to the target for the duration of this effect.
+        /// Referenced ability templates are shared definitions and must not be reconfigured after construction.
         /// </summary>
         public IReadOnlyList<GameplayAbility> GrantedAbilities { get; }
 
         /// <summary>
+        /// Per-grant removal policy aligned with <see cref="GrantedAbilities"/> by index. Empty means every
+        /// grant uses <see cref="EGameplayEffectGrantedAbilityRemovePolicy.CancelAbilityImmediately"/>.
+        /// </summary>
+        public IReadOnlyList<EGameplayEffectGrantedAbilityRemovePolicy> GrantedAbilityRemovalPolicies { get; }
+
+        /// <summary>
         /// A list of GameplayCue tags to trigger when this effect is applied, removed, or executed.
         /// </summary>
-        public GameplayTagContainer GameplayCues { get; }
+        public GameplayDefinitionTagSet GameplayCues { get; }
 
         /// <summary>
         /// Tags that describe the effect itself. These are NOT granted to the target.
         /// </summary>
-        public GameplayTagContainer AssetTags { get; }
+        public GameplayDefinitionTagSet AssetTags { get; }
 
         /// <summary>
         /// Tags that are temporarily granted to the target's AbilitySystemComponent for the duration of this effect.
         /// </summary>
-        public GameplayTagContainer GrantedTags { get; }
+        public GameplayDefinitionTagSet GrantedTags { get; }
+
+        /// <summary>
+        /// Ability tags blocked while this effect contributes. Blocked tags gate ability activation and are
+        /// withdrawn together with granted tags when the effect is inhibited.
+        /// </summary>
+        public GameplayDefinitionTagSet BlockedAbilityTags { get; }
 
         /// <summary>
         /// Defines the tag requirements on a target for this effect to be successfully applied.
         /// </summary>
-        public GameplayTagRequirements ApplicationTagRequirements { get; }
+        public GameplayEffectTagRequirements ApplicationTagRequirements { get; }
 
         /// <summary>
         /// Once applied, the effect will only be active if the target continues to meet these tag requirements.
         /// </summary>
-        public GameplayTagRequirements OngoingTagRequirements { get; }
+        public GameplayEffectTagRequirements OngoingTagRequirements { get; }
 
         /// <summary>
         /// Upon successful application, any active effects on the target matching these tags will be removed.
         /// </summary>
-        public GameplayTagContainer RemoveGameplayEffectsWithTags { get; }
+        public GameplayDefinitionTagSet RemoveGameplayEffectsWithTags { get; }
 
         /// <summary>
         /// If true, gameplay cues (VFX/SFX) are suppressed for this effect.
-        /// UE5: bSuppressGameplayCues on UGameplayEffect.
         /// Useful for silent/debug application without visual feedback.
         /// </summary>
         public bool SuppressGameplayCues { get; }
 
         /// <summary>
         /// If true, gameplay effects applied by the granting ability are automatically removed when the ability ends.
-        /// UE5: RemoveGameplayEffectContainerOnAbilityEnd / bRemoveGameplayEffectsAfterAbilityEnds.
         /// </summary>
         public bool RemoveGameplayEffectsAfterAbilityEnds { get; }
 
         /// <summary>
         /// Optional custom application requirement. If set, CanApplyGameplayEffect is called before application.
-        /// UE5: TArray<TSubclassOf<UGameplayEffectCustomApplicationRequirement>>.
+        /// Requirement implementations are shared strategy objects and must remain stateless.
         /// </summary>
         public IReadOnlyList<ICustomApplicationRequirement> CustomApplicationRequirements { get; }
 
         /// <summary>
-        /// If true, periodic effects execute their first tick immediately upon application.
-        /// If false, the first execution waits for the full period interval.
-        /// UE5: bExecutePeriodicEffectOnApplication. Default is true (UE5 default).
+        /// If true, periodic effects execute once immediately upon application, in addition to the
+        /// regular period schedule. If false, no execution occurs until the first period elapses.
         /// </summary>
         public bool ExecutePeriodicEffectOnApplication { get; }
 
         /// <summary>
+        /// How the period responds when the effect is no longer inhibited.
+        /// </summary>
+        public EGameplayEffectPeriodInhibitionRemovedPolicy PeriodicInhibitionPolicy { get; }
+
+        /// <summary>
         /// Effects to apply when a stacking application attempt occurs while at the stack limit.
-        /// UE5: OverflowEffects.
         /// </summary>
         public IReadOnlyList<GameplayEffect> OverflowEffects { get; }
 
         /// <summary>
         /// If true, the original effect application (duration refresh, etc.) is denied when overflow occurs.
-        /// UE5: bDenyOverflowApplication.
         /// </summary>
         public bool DenyOverflowApplication { get; }
 
         internal ReadOnlyGameplayTagContainer GameplayCuesSnapshot { get; }
         internal ReadOnlyGameplayTagContainer AssetTagsSnapshot { get; }
         internal ReadOnlyGameplayTagContainer GrantedTagsSnapshot { get; }
+        internal ReadOnlyGameplayTagContainer BlockedAbilityTagsSnapshot { get; }
         internal ReadOnlyGameplayTagContainer RemoveGameplayEffectsWithTagsSnapshot { get; }
         internal ReadOnlyGameplayTagContainer ApplicationRequiredTagsSnapshot { get; }
         internal ReadOnlyGameplayTagContainer ApplicationForbiddenTagsSnapshot { get; }
@@ -136,52 +356,704 @@ namespace CycloneGames.GameplayAbilities.Runtime
             GameplayEffectExecutionCalculation execution = null,
             GameplayEffectStacking stacking = default,
             List<GameplayAbility> grantedAbilities = null,
-            GameplayTagContainer assetTags = null,
-            GameplayTagContainer grantedTags = null,
+            IReadOnlyGameplayTagContainer assetTags = null,
+            IReadOnlyGameplayTagContainer grantedTags = null,
             GameplayTagRequirements applicationTagRequirements = default,
             GameplayTagRequirements ongoingTagRequirements = default,
-            GameplayTagContainer removeGameplayEffectsWithTags = null,
-            GameplayTagContainer gameplayCues = null,
+            IReadOnlyGameplayTagContainer removeGameplayEffectsWithTags = null,
+            IReadOnlyGameplayTagContainer gameplayCues = null,
             bool suppressGameplayCues = false,
             bool removeGameplayEffectsAfterAbilityEnds = false,
             List<ICustomApplicationRequirement> customApplicationRequirements = null,
             bool executePeriodicEffectOnApplication = true,
             List<GameplayEffect> overflowEffects = null,
-            bool denyOverflowApplication = false)
+            bool denyOverflowApplication = false,
+            EGameplayEffectPeriodInhibitionRemovedPolicy periodicInhibitionPolicy = EGameplayEffectPeriodInhibitionRemovedPolicy.NeverReset,
+            DurationMagnitudeInfo durationMagnitude = null,
+            IReadOnlyGameplayTagContainer blockedAbilityTags = null,
+            List<EGameplayEffectGrantedAbilityRemovePolicy> grantedAbilityRemovalPolicies = null)
         {
+            ValidateBoundedString(name, MaxNameLength, nameof(name), allowWhitespace: false);
+            ValidateDuration(durationPolicy, duration, period, durationMagnitude);
+            ValidateStacking(stacking);
+            ValidatePeriodicInhibitionPolicy(periodicInhibitionPolicy);
+            ValidateCollectionCount(modifiers, MaxModifierCount, nameof(modifiers));
+            ValidateCollectionCount(grantedAbilities, MaxGrantedAbilityCount, nameof(grantedAbilities));
+            ValidateCollectionCount(customApplicationRequirements, MaxCustomApplicationRequirementCount, nameof(customApplicationRequirements));
+            ValidateCollectionCount(overflowEffects, MaxOverflowEffectCount, nameof(overflowEffects));
+            ValidateModifiers(modifiers);
+            ValidateStackMagnitudeRange(stacking, modifiers);
+            ValidateStackMagnitudeSign(stacking, modifiers);
+            ValidateGrantedAbilities(durationPolicy, grantedAbilities);
+            ValidateGrantedAbilityRemovalPolicies(grantedAbilities, grantedAbilityRemovalPolicies);
+            ValidateRequirements(customApplicationRequirements);
+            ValidateOverflowEffects(overflowEffects);
+
+            int aggregateTagCount = 0;
+            AssetTags = CreateTagSet(assetTags, nameof(assetTags), ref aggregateTagCount);
+            GrantedTags = CreateTagSet(grantedTags, nameof(grantedTags), ref aggregateTagCount);
+            BlockedAbilityTags = CreateTagSet(
+                blockedAbilityTags,
+                nameof(blockedAbilityTags),
+                ref aggregateTagCount);
+            ApplicationTagRequirements = CreateRequirements(
+                applicationTagRequirements,
+                nameof(applicationTagRequirements),
+                ref aggregateTagCount);
+            OngoingTagRequirements = CreateRequirements(
+                ongoingTagRequirements,
+                nameof(ongoingTagRequirements),
+                ref aggregateTagCount);
+            RemoveGameplayEffectsWithTags = CreateTagSet(
+                removeGameplayEffectsWithTags,
+                nameof(removeGameplayEffectsWithTags),
+                ref aggregateTagCount);
+            GameplayCues = CreateTagSet(gameplayCues, nameof(gameplayCues), ref aggregateTagCount);
+
             Name = name;
             DurationPolicy = durationPolicy;
             Duration = duration;
+            DurationMagnitude = durationMagnitude;
             Period = period;
-            Modifiers = modifiers ?? new List<ModifierInfo>();
+            Modifiers = FreezeModifiers(modifiers);
             Execution = execution;
+            DeclaredCaptures = CollectDeclaredCaptures(execution, modifiers);
             Stacking = stacking;
-            GrantedAbilities = grantedAbilities ?? new List<GameplayAbility>();
-            AssetTags = assetTags ?? new GameplayTagContainer();
-            GrantedTags = grantedTags ?? new GameplayTagContainer();
-            ApplicationTagRequirements = applicationTagRequirements;
-            OngoingTagRequirements = ongoingTagRequirements;
-            RemoveGameplayEffectsWithTags = removeGameplayEffectsWithTags ?? new GameplayTagContainer();
-            GameplayCues = gameplayCues ?? new GameplayTagContainer();
+            GrantedAbilities = Freeze(grantedAbilities);
+            GrantedAbilityRemovalPolicies = Freeze(grantedAbilityRemovalPolicies);
             SuppressGameplayCues = suppressGameplayCues;
             RemoveGameplayEffectsAfterAbilityEnds = removeGameplayEffectsAfterAbilityEnds;
-            CustomApplicationRequirements = customApplicationRequirements ?? (IReadOnlyList<ICustomApplicationRequirement>)System.Array.Empty<ICustomApplicationRequirement>();
+            CustomApplicationRequirements = Freeze(customApplicationRequirements);
             ExecutePeriodicEffectOnApplication = executePeriodicEffectOnApplication;
-            OverflowEffects = overflowEffects ?? (IReadOnlyList<GameplayEffect>)System.Array.Empty<GameplayEffect>();
+            PeriodicInhibitionPolicy = periodicInhibitionPolicy;
+            OverflowEffects = Freeze(overflowEffects);
             DenyOverflowApplication = denyOverflowApplication;
-            GameplayCuesSnapshot = GameplayCues.CreateSnapshot();
-            AssetTagsSnapshot = AssetTags.CreateSnapshot();
-            GrantedTagsSnapshot = GrantedTags.CreateSnapshot();
-            RemoveGameplayEffectsWithTagsSnapshot = RemoveGameplayEffectsWithTags.CreateSnapshot();
-            ApplicationRequiredTagsSnapshot = ApplicationTagRequirements.RequiredTags?.CreateSnapshot();
-            ApplicationForbiddenTagsSnapshot = ApplicationTagRequirements.ForbiddenTags?.CreateSnapshot();
-            OngoingRequiredTagsSnapshot = OngoingTagRequirements.RequiredTags?.CreateSnapshot();
-            OngoingForbiddenTagsSnapshot = OngoingTagRequirements.ForbiddenTags?.CreateSnapshot();
 
-            if (DurationPolicy == EDurationPolicy.HasDuration && duration <= 0 && duration != GameplayEffectConstants.INFINITE_DURATION)
+            GameplayCuesSnapshot = GameplayCues.Snapshot;
+            AssetTagsSnapshot = AssetTags.Snapshot;
+            GrantedTagsSnapshot = GrantedTags.Snapshot;
+            BlockedAbilityTagsSnapshot = BlockedAbilityTags.Snapshot;
+            RemoveGameplayEffectsWithTagsSnapshot = RemoveGameplayEffectsWithTags.Snapshot;
+            ApplicationRequiredTagsSnapshot = ApplicationTagRequirements.RequiredTags.Snapshot;
+            ApplicationForbiddenTagsSnapshot = ApplicationTagRequirements.ForbiddenTags.Snapshot;
+            OngoingRequiredTagsSnapshot = OngoingTagRequirements.RequiredTags.Snapshot;
+            OngoingForbiddenTagsSnapshot = OngoingTagRequirements.ForbiddenTags.Snapshot;
+        }
+
+        private static void ValidateDuration(EDurationPolicy durationPolicy, float duration, float period, DurationMagnitudeInfo durationMagnitude)
+        {
+            if ((int)durationPolicy < (int)EDurationPolicy.Instant || (int)durationPolicy > (int)EDurationPolicy.Infinite)
             {
-                GASLog.Warning($"GameplayEffect '{name}' has 'HasDuration' policy but an invalid duration of {duration}.");
+                throw new ArgumentOutOfRangeException(nameof(durationPolicy), durationPolicy, "Unknown duration policy.");
             }
+
+            if (durationMagnitude != null && durationPolicy != EDurationPolicy.HasDuration)
+            {
+                throw new ArgumentException("DurationMagnitude is only valid for HasDuration effects.", nameof(durationMagnitude));
+            }
+
+            ValidateFinite(duration, nameof(duration));
+            if (durationPolicy == EDurationPolicy.HasDuration && durationMagnitude == null && duration <= 0f)
+            {
+                throw new ArgumentOutOfRangeException(nameof(duration), duration, "HasDuration effects require a positive duration (or a DurationMagnitude).");
+            }
+
+            if (float.IsNaN(period) || float.IsInfinity(period) || period < 0f)
+            {
+                throw new ArgumentOutOfRangeException(nameof(period), period, "Period must be finite and non-negative.");
+            }
+
+            if (durationPolicy == EDurationPolicy.Instant && period > 0f)
+            {
+                throw new ArgumentException("Instant effects cannot be periodic.", nameof(period));
+            }
+        }
+
+        private static void ValidatePeriodicInhibitionPolicy(EGameplayEffectPeriodInhibitionRemovedPolicy policy)
+        {
+            if ((int)policy < (int)EGameplayEffectPeriodInhibitionRemovedPolicy.NeverReset ||
+                (int)policy > (int)EGameplayEffectPeriodInhibitionRemovedPolicy.ExecuteAndResetPeriod)
+            {
+                throw new ArgumentOutOfRangeException(nameof(policy), policy, "Unknown periodic inhibition policy.");
+            }
+        }
+
+        private static void ValidateStacking(GameplayEffectStacking stacking)
+        {
+            if ((int)stacking.Type < (int)EGameplayEffectStackingType.None ||
+                (int)stacking.Type > (int)EGameplayEffectStackingType.AggregateByTarget)
+            {
+                throw new ArgumentOutOfRangeException(nameof(stacking), stacking.Type, "Unknown stacking type.");
+            }
+
+            if ((int)stacking.LimitMode < (int)EGameplayEffectStackLimitMode.Limited ||
+                (int)stacking.LimitMode > (int)EGameplayEffectStackLimitMode.Unlimited)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(stacking), stacking.LimitMode, "Unknown stack limit mode.");
+            }
+
+            if (stacking.Type != EGameplayEffectStackingType.None &&
+                stacking.LimitMode == EGameplayEffectStackLimitMode.Limited &&
+                (stacking.Limit <= 0 || stacking.Limit > MaxStackCount))
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(stacking),
+                    stacking.Limit,
+                    $"Stack limits must be between 1 and {MaxStackCount} when the limit mode is Limited.");
+            }
+
+            if (stacking.Type != EGameplayEffectStackingType.None &&
+                ((int)stacking.DurationPolicy < (int)EGameplayEffectStackingDurationPolicy.RefreshOnSuccessfulApplication ||
+                 (int)stacking.DurationPolicy > (int)EGameplayEffectStackingDurationPolicy.ExtendDuration ||
+                 (int)stacking.ExpirationPolicy < (int)EGameplayEffectStackingExpirationPolicy.ClearEntireStack ||
+                 (int)stacking.ExpirationPolicy > (int)EGameplayEffectStackingExpirationPolicy.RefreshDuration ||
+                 (int)stacking.PeriodResetPolicy < (int)EGameplayEffectStackingPeriodPolicy.ResetOnSuccessfulApplication ||
+                 (int)stacking.PeriodResetPolicy > (int)EGameplayEffectStackingPeriodPolicy.NeverReset))
+            {
+                throw new ArgumentOutOfRangeException(nameof(stacking), "Stacking policies must use known enum values.");
+            }
+
+            // ExtendDuration requires ClearEntireStack expiration; per-stack expiry timers are not tracked.
+            if (stacking.Type != EGameplayEffectStackingType.None &&
+                stacking.DurationPolicy == EGameplayEffectStackingDurationPolicy.ExtendDuration &&
+                stacking.ExpirationPolicy != EGameplayEffectStackingExpirationPolicy.ClearEntireStack)
+            {
+                throw new ArgumentException(
+                    "ExtendDuration stacking requires ClearEntireStack expiration; per-stack expiry timers are not tracked.",
+                    nameof(stacking));
+            }
+
+            if ((int)stacking.MagnitudePolicy < (int)GASStackMagnitudePolicy.LinearBias ||
+                (int)stacking.MagnitudePolicy > (int)GASStackMagnitudePolicy.Exponential)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(stacking), stacking.MagnitudePolicy, "Unknown stack magnitude policy.");
+            }
+        }
+
+        /// <summary>
+        /// Exponential stacking compounds the magnitude per stack, and Q32.32 saturates its integer
+        /// part near 2.1e9. Rejecting the asset here keeps the overflow out of the runtime hot loop.
+        /// </summary>
+        private static void ValidateStackMagnitudeRange(
+            GameplayEffectStacking stacking,
+            List<ModifierInfo> modifiers)
+        {
+            int stackLimit = stacking.ResolveStackLimit();
+            if (stacking.Type == EGameplayEffectStackingType.None ||
+                stacking.MagnitudePolicy != GASStackMagnitudePolicy.Exponential ||
+                stackLimit <= 1 ||
+                modifiers == null)
+            {
+                return;
+            }
+
+            const double MaxRepresentable = 2147483647.0;
+            double worstCase = 1.0;
+            for (int i = 0; i < modifiers.Count; i++)
+            {
+                ModifierInfo modifier = modifiers[i];
+                if (modifier.Operation != EAttributeModifierOperation.Multiply &&
+                    modifier.Operation != EAttributeModifierOperation.Division)
+                {
+                    continue;
+                }
+
+                // Levels scale the magnitude, so take the worst level into account.
+                double magnitude = Math.Abs(modifier.Magnitude.BaseValue) +
+                                   Math.Abs(modifier.Magnitude.ScalingFactorPerLevel) *
+                                   (GASRuntimeDataContract.MaxGameplayLevel - 1);
+                if (magnitude <= 1.0)
+                {
+                    continue;
+                }
+
+                worstCase *= Math.Pow(magnitude, stackLimit);
+                if (worstCase > MaxRepresentable)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        nameof(stacking),
+                        stackLimit,
+                        $"Exponential stacking reaches {worstCase:F3e0} at the stack limit, beyond the " +
+                        "Q32.32 range (2.1e9). Lower the limit or use LinearBias.");
+                }
+            }
+        }
+
+        private bool stackSignWarningIssued;
+
+        /// <summary>
+        /// Claims the single non-positive stacked magnitude warning for this definition; later
+        /// observations are dropped.
+        /// </summary>
+        internal bool TryClaimStackSignWarning()
+        {
+            if (stackSignWarningIssued)
+            {
+                return false;
+            }
+
+            stackSignWarningIssued = true;
+            return true;
+        }
+
+        /// <summary>
+        /// Rejects a stacked Multiply/Division magnitude whose multiplier reaches zero or negative at the
+        /// stack limit. LinearBias subtracts (1 - M) per stack; a negative Exponential magnitude flips sign.
+        /// </summary>
+        private static void ValidateStackMagnitudeSign(
+            GameplayEffectStacking stacking,
+            List<ModifierInfo> modifiers)
+        {
+            int stackLimit = stacking.ResolveStackLimit();
+            if (stacking.Type == EGameplayEffectStackingType.None ||
+                stackLimit <= 1 ||
+                modifiers == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < modifiers.Count; i++)
+            {
+                ModifierInfo modifier = modifiers[i];
+                if (modifier.Operation != EAttributeModifierOperation.Multiply &&
+                    modifier.Operation != EAttributeModifierOperation.Division)
+                {
+                    continue;
+                }
+
+                // Dynamic magnitudes resolve at runtime and leave Magnitude at its default, so only a
+                // static ScalableFloat can be judged here.
+                if (modifier.MagnitudeCalculationType != EGameplayEffectMagnitudeCalculation.ScalableFloat)
+                {
+                    continue;
+                }
+
+                // The extreme level is the worst case: it moves the magnitude furthest from 1.0.
+                float baseMagnitude = modifier.Magnitude.BaseValue;
+                float scaledMagnitude = baseMagnitude +
+                                        modifier.Magnitude.ScalingFactorPerLevel *
+                                        (GASRuntimeDataContract.MaxGameplayLevel - 1);
+                double worstMagnitude = Math.Min(baseMagnitude, scaledMagnitude);
+
+                if (worstMagnitude <= 0.0)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        nameof(stacking),
+                        stackLimit,
+                        $"Stacking modifier on '{modifier.AttributeName}' uses a non-positive magnitude " +
+                        $"({worstMagnitude:F4}) at level {GASRuntimeDataContract.MaxGameplayLevel}. A stacked " +
+                        "Multiply/Division magnitude must stay positive.");
+                }
+
+                if (worstMagnitude >= 1.0)
+                {
+                    // A multiplier of 1 or more never reaches zero, so no scan is needed.
+                    continue;
+                }
+
+                // Judge on the fixed-point path: truncation makes a sub-1 multiplier reach zero well
+                // before the closed form does, so a double-only test would let such a config through.
+                long magnitudeRaw = GASFixedValue.FromDouble(worstMagnitude).RawValue;
+                int nonPositiveAtStack = GASFixedValue.FindFirstNonPositiveStack(
+                    magnitudeRaw,
+                    stackLimit,
+                    stacking.MagnitudePolicy);
+                if (nonPositiveAtStack > 0)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        nameof(stacking),
+                        stackLimit,
+                        $"Stacked multiplier for '{modifier.AttributeName}' stops being positive at stack " +
+                        $"{nonPositiveAtStack} (stack limit {stackLimit}, magnitude {worstMagnitude:F4}). " +
+                        "Raise the magnitude, lower the stack limit, or change the magnitude policy.");
+                }
+            }
+        }
+
+        private static GameplayEffectTagRequirements CreateRequirements(
+            GameplayTagRequirements source,
+            string parameterName,
+            ref int aggregateTagCount)
+        {
+            ValidateAndAccumulateTags(source.ForbiddenTags, parameterName, ref aggregateTagCount);
+            ValidateAndAccumulateTags(source.RequiredTags, parameterName, ref aggregateTagCount);
+            return new GameplayEffectTagRequirements(source);
+        }
+
+        private static GameplayDefinitionTagSet CreateTagSet(
+            IReadOnlyGameplayTagContainer source,
+            string parameterName,
+            ref int aggregateTagCount)
+        {
+            ValidateAndAccumulateTags(source, parameterName, ref aggregateTagCount);
+            return new GameplayDefinitionTagSet(source);
+        }
+
+        private static void ValidateAndAccumulateTags(
+            IReadOnlyGameplayTagContainer source,
+            string parameterName,
+            ref int aggregateTagCount)
+        {
+            if (source == null || source.IsEmpty)
+            {
+                return;
+            }
+
+            if (source.TagCount > MaxAggregateTagCount - aggregateTagCount)
+            {
+                throw new ArgumentException(
+                    $"GameplayEffect tag data exceeds the aggregate limit of {MaxAggregateTagCount} tags.",
+                    parameterName);
+            }
+
+            foreach (GameplayTag tag in source.GetExplicitTags())
+            {
+                if (tag.IsNone || !tag.IsValid)
+                {
+                    throw new ArgumentException("GameplayEffect tag data contains an invalid tag.", parameterName);
+                }
+
+                ValidateBoundedString(tag.Name, MaxDefinitionStringLength, parameterName, allowWhitespace: false);
+            }
+
+            aggregateTagCount += source.TagCount;
+        }
+
+        private static IReadOnlyList<ModifierInfo> FreezeModifiers(List<ModifierInfo> modifiers)
+        {
+            if (modifiers == null || modifiers.Count == 0)
+            {
+                return EmptyReadOnlyList<ModifierInfo>.Value;
+            }
+
+            var copy = new ModifierInfo[modifiers.Count];
+            for (int i = 0; i < modifiers.Count; i++)
+            {
+                copy[i] = CloneModifier(modifiers[i]);
+            }
+
+            return Array.AsReadOnly(copy);
+        }
+
+        private static ModifierInfo CloneModifier(ModifierInfo modifier)
+        {
+            switch (modifier.MagnitudeCalculationType)
+            {
+                case EGameplayEffectMagnitudeCalculation.AttributeBased:
+                    return new ModifierInfo(
+                        modifier.AttributeName,
+                        modifier.Operation,
+                        modifier.AttributeBasedMagnitude,
+                        modifier.EvaluationChannel);
+                case EGameplayEffectMagnitudeCalculation.CustomCalculation:
+                    return new ModifierInfo(
+                        modifier.AttributeName,
+                        modifier.Operation,
+                        modifier.CustomCalculation,
+                        modifier.SnapshotPolicy,
+                        modifier.EvaluationChannel);
+                case EGameplayEffectMagnitudeCalculation.SetByCaller:
+                    return new ModifierInfo(
+                        modifier.AttributeName,
+                        modifier.Operation,
+                        modifier.SetByCallerMagnitude,
+                        modifier.EvaluationChannel);
+                default:
+                    return new ModifierInfo(
+                        modifier.AttributeName,
+                        modifier.Operation,
+                        modifier.Magnitude,
+                        modifier.EvaluationChannel);
+            }
+        }
+
+        private static IReadOnlyList<GameplayAttributeCaptureDefinition> CollectDeclaredCaptures(
+            GameplayEffectExecutionCalculation execution,
+            List<ModifierInfo> modifiers)
+        {
+            var captures = new List<GameplayAttributeCaptureDefinition>(4);
+            execution?.GetAttributeCaptureDefinitions(captures);
+
+            if (modifiers != null)
+            {
+                for (int i = 0; i < modifiers.Count; i++)
+                {
+                    ModifierInfo modifier = modifiers[i];
+                    if (modifier != null &&
+                        modifier.MagnitudeCalculationType == EGameplayEffectMagnitudeCalculation.CustomCalculation &&
+                        modifier.CustomCalculation != null)
+                    {
+                        modifier.CustomCalculation.GetAttributeCaptureDefinitions(captures);
+                    }
+                }
+            }
+
+            if (captures.Count == 0)
+            {
+                return EmptyReadOnlyList<GameplayAttributeCaptureDefinition>.Value;
+            }
+            if (captures.Count > MaxExecutionCaptureCount)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(execution),
+                    captures.Count,
+                    $"Execution calculations may declare at most {MaxExecutionCaptureCount} attribute captures.");
+            }
+
+            // The same attribute can be declared by several modifiers or by the execution calculation.
+            for (int i = captures.Count - 1; i >= 0; i--)
+            {
+                for (int j = 0; j < i; j++)
+                {
+                    if (captures[i].CaptureSource == captures[j].CaptureSource &&
+                        string.Equals(captures[i].AttributeName, captures[j].AttributeName, StringComparison.Ordinal))
+                    {
+                        captures.RemoveAt(i);
+                        break;
+                    }
+                }
+            }
+
+            return Freeze(captures);
+        }
+
+        private static IReadOnlyList<T> Freeze<T>(List<T> source)
+        {
+            return source == null || source.Count == 0
+                ? EmptyReadOnlyList<T>.Value
+                : Array.AsReadOnly(source.ToArray());
+        }
+
+        private static void ValidateModifiers(List<ModifierInfo> modifiers)
+        {
+            if (modifiers == null) return;
+            for (int i = 0; i < modifiers.Count; i++)
+            {
+                ModifierInfo modifier = modifiers[i] ??
+                    throw new ArgumentException($"GameplayEffect modifier {i} is null.", nameof(modifiers));
+                ValidateBoundedString(
+                    modifier.AttributeName,
+                    MaxDefinitionStringLength,
+                    nameof(modifiers),
+                    allowWhitespace: false);
+
+                if ((int)modifier.Operation < (int)EAttributeModifierOperation.Add ||
+                    (int)modifier.Operation > (int)EAttributeModifierOperation.Override)
+                {
+                    throw new ArgumentException($"GameplayEffect modifier {i} uses an unknown operation.", nameof(modifiers));
+                }
+                if ((int)modifier.MagnitudeCalculationType < (int)EGameplayEffectMagnitudeCalculation.ScalableFloat ||
+                    (int)modifier.MagnitudeCalculationType > (int)EGameplayEffectMagnitudeCalculation.SetByCaller)
+                {
+                    throw new ArgumentException($"GameplayEffect modifier {i} uses an unknown magnitude calculation type.", nameof(modifiers));
+                }
+                if ((int)modifier.SnapshotPolicy < (int)EGameplayEffectAttributeCaptureSnapshot.Snapshot ||
+                    (int)modifier.SnapshotPolicy > (int)EGameplayEffectAttributeCaptureSnapshot.NotSnapshot)
+                {
+                    throw new ArgumentException($"GameplayEffect modifier {i} uses an unknown snapshot policy.", nameof(modifiers));
+                }
+
+                switch (modifier.MagnitudeCalculationType)
+                {
+                    case EGameplayEffectMagnitudeCalculation.ScalableFloat:
+                        ValidateFinite(modifier.Magnitude.BaseValue, nameof(modifiers));
+                        ValidateFinite(modifier.Magnitude.ScalingFactorPerLevel, nameof(modifiers));
+                        break;
+                    case EGameplayEffectMagnitudeCalculation.AttributeBased:
+                        ValidateBoundedString(
+                            modifier.AttributeBasedMagnitude.AttributeName,
+                            MaxDefinitionStringLength,
+                            nameof(modifiers),
+                            allowWhitespace: false);
+                        if ((int)modifier.AttributeBasedMagnitude.CaptureSource < (int)EGameplayEffectAttributeCaptureSource.Source ||
+                            (int)modifier.AttributeBasedMagnitude.CaptureSource > (int)EGameplayEffectAttributeCaptureSource.Target ||
+                            (int)modifier.AttributeBasedMagnitude.CalculationType < (int)EAttributeBasedFloatCalculationType.AttributeMagnitude ||
+                            (int)modifier.AttributeBasedMagnitude.CalculationType > (int)EAttributeBasedFloatCalculationType.AttributeBonusMagnitude)
+                        {
+                            throw new ArgumentException($"GameplayEffect modifier {i} uses an invalid attribute capture policy.", nameof(modifiers));
+                        }
+                        ValidateFinite(modifier.AttributeBasedMagnitude.Coefficient.BaseValue, nameof(modifiers));
+                        ValidateFinite(modifier.AttributeBasedMagnitude.Coefficient.ScalingFactorPerLevel, nameof(modifiers));
+                        ValidateFinite(modifier.AttributeBasedMagnitude.PreMultiplyAdditiveValue.BaseValue, nameof(modifiers));
+                        ValidateFinite(modifier.AttributeBasedMagnitude.PreMultiplyAdditiveValue.ScalingFactorPerLevel, nameof(modifiers));
+                        ValidateFinite(modifier.AttributeBasedMagnitude.PostMultiplyAdditiveValue.BaseValue, nameof(modifiers));
+                        ValidateFinite(modifier.AttributeBasedMagnitude.PostMultiplyAdditiveValue.ScalingFactorPerLevel, nameof(modifiers));
+                        break;
+                    case EGameplayEffectMagnitudeCalculation.CustomCalculation:
+                        if (modifier.CustomCalculation == null)
+                        {
+                            throw new ArgumentException($"GameplayEffect modifier {i} requires a custom calculation instance.", nameof(modifiers));
+                        }
+                        break;
+                    case EGameplayEffectMagnitudeCalculation.SetByCaller:
+                        if ((modifier.SetByCallerMagnitude.DataTag.IsNone || !modifier.SetByCallerMagnitude.DataTag.IsValid) &&
+                            string.IsNullOrWhiteSpace(modifier.SetByCallerMagnitude.DataName))
+                        {
+                            throw new ArgumentException($"GameplayEffect modifier {i} requires a SetByCaller tag or name.", nameof(modifiers));
+                        }
+                        if (!string.IsNullOrEmpty(modifier.SetByCallerMagnitude.DataName))
+                        {
+                            ValidateBoundedString(
+                                modifier.SetByCallerMagnitude.DataName,
+                                MaxDefinitionStringLength,
+                                nameof(modifiers),
+                                allowWhitespace: false);
+                        }
+                        ValidateFinite(modifier.SetByCallerMagnitude.DefaultValue, nameof(modifiers));
+                        break;
+                }
+            }
+        }
+
+        private static void ValidateGrantedAbilityRemovalPolicies(
+            List<GameplayAbility> grantedAbilities,
+            List<EGameplayEffectGrantedAbilityRemovePolicy> policies)
+        {
+            if (policies == null) return;
+
+            int grantedCount = grantedAbilities?.Count ?? 0;
+            if (policies.Count != grantedCount)
+            {
+                throw new ArgumentException(
+                    "Granted ability removal policies must match the granted ability count.",
+                    nameof(policies));
+            }
+
+            for (int i = 0; i < policies.Count; i++)
+            {
+                if (policies[i] < EGameplayEffectGrantedAbilityRemovePolicy.CancelAbilityImmediately ||
+                    policies[i] > EGameplayEffectGrantedAbilityRemovePolicy.DoNothing)
+                {
+                    throw new ArgumentException(
+                        $"Granted ability removal policy {i} is invalid.",
+                        nameof(policies));
+                }
+            }
+        }
+
+        private static void ValidateGrantedAbilities(EDurationPolicy durationPolicy, List<GameplayAbility> grantedAbilities)        {
+            if (grantedAbilities == null) return;
+            if (durationPolicy == EDurationPolicy.Instant && grantedAbilities.Count > 0)
+            {
+                throw new ArgumentException(
+                    "Instant GameplayEffects cannot grant abilities because they have no owning active-effect lifetime.",
+                    nameof(grantedAbilities));
+            }
+            for (int i = 0; i < grantedAbilities.Count; i++)
+            {
+                GameplayAbility ability = grantedAbilities[i] ??
+                    throw new ArgumentException($"Granted ability {i} is null.", nameof(grantedAbilities));
+                if (!ability.IsConfigurationInitialized)
+                {
+                    throw new ArgumentException($"Granted ability {i} is not initialized.", nameof(grantedAbilities));
+                }
+                ValidateBoundedString(
+                    ability.Name,
+                    MaxDefinitionStringLength,
+                    nameof(grantedAbilities),
+                    allowWhitespace: false);
+                if (ability.InstancingPolicy == EGameplayAbilityInstancingPolicy.NonInstanced)
+                {
+                    throw new ArgumentException(
+                        $"Granted ability '{ability.Name}' uses NonInstanced, which is not supported by the Unity Runtime ability model.",
+                        nameof(grantedAbilities));
+                }
+            }
+        }
+
+        private static void ValidateRequirements(List<ICustomApplicationRequirement> requirements)
+        {
+            if (requirements == null) return;
+            for (int i = 0; i < requirements.Count; i++)
+            {
+                if (requirements[i] == null)
+                {
+                    throw new ArgumentException($"Custom application requirement {i} is null.", nameof(requirements));
+                }
+            }
+        }
+
+        private static void ValidateOverflowEffects(List<GameplayEffect> overflowEffects)
+        {
+            if (overflowEffects == null) return;
+            for (int i = 0; i < overflowEffects.Count; i++)
+            {
+                if (overflowEffects[i] == null)
+                {
+                    throw new ArgumentException($"Overflow GameplayEffect {i} is null.", nameof(overflowEffects));
+                }
+
+                // Duplicate entries multiply the overflow fan-out: each nested chain level re-applies
+                // every duplicate, so N duplicated levels produce 2^N applications. Reject duplicates
+                // at definition time; the intended behavior (the same effect firing once per stack
+                // overflow) is expressed by a single entry.
+                for (int j = 0; j < i; j++)
+                {
+                    if (ReferenceEquals(overflowEffects[i], overflowEffects[j]))
+                    {
+                        throw new ArgumentException(
+                            $"Overflow GameplayEffect {i} duplicates entry {j} ('{overflowEffects[i].Name}').",
+                            nameof(overflowEffects));
+                    }
+                }
+            }
+        }
+
+        private static void ValidateCollectionCount<T>(List<T> values, int maximum, string parameterName)
+        {
+            if (values != null && values.Count > maximum)
+            {
+                throw new ArgumentException(
+                    $"GameplayEffect {parameterName} contains {values.Count} entries; the limit is {maximum}.",
+                    parameterName);
+            }
+        }
+
+        private static void ValidateBoundedString(
+            string value,
+            int maximumLength,
+            string parameterName,
+            bool allowWhitespace)
+        {
+            if (value == null || (!allowWhitespace && string.IsNullOrWhiteSpace(value)))
+            {
+                throw new ArgumentException("GameplayEffect definition strings must be non-empty.", parameterName);
+            }
+
+            if (value.Length > maximumLength)
+            {
+                throw new ArgumentException(
+                    $"GameplayEffect definition strings cannot exceed {maximumLength} characters.",
+                    parameterName);
+            }
+
+            for (int i = 0; i < value.Length; i++)
+            {
+                if (char.IsControl(value[i]))
+                {
+                    throw new ArgumentException(
+                        "GameplayEffect definition strings cannot contain control characters.",
+                        parameterName);
+                }
+            }
+        }
+
+        private static void ValidateFinite(float value, string parameterName)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value))
+            {
+                throw new ArgumentOutOfRangeException(
+                    parameterName,
+                    value,
+                    "GameplayEffect numeric definition values must be finite.");
+            }
+        }
+
+        private static class EmptyReadOnlyList<T>
+        {
+            internal static readonly IReadOnlyList<T> Value = Array.AsReadOnly(Array.Empty<T>());
         }
     }
 }

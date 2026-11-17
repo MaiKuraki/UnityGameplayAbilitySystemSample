@@ -1,2770 +1,624 @@
 # CycloneGames.UIFramework
 
-<div align="left">English | <a href="./README.SCH.md">简体中文</a></div>
+[English | 简体中文](README.SCH.md)
 
-**UI framework** for Unity designed for large-scale commercial projects. Beyond basic window management, it offers a complete navigation context graph, coordinated multi-window transitions, an MVP auto-binding system, LRU asset caching, Dynamic Atlas texture batching, and first-class DI/IoC support, all built around a zero-GC, thread-safe runtime core.
+CycloneGames.UIFramework owns and coordinates UGUI windows in Unity. It validates configuration, opens and closes windows with async cancellation, binds optional presentation and dependency-injection policies, tracks causal navigation history, and releases every session-owned resource through one main-thread-confined service.
 
-## Features
+## Table of Contents
 
-### 🏗️ Architecture & Scalability
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Core Concepts](#core-concepts)
+- [Usage Guide](#usage-guide)
+- [Advanced Topics](#advanced-topics)
+- [Common Scenarios](#common-scenarios)
+- [Performance and Memory](#performance-and-memory)
+- [Troubleshooting](#troubleshooting)
 
-| Feature                     | Detail                                                                                                                                                                   |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **MVP Auto-Binding**        | Decorate a Presenter with `[UIPresenterBind("WindowName")]` — binding, lifecycle forwarding, and injection happen automatically with zero boilerplate                    |
-| **DI / IoC**                | All contracts are interfaces (`IUIService`, `IUINavigationService`, `IUITransitionCoordinator`, etc.). Drop-in compatible with VContainer, Zenject, or any IoC container |
-| **Data-Driven Config**      | Every window and layer is configured via `ScriptableObject`, giving designers full control without touching code                                                         |
-| **Service-Oriented Facade** | `IUIService` is the single public API; internal `UIManager` complexity stays hidden                                                                                      |
+## Overview
 
-### 🧭 Navigation Context Graph
+`UIService` is the central window session owner. It validates configuration assets, resolves layers, binds optional extensions, executes transitions, and disposes every session-owned resource during close, rollback, or shutdown.
 
-| Feature                          | Detail                                                                                                                                       |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Directed Graph (not a stack)** | Windows can have multiple openers and survive non-linear closures; "Back" always resolves the nearest alive ancestor                         |
-| **Context Payload**              | Pass any typed object when opening; the target retrieves it any time via `NavigationService.GetContext()`                                    |
-| **Child-Close Policies**         | `Reparent` (re-attach to grandparent), `Cascade` (force-close descendants), or `Detach` (become a root)                                      |
-| **Zero-GC Queries**              | Navigation reads (`GetAncestors`, `ResolveBackTarget`, `GetHistory`) are thread-safe via `ReaderWriterLockSlim`; writes are main-thread only |
-| **Immutable Entry Structs**      | `UINavigationEntry` is a `readonly struct` — no heap allocation per record                                                                   |
+Windows open by stable string ID through an asset provider or by direct `UIWindowConfiguration`. Layers order windows by configuration priority. Navigation forms a causal graph of active windows and supports coordinated two-window transitions. Scene-bound windows close automatically when their owner scene changes.
 
-### 🎬 Transition Coordinator (Simultaneous & Stacked Animations)
+Optional capabilities stay at assembly boundaries. MVP and navigation types live in the core `Runtime` assembly. Asset loading, DI, and motion drivers compile in separate integration assemblies when their packages are present. Localization binding lives in a separate companion module.
 
-| Feature                               | Detail                                                                                                                        |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| **Coordinated Two-Window Transition** | `NavigateToAsync()` fires both exit and entry animations on the **same frame** — no visible gap between windows               |
-| **Stacked / Cascading Opens**         | Call `NavigateTo()` from `OnViewOpening()` to start window C while B is still animating — creates cascading layered entrances |
-| **Built-in Coordinators**             | `SlideTransitionCoordinator` (directional page-flip) and `CrossFadeTransitionCoordinator` (alpha dissolve) included           |
-| **Custom Coordinators**               | Implement `IUITransitionCoordinator` for any effect: zoom, elastic, blur — animation-library agnostic                         |
-| **Automatic Fallback**                | No coordinator? `NavigateToAsync()` silently degrades to sequential `NavigateTo()` — zero breaking changes                    |
-| **Independent Popup Animations**      | Non-coordinated windows use their own `IUIWindowTransitionDriver` and are completely unaffected                               |
+### Key Features
 
-### ⚡ Performance
+- **`UIService`** as the single main-thread-confined window-session owner with cancellation-aware `UniTask` operations.
+- **Explicit binder composition**: transactional per-window extension for MVP, DI, analytics, accessibility, or project policies.
+- **Provider-backed loading**: direct-prefab or `IUIWindowAssetProvider` with AssetManagement adapter and session-owned leases.
+- **Causal navigation**: active-window graph with coordinated enter/leave transitions and caller-buffered queries.
+- **Lifecycle state machine**: `UIWindowState` owned solely by `UIService`; rollback, cleanup, and aggregated failure reporting.
+- **Bounded dynamic atlas**: runtime sprite packing with explicit leases; see [Dynamic Atlas Guide](Documents~/DynamicAtlas.md).
+- **Localized layouts**: locale-specific geometry and typography overrides, provided by the optional [CycloneGames.UIFramework.Localization](../CycloneGames.UIFramework.Localization/README.md) companion module.
 
-| Feature                              | Detail                                                                                                                                     |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Asset Lifecycle Delegation**       | `UIManager` holds one `IAssetHandle<T>` per asset; lifecycle (RefCount, eviction) is fully owned by `AssetCacheService` (W-TinyLFU)        |
-| **Per-Frame Instantiation Throttle** | Spread heavy instantiation across frames to avoid spikes                                                                                   |
-| **Dynamic Atlas System**             | Packs runtime sprites into a single GPU texture at open-time, dramatically reducing draw-calls for icon-heavy UIs                          |
-| **Compressed Atlas Variant**         | `CompressedDynamicAtlasService` uses ASTC/DXT/ETC to reduce VRAM footprint for mobile targets                                              |
-| **Bleed Pixel Support**              | Automatic 1-pixel border replication prevents texture filtering artifacts at sprite edges (GPU + CPU dual-path)                            |
-| **Sprite Metadata Preservation**     | `GetSpriteFromSprite()` preserves original pivot points and 9-slice borders automatically                                                  |
-| **Async Atlas Loading**              | `GetSpriteAsync()` performs disk I/O off the main thread via `UniTask`; atlas insertion stays on the main thread                           |
-| **Page & Mipmap Control**            | Configurable `maxPages` limit prevents unbounded VRAM growth; optional mipmap generation for LOD-friendly UI                               |
-| **Thread-Safe Atomic Operations**    | `Interlocked` atomics for pixel-area tracking and ref counting eliminate TOCTOU races in concurrent scenarios                              |
-| **Async by Design**                  | Every load, instantiate, and open operation is `UniTask`-based — never blocks the main thread                                              |
-| **Runtime Monitor**                  | Live Play-mode editor dashboard (`UIRuntimeMonitorWindow`) showing active windows, in-flight opens, handle counts, and per-layer breakdown |
-| **Performance Auditor**              | Static-analysis tool (`UIPerformanceAuditWindow`) that scans UI prefabs for layout thrashing, excessive raycasts, material bloat, and more |
-| **Embedded Context Snapshot**        | `UIAssetContextProvider` caches serialized metadata inline — zero-latency first-frame resolution without blocking on async loads           |
-| **Context Preload Warmup**           | `BeginWarmup(IAssetPackage)` kicks off async context resolution in the background during scene init                                        |
-
-### 🔒 Reliability & Safety
-
-| Feature                           | Detail                                                                                                   |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| **Formal Window State Machine**   | `Opening → Opened → Closing → Closed` prevents duplicate opens, double-closes, and race conditions       |
-| **Memory-Safe Lifecycle**         | `OnReleaseAssetReference` ensures Addressable handles are released exactly once, even under cancellation |
-| **CancellationToken Propagation** | All async paths accept `CancellationToken`; cancel cleanly without leaks or orphaned GameObjects         |
-| **Thread-Safe Navigation**        | Navigation graph reads are safe from any thread; mutations are guarded to the main thread                |
-
-## Core Architecture
+## Architecture
 
 ```mermaid
-flowchart TB
-    subgraph GameCode["🎮 Game Code"]
-        GameLogic["Game Logic / Presenter"]
-    end
-
-    subgraph Facade["📦 Public API"]
-        UIService["IUIService<br/>• OpenUI / CloseUI<br/>• NavigationService<br/>• TransitionCoordinator"]
-    end
-
-    subgraph NavSystem["🧭 Navigation System"]
-        NavService["IUINavigationService<br/>• Context Graph<br/>• ResolveBackTarget<br/>• ChildClosePolicy"]
-        Coordinator["IUITransitionCoordinator<br/>• SlideTransitionCoordinator<br/>• CrossFadeTransitionCoordinator<br/>• Custom implementations"]
-    end
-
-    subgraph Core["⚙️ Core System"]
-        UIManager["UIManager<br/>• Async Loading<br/>• LRU Cache (Prefab + Config)<br/>• Frame Throttle<br/>• silentOpen path"]
-    end
-
-    subgraph MVP["🔌 MVP Layer"]
-        Binder["UIPresenterBinder<br/>[UIPresenterBind] auto-discover"]
-        Presenter["UIPresenter<TView><br/>• NavigateTo / NavigateToAsync<br/>• NavigateBack<br/>• NavigationService"]
-    end
-
-    subgraph LayerConfigs["📋 LayerConfigs (1:1)"]
-        LayerConfigMenu["LayerConfig<br/>Menu"]
-        LayerConfigDialogue["LayerConfig<br/>Dialogue"]
-    end
-
-    subgraph WindowConfigs["📋 WindowConfigs (1:1)"]
-        ConfigA["UIConfig A"]
-        ConfigB["UIConfig B"]
-        ConfigC["UIConfig C"]
-    end
-
-    subgraph Scene["🏗️ Scene Hierarchy"]
-        UIRoot["UIRoot"]
-        subgraph Layers["UILayers"]
-            UILayerMenu["UILayer<br/>Menu"]
-            UILayerDialogue["UILayer<br/>Dialogue"]
-        end
-        subgraph Windows["🪟 UI Windows"]
-            WindowA["UIWindowA<br/>Main Menu"]
-            WindowB["UIWindowB<br/>Settings"]
-            WindowC["UIWindowC<br/>Popup"]
-        end
-    end
-
-    GameLogic --> UIService
-    UIService --> UIManager
-    UIService --> NavService
-    UIService --> Coordinator
-
-    UIManager --> UIRoot
-    UIRoot --> UILayerMenu
-    UIRoot --> UILayerDialogue
-    UILayerMenu --> WindowA
-    UILayerMenu --> WindowB
-    UILayerDialogue --> WindowC
-
-    LayerConfigMenu -.->|defines| UILayerMenu
-    LayerConfigDialogue -.->|defines| UILayerDialogue
-    ConfigA -.->|defines| WindowA
-    ConfigB -.->|defines| WindowB
-    ConfigC -.->|defines| WindowC
-
-    Binder -.->|inject| Presenter
-    Presenter -->|NavigateToAsync| Coordinator
-    Coordinator -->|fire simultaneously| UIManager
-    UIManager -->|Register/Unregister| NavService
+flowchart LR
+    App["Application composition root"] --> Root["UIRoot + UILayer hierarchy"]
+    App --> Options["UIServiceOptions"]
+    App --> Provider["IUIWindowAssetProvider (optional)"]
+    App --> Binders["IUIWindowBinder list (optional)"]
+    App --> Service["UIService"]
+    Service --> Root
+    Service --> Provider
+    Service --> Binders
+    Service --> Session["Window session"]
+    Session --> Config["UIWindowConfiguration lease/reference"]
+    Session --> Prefab["Prefab lease/reference"]
+    Session --> Window["UIWindow instance"]
+    Session --> Bindings["IUIWindowBinding instances"]
+    Service --> Navigation["IUINavigationService (optional)"]
 ```
 
-### 1. `UIService` (The Facade)
+`UIService` is the sole runtime authority for managed windows. A session begins when `OpenAsync` reserves a window ID and ends after close, failed-open rollback, scene cleanup, immediate disposal, or shutdown.
 
-The primary public API. All game code and presenters interact exclusively through `IUIService`, keeping the internal `UIManager` fully encapsulated. In DI environments, bind `IUIService` as a singleton and inject it anywhere. It also owns `NavigationService` and `TransitionCoordinator` references, making the full advanced feature set accessible from a single injection point.
+| Object | Created by | Runtime owner | End of lifetime |
+| --- | --- | --- | --- |
+| `UIRoot`, layers, configuration assets | Scene or content authoring | Scene/application | Scene or application policy |
+| `UIService` | Composition root or optional `UIManager` | Composition root/host | `ShutdownAsync` or `Dispose` |
+| `IUIWindowAssetProvider` | Composition root | Composition root | Application policy; `UIService` does not dispose it |
+| `IUIWindowBinder` instances | Composition root | Composition root | Application policy; binder set may change only with no active sessions |
+| `IUIWindowBinding` | Binder during open | Window session | Reverse-order disposal during cleanup |
+| Window GameObject | `UIService` | Window session | Close, rollback, or shutdown |
+| Asset leases | Provider, acquired by `UIService` | Window session | Close, rollback, or shutdown |
+| Presenter | `UIPresenterBinder` registration policy | Registered release delegate | Binding disposal |
 
-### 2. `UIManager` (The Core)
+`UIManager` is an optional `MonoBehaviour` lifetime host. It creates a `UIService` from serialized capacities and an explicit `UIRoot`. Code that already has a composition root can construct `UIService` directly.
 
-Orchestrates the full window lifecycle:
+### Assembly layout
 
-- **Async Loading**: Loads configs and prefabs via `CycloneGames.AssetManagement`.
-- **Handle Ownership**: Direct `IAssetHandle<T>` dictionaries replace the former LRU cache. Each unique asset path owns exactly one handle; `Dispose()` signals `AssetCacheService` (W-TinyLFU) to decrement the RefCount, allowing idle assets to flow from Active → Trial → Main pools and eventually be evicted.
-- **Instantiation Throttling**: Caps per-frame instantiations to smooth out spikes.
-- **silentOpen path**: `OpenSilentAsync()` loads a window into the ready state without animation — used by `CoordinatedNavigateAsync` so the coordinator drives both windows simultaneously from the same frame.
+| Assembly | Purpose | Activation |
+| --- | --- | --- |
+| `CycloneGames.UIFramework.Runtime` | Core runtime | Always |
+| `CycloneGames.UIFramework.Editor` | Authoring tools | Editor only |
+| `CycloneGames.UIFramework.Runtime.Integrations.AssetManagement` | Asset handle/lease adapter | `CYCLONEGAMES_HAS_ASSETMANAGEMENT` define; `versionDefines` watches the `com.cyclone-games.asset-management` UPM package |
+| `CycloneGames.UIFramework.Runtime.Integrations.VContainer` | Window injection | `jp.hadashikick.vcontainer` package present |
+| `...Integrations.LitMotion` | Window transition driver | `com.annulusgames.lit-motion` package present |
+| `...Integrations.DOTween` | Window transition driver | `com.demigiant.dotween` package present |
+| `...Integrations.PrimeTween` | Window transition driver | `com.kyrylokuzyk.primetween` package present |
+| `CycloneGames.UIFramework.Samples` | Opt-in examples | `autoReferenced: false` |
 
-### 3. `UIRoot` & `UILayer` (Scene Hierarchy)
+The core runtime references `UniTask`, `CycloneGames.Logging.Core`, and Unity UGUI APIs. Optional DI and motion integrations use asmdef `versionDefines` plus `defineConstraints` and activate automatically when their dependency is installed as a UPM package. The AssetManagement integration follows the same rule: `versionDefines` watches the `com.cyclone-games.asset-management` UPM package and emits `CYCLONEGAMES_HAS_ASSETMANAGEMENT`. When AssetManagement exists only as a folder under `Assets/`, the define never fires and the integration assembly is silently skipped; install AssetManagement as a UPM or embedded package, or define the symbol yourself where the asmdef can see it.
 
-- **`UIRoot`**: Root anchor for all UI, owns the UI Camera and all layers.
-- **`UILayer`**: A named sorting layer (e.g. `Menu`, `Dialogue`, `HUD`, `Overlay`). Each window belongs to exactly one layer, controlling render order and input priority.
+Localization binding is not part of this package. It lives in the optional companion module [CycloneGames.UIFramework.Localization](../CycloneGames.UIFramework.Localization/README.md), so this package compiles without `CycloneGames.Localization` and without any conditional-compilation symbol.
 
-### 4. `UIWindow` (The UI Unit)
+The integration is a separate module rather than an integration folder inside this package because `versionDefines` reads only the resolved UPM package manifest. `CycloneGames.Localization` is a raw folder under `Assets/` in some projects and a real package under `Packages/` in others, so a rule keyed on `com.cyclone-games.localization` matches in one layout and never matches in the other, silently disabling the integration in the project that needs it. Physical isolation is the only mechanism that behaves identically in both layouts. Delete the module folder to remove the integration. Do not add `CYCLONEGAMES_HAS_LOCALIZATION` to Player Settings.
 
-Base class for every panel, page, or popup:
+TextMeshPro is a separate optional capability layered on top of that module. `CYCLONEGAMES_HAS_TEXTMESHPRO` is derived per assembly by two `versionDefines` rules and consumed by `defineConstraints`; it covers both Unity branches where TextMeshPro exists. See [TextMeshPro compatibility](Documents~/TextMeshProCompatibility.md).
+
+Runtime and sample diagnostics use the stable `CycloneGames.UIFramework` `LogChannel` category; general Editor tooling uses `CycloneGames.UIFramework.Editor`. The package depends only on the backend-neutral `com.cyclone-games.logging` contract and leaves writer lifecycle to the host. Without a backend, `NullLogWriter` discards messages. The composition root may install `com.cyclone-games.logging.pipeline`, add `com.cyclone-games.logging.unity`, or provide another `ILogWriter`; file path, rotation, retention, redaction, flush, and disposal policy belong to that host.
+
+Each diagnostic-producing asmdef owns an internal `<FeatureName>Log` facade under `Diagnostics/`. The facade centralizes `Category`, ambient `Channel`, and strict `Create(ILogWriter logWriter)` binding; consumers use `Log` for ambient class-local channels and `_log` for explicitly injected instance channels.
+
+The opt-in sample asmdef applies the same convention through `Samples/Diagnostics/UIFrameworkSampleLog.cs` while preserving the existing `CycloneGames.UIFramework` category.
+
+## Quick Start
+
+A direct-reference window needs a `UIRoot`, a `UIWindowConfiguration`, and a composition root that constructs `UIService`.
+
+```csharp
+using System;
+using System.Threading;
+using Cysharp.Threading.Tasks;
+using CycloneGames.Logging;
+using CycloneGames.UIFramework.Runtime;
+using UnityEngine;
+
+public sealed class GameUiBootstrap : MonoBehaviour
+{
+    private static readonly LogChannel Log = LogChannel.Create("Game.UI");
+
+    [SerializeField] private UIRoot uiRoot;
+    [SerializeField] private UIWindowConfiguration startupWindow;
+
+    private IUIService _ui;
+
+    private void Start()
+    {
+        RunAsync(this.GetCancellationTokenOnDestroy()).Forget();
+    }
+
+    private async UniTask RunAsync(CancellationToken lifetimeToken)
+    {
+        try
+        {
+            var options = new UIServiceOptions
+            {
+                InitialWindowCapacity = 8,
+                MaxActiveWindows = 32,
+                MaxInstantiatesPerFrame = 2,
+            };
+
+            _ui = new UIService(uiRoot, options: options);
+            await _ui.OpenAsync(startupWindow, cancellationToken: lifetimeToken);
+            await UniTask.WaitUntilCanceled(lifetimeToken);
+        }
+        catch (OperationCanceledException) when (lifetimeToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            Log.Error(exception, "UI startup failed.");
+        }
+        finally
+        {
+            IUIService service = _ui;
+            _ui = null;
+            if (service != null)
+            {
+                try
+                {
+                    await service.ShutdownAsync(
+                        UIShutdownMode.Immediate,
+                        CancellationToken.None);
+                }
+                catch (Exception exception)
+                {
+                    Log.Error(exception, "UI shutdown failed.");
+                }
+                finally
+                {
+                    if (!service.IsDisposed)
+                    {
+                        service.Dispose();
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+Opening with a direct configuration does not require an asset provider when `Source` is `PrefabReference`. For provider-backed loading by stable window ID, supply an `IUIWindowAssetProvider`; the included adapter accepts an application-owned `IAssetPackage` and `IAssetPathBuilder`.
+
+## Core Concepts
+
+### Lifecycle state machine
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Opening: Open() / OpenSilentAsync()
-
-    Opening --> Opened: Transition Complete
-    Opening --> Closing: Cancel/Close()
-
-    Opened --> Closing: Close()
-
-    Closing --> Closed: Transition Complete
-
-    Closed --> [*]: Destroy
+    [*] --> Created
+    Created --> Opening
+    Opening --> Open
+    Opening --> Closing: rollback or close request
+    Open --> Closing
+    Closing --> Closed
+    Closed --> [*]
 ```
 
-`OpenSilentAsync()` advances the state machine and notifies binders **without** playing the transition animation — enabling the Transition Coordinator to synchronise two-window animations.
+`UIWindowState` is the single authoritative state for a managed window. `UIWindow` validates each local transition; `UIService` owns the lifecycle workflow, cancellation, rollback, and cleanup.
 
-### 5. `UIWindowConfiguration` (Data-Driven Configuration)
+The opening pipeline runs in order: create bindings, notify `OnStartOpen`, run `UIWindow.OnOpening()`, await `IUIWindowTransitionDriver.PlayOpenAsync` when configured, then commit `Open`, run `UIWindow.OnOpened()`, and notify `OnFinishedOpen`. Close uses the symmetric order; if a close hook or transition fails, the service forces the authoritative state to `Closed`, publishes `OnFinishedClose`, continues cleanup, and reports the aggregated failure.
 
-A `ScriptableObject` defining the prefab source, target layer, and optional per-window overrides. Designers configure windows without touching code.
+### Extension points
 
-The configuration also includes a **`SubCanvasPolicy`** (`InheritLayerCanvas` / `ForceOwnSubCanvas` / `AutoDetect`) that controls whether the window gets an isolated sub-Canvas for rebuild-cost isolation.
+Choose the smallest extension point that owns the work:
 
-Supported prefab source modes:
+- Override protected `UIWindow` hooks for local, synchronous view behavior.
+- Implement `IUIWindowBinding` for window-scoped presenters, DI scopes, analytics subscriptions, or other disposable integrations.
+- Implement `IAsyncUIWindowBinding` for ordered, cancelable work at pre-commit and post-commit lifecycle boundaries.
+- Implement `IUIWindowTransitionDriver` for one-window animation; implement `IUITransitionCoordinator` for two-window navigation animation.
 
-| Mode              | Serialized Field                          | Typical Backend                                   | Notes                                                                                        |
-| ----------------- | ----------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `PrefabReference` | `windowPrefab`                            | Direct Unity prefab reference                     | Fastest authoring path. Best for local/static UI prefabs.                                    |
-| `AssetReference`  | `prefabAssetRef` (`AssetRef<GameObject>`) | Addressables, YooAsset, or any `AssetRef` backend | Recommended for hot-update pipelines; keeps runtime loading location in `AssetRef.Location`. |
-| `PathLocation`    | `prefabLocation` (string)                 | xAsset/custom loaders                             | Maximum compatibility for legacy or custom pipelines.                                        |
-
-Runtime behavior and safety guarantees:
-
-- Non-direct modes (`AssetReference` / `PathLocation`) are loaded by location through `IAssetPackage`.
-- `UIWindowConfiguration.OnValidate()` clears `windowPrefab` in non-direct modes to avoid accidental strong references.
-- `UIManager` uses shared prefab handles keyed by location, so windows targeting the same location reuse one handle.
-- Window destroy callbacks are wired to an idempotent release path, so external destroys do not leak shared handles.
-
-### 6. `IUIWindowTransitionDriver` (Per-Window Animation)
-
-Controls a **single** window's open/close animation. Use this for per-window effects: popups, tooltips, toast notifications. Works independently of and alongside the Transition Coordinator.
-
-### 7. `IUITransitionCoordinator` (Two-Window Coordinated Animation)
-
-Drives **two** windows simultaneously. When registered on `IUIService`, all `NavigateToAsync()` calls use it to create seamless page-flip, cross-fade, or any custom effect. Implement the 3-line interface to bring in DOTween, LitMotion, or any animation system.
-
-## Dependencies
-
-- `com.cysharp.unitask`
-- `com.cyclone-games.asset-management`
-- `com.cyclone-games.factory`
-- `com.cyclone-games.logger`
-- `com.cyclone-games.service`
-
-## Asset Management & Memory Strategy
-
-UIFramework has a **first-class dependency** on `CycloneGames.AssetManagement`. It does **not** manage its own eviction cache — all asset lifecycle decisions are delegated entirely to `AssetCacheService`.
-
-### How it works
-
-```
-OpenUI("MyWindow")
-  └─ assetPackage.LoadAssetAsync<UIWindowConfiguration>(path, bucket: "UIFramework")
-       └─ AssetCacheService: cache hit → Retain() (RefCount ↑)
-            OR cache miss → load, register node, RefCount = 1
-       └─ UIManager stores the IAssetHandle<T> reference
-
-CloseUI("MyWindow")
-  └─ UIManager: configHandle.Dispose()   → AssetCacheService: RefCount ↓
-  └─ UIManager: prefabHandle.Dispose()   → if no other window uses same prefab
-       └─ RefCount → 0 → asset enters idle pool (Trial/Main via W-TinyLFU)
-       └─ W-TinyLFU decides eviction vs. promotion based on access frequency
-```
-
-### Key design properties
-
-| Property                      | Detail                                                                                                  |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| **Single RefCount system**    | No private counter in UIManager — AssetCacheService is the sole authority                               |
-| **`"UIFramework"` bucket**    | All UI assets are tagged; visible in Cache Debugger under Buckets tab                                   |
-| **Prefab sharing**            | Multiple windows using the same prefab path share one handle; disposed only when the last window closes |
-| **Config handles**            | One handle per window name (windowName → config path), released on `CloseUI`                            |
-| **Zero leak on scene unload** | `CleanupAllWindows()` `Dispose()`s every held handle, correctly draining AssetCacheService RefCounts    |
-
-### Recommended strategy with W-TinyLFU
-
-To get the best cache quality and memory stability:
-
-1. Prefer `AssetReference` for production and hot-update windows.
-2. Keep location strings stable across sessions (avoid per-build randomization) so W-TinyLFU can learn access frequency accurately.
-3. Use `PathLocation` only for legacy/custom integration points where `AssetRef` is not available yet.
-4. Reserve `PrefabReference` mainly for always-local windows (bootstrap/debug/offline-only UI).
-5. If you need lifecycle diagnostics, enable `UIManager.EnableAssetLifecycleDebugLog` to emit `CLogger` info logs for source mode and release decisions.
-
-### Debug log toggle example
-
-`UIManager` keeps asset lifecycle debug logs disabled by default. Enable it only in development or profiling builds:
+`UIWindowBindingContext` exposes `OpenerId`, `OpenContext`, and the session `LifetimeToken` when a binding is created. The lifetime token is valid through close-stage callbacks and is canceled immediately before binding disposal. Async lifecycle stages receive their own stage token through `IAsyncUIWindowBinding`.
 
 ```csharp
-using CycloneGames.UIFramework.Runtime;
-using UnityEngine;
-
-public class UIDebugBootstrap : MonoBehaviour
+public sealed class InventoryWindow : UIWindow
 {
-    [SerializeField] private bool enableAssetLifecycleLogsInDev = true;
+    protected override void OnOpening() => SetInteraction(false);
+    protected override void OnOpened() => SetInteraction(true);
+    protected override void OnClosing() => SetInteraction(false);
 
-    void Start()
+    private void SetInteraction(bool enabled)
     {
-        var manager = FindFirstObjectByType<UIManager>();
-        if (manager == null) return;
-
-        // Keep production logs clean; only enable when you need diagnostics.
-        manager.EnableAssetLifecycleDebugLog = Debug.isDebugBuild && enableAssetLifecycleLogsInDev;
+        if (CanvasGroup == null) return;
+        CanvasGroup.interactable = enabled;
+        CanvasGroup.blocksRaycasts = enabled;
     }
 }
+
+await ui.OpenAsync(
+    inventoryConfiguration,
+    new UIOpenOptions(transitionDriver: inventoryTransition),
+    cancellationToken);
 ```
 
-## Asset Load Context (Per-Window Asset Metadata)
+### Open and close behavior
 
-**`UIAssetLoadContext`** lets you attach custom metadata (bucket, tag, owner) to every UI asset load — giving you fine-grained control over how `AssetCacheService` tracks, profiles, and evicts UI resources.
+- `OpenAsync(windowId)` reserves the ID before loading and requires a provider.
+- `OpenAsync(configuration)` uses the supplied configuration; non-direct prefab sources still require a provider.
+- Concurrent opens for the same ID join the same session completion only when the configuration reference and every `UIOpenOptions` value match exactly.
+- Reaching `MaxActiveWindows` fails before creating another session.
+- Configuration, layer, prefab, binders, transition, and navigation registration are one rollback boundary.
+- Destroying a managed window outside `UIService` ownership triggers cleanup.
 
-### Why use it?
+`CloseAsync` is idempotent for an in-progress close and returns `false` for an unknown or empty ID. When navigation is enabled, `ChildClosePolicy` controls descendants: `Reparent` reconnects children to the removed window's active opener, `Cascade` closes the complete subtree, and `Detach` leaves children active as root nodes. Caller cancellation stops waiting; the authoritative close continues.
 
-- **Per-feature isolation**: Tag main-menu assets with `"MainMenu"` and battle-HUD assets with `"Battle"` so the Cache Debugger shows them separately.
-- **Owner-based eviction**: Assign an `Owner` value (e.g. a level ID) so all UI assets tied to that owner can be bulk-released on scene unload.
-- **Separate config and prefab lifecycles**: Give configuration assets a long-lived bucket while keeping prefab assets in a more aggressively evicted pool.
+### Shutdown behavior
 
-### The struct
+- `ShutdownAsync(Immediate)` cancels operations, destroys managed windows, disposes bindings and leases, clears navigation, disposes the service, and drains provider acquisitions already in flight.
+- `ShutdownAsync(Animated)` closes sessions in reverse order through their transition drivers before disposal.
+- `Dispose()` is the synchronous, non-draining emergency path; it must run on the owning Unity main thread. A composition root must await shutdown with a token that remains valid during teardown, commonly `CancellationToken.None` after its lifetime token has fired.
 
-`UIAssetLoadContext` is a `readonly struct` (zero heap allocation):
+`IsSceneBound` captures the active scene handle at open request time. A committed window closes when a later active-scene change no longer matches that handle.
+
+## Usage Guide
+
+### UIRoot and layers
+
+A `UIRoot` requires an explicit root `Canvas` and a serialized list of `UILayer` components. Each layer requires a `Canvas` and `GraphicRaycaster`. At initialization, `UIRoot` validates that the root Canvas exists and uses a `RectTransform`, every layer entry is non-null, and every layer has a non-empty, unique ordinal name. `UILayerConfiguration.LayerName` must exactly match one registered `UILayer.LayerName`. Windows within a layer are ordered by configuration priority, then by insertion order for equal priorities.
+
+### UIWindowConfiguration
+
+| Field | Meaning |
+| --- | --- |
+| `WindowId` | Stable, non-empty ID; unique among active sessions |
+| `Source` | `PrefabReference`, `PathLocation`, or `AssetReference` |
+| `WindowPrefab` | Direct prefab for `PrefabReference` |
+| `PrefabLocation` | Provider location for `PathLocation` |
+| `PrefabAssetReference` | Provider-neutral runtime location plus Editor tracking GUID |
+| `Layer` | Layer configuration whose name resolves in `UIRoot` |
+| `Priority` | Ordering within that layer |
+| `IsSceneBound` | Close when the owning active scene changes |
+| `CanvasIsolationPolicy` | Inherit the layer Canvas or add an isolated child Canvas |
+| `CullWhenHidden` | `SetVisible(false)` deactivates the GameObject, fully culling rendering and events |
+
+The prefab root must contain a `UIWindow`-derived component. `UIAssetReference.Location` is the runtime contract; `EditorGuid` is authoring metadata and must not be treated as a Player address.
+
+`CullWhenHidden` chooses between two hidden-window costs. With the default `false`, `SetVisible(false)` only drives the `CanvasGroup` (alpha to zero, interaction and raycasts off): the window keeps rendering and batching on the GPU, but showing it again has zero layout-rebuild cost. With `true`, hiding additionally calls `gameObject.SetActive(false)`, which culls the window from rendering and event processing entirely (the Canvas subtree stops batching); showing it again reactivates the GameObject with the visible `CanvasGroup` state already applied. Enable it for heavy windows that stay hidden for long periods; keep the default for windows toggled frequently, where repeated activation would rebuild layout every time.
+
+### AssetManagement-backed windows
 
 ```csharp
-// Shared bucket/tag/owner for both config and prefab
-var ctx = new UIAssetLoadContext(
-    sharedBucket: "Battle",
-    sharedTag:    "hud",
-    sharedOwner:  "level_3"
-);
-
-// Or separate metadata for config vs. prefab
-var ctx = new UIAssetLoadContext(
-    configBucket: "ui_configs",  configTag: "menu",  configOwner: "global",
-    prefabBucket: "ui_prefabs",  prefabTag: "menu",  prefabOwner: "level_1"
-);
-
-// From AssetBucketScope
-var ctx = UIAssetLoadContext.FromScope(myScope);
-var ctx = UIAssetLoadContext.FromScopes(configScope, prefabScope);
-
-// Check if any field is set
-if (ctx.HasAnyMetadata) { /* ... */ }
-```
-
-### Two-level merge hierarchy
-
-When you call `OpenUI` / `OpenUIAsync`, the final metadata is resolved by merging two layers (first non-null field wins):
-
-1. **Call-site parameter** — passed directly to `OpenUI("Window", assetLoadContext: ctx)`
-2. **UIAssetContextProvider** — the default context resolved from the `UIRoot`'s `UIAssetContextProvider` component
-
-```csharp
-// The provider is auto-discovered on UIRoot (or any parent)
-// All OpenUI calls without an explicit context fall back to the provider's metadata.
-
-// Override per-call
-await uiService.OpenUIAsync("UIWindow_Shop", assetLoadContext: new UIAssetLoadContext(
-    sharedBucket: "Shop",
-    sharedOwner:  "shop_v2"
-));
-```
-
-### UIAssetContextProvider (Scene-Level Default)
-
-`UIAssetContextProvider` is a `sealed MonoBehaviour` attached to the same `GameObject` as `UIRoot` (or any parent). It provides the **framework-wide default** `UIAssetLoadContext` for all windows that don't specify one at the call site.
-
-It supports three source modes:
-
-| Mode              | Serialized Field       | Description                                                         |
-| ----------------- | ---------------------- | ------------------------------------------------------------------- |
-| `DirectReference` | `contextAsset`         | Directly references a `UIAssetContextAsset` ScriptableObject        |
-| `AssetReference`  | `contextAssetRef`      | Uses an `AssetRef<UIAssetContextAsset>` (Addressables / hot-update) |
-| `PathLocation`    | `contextAssetLocation` | Loads by string path via `IAssetPackage`                            |
-
-- **Direct mode** returns the context synchronously — ideal for local/static setups.
-- **Async modes** (`AssetReference` / `PathLocation`) are resolved once via `ResolveLoadContextAsync()` and cached for all subsequent calls.
-- `OnValidate()` clears `contextAsset` in non-direct modes to prevent phantom memory retention.
-
-#### Embedded Snapshot (Zero-Latency First Frame)
-
-Enable `useEmbeddedSnapshot` in the Inspector to cache metadata fields (`configBucket`, `configTag`, etc.) directly on the component. The synchronous `GetLoadContext()` method returns this snapshot immediately — no async await needed on the first frame.
-
-```csharp
-// Synchronous path — uses embedded snapshot, never blocks
-UIAssetLoadContext ctx = provider.GetLoadContext();
-```
-
-The snapshot is populated from the linked `UIAssetContextAsset` via **Sync Embedded Snapshot** in the Inspector (or `SyncEmbeddedSnapshotFromAsset()` in code). Clear it with `ClearEmbeddedSnapshot()`.
-
-#### Preload Warmup
-
-For `AssetReference` or `PathLocation` modes, call `BeginWarmup(IAssetPackage)` during scene initialization to start resolving the asset in the background. By the time the first `OpenUI` call arrives, the context is already cached:
-
-```csharp
-// During scene boot
-provider.BeginWarmup(assetPackage);
-
-// Later — resolves instantly from cache
-await uiService.OpenUIAsync("MyWindow");
-```
-
-You can also toggle `preloadPackageBackedContext` in the Inspector so the framework calls `BeginWarmup` automatically when an `IAssetPackage` becomes available.
-
-#### Public API
-
-| Method / Property                 | Description                                                                     |
-| --------------------------------- | ------------------------------------------------------------------------------- |
-| `GetLoadContext()`                | Synchronous — returns embedded snapshot or direct-reference context immediately |
-| `ResolveLoadContextAsync()`       | Async — resolves from package, caches result; deduplicates concurrent calls     |
-| `BeginWarmup(IAssetPackage)`      | Fire-and-forget background resolution for package-backed modes                  |
-| `SyncEmbeddedSnapshotFromAsset()` | Copies current asset's fields into the embedded snapshot                        |
-| `ClearEmbeddedSnapshot()`         | Resets all embedded fields to `null`                                            |
-| `HasConfiguredSource`             | `true` if any source mode has a valid reference/path                            |
-| `HasResolvedAssetReference`       | `true` if an async resolution has completed and is cached                       |
-| `HasEmbeddedSnapshot`             | `true` if at least one embedded field is non-empty                              |
-| `HasEffectiveMetadata`            | `true` if any path (direct, resolved, or snapshot) can provide metadata         |
-
-### UIAssetContextAsset (Designer-Friendly Configuration)
-
-For designers who prefer the Inspector, create a `UIAssetContextAsset` ScriptableObject:
-
-**Create** → `CycloneGames > UIFramework > UI Asset Context Asset`
-
-The asset exposes `configBucket / configTag / configOwner` and `prefabBucket / prefabTag / prefabOwner` fields in the Inspector. Convert to a runtime struct with `asset.ToLoadContext()`.
-
-### Resolution flow diagram
-
-```
-OpenUI("MyWindow", assetLoadContext: callSiteCtx)
-  │
-  ├─ 1. callSiteCtx (explicit per-call override)
-  │
-  └─ 2. UIRoot.AssetContextProvider.ResolveLoadContextAsync()
-       ├─ DirectReference  → contextAsset.ToLoadContext()       (sync)
-       ├─ AssetReference   → package.LoadAsync(ref).ToLoadContext()  (async, cached)
-       └─ PathLocation     → package.LoadAssetAsync(path).ToLoadContext() (async, cached)
-  │
-  └─ Merge: callSiteCtx.Merge(providerCtx)  →  resolvedContext
-       └─ Each field: callSite ?? provider
-```
-
-## Quick Start Guide
-
-This guide will walk you through setting up and using the UIFramework step by step. Follow along to create your first UI window!
-
-### Step 1: Scene Setup
-
-1. **Locate the UIFramework Prefab**: Find the `UIFramework.prefab` in the package at `Runtime/Prefabs/UI/UIFramework.prefab`.
-2. **Add to Scene**: Either:
-   - Drag the prefab directly into your scene, or
-   - Load it at runtime using your asset management system
-3. **Verify Setup**: The prefab contains:
-   - `UIRoot` component with UI Camera
-   - Default `UILayer` configurations (Menu, Dialogue, Notification, etc.)
-
-The `UIFramework.prefab` is pre-configured with essential components, so you can start using it immediately.
-
-### Step 2: Create `UILayer` Configurations
-
-`UILayer` configurations define the rendering and input layers for your UI windows. The framework comes with several default layers, but you can create custom ones.
-
-1. **Create a New Layer Configuration**:
-   - In the Project window, right-click and select **Create > CycloneGames > UIFramework > UILayer Configuration**
-   - Name it descriptively, e.g., `UILayer_Menu`, `UILayer_Dialogue`, `UILayer_Notification`
-
-2. **Configure the Layer**:
-   - Open the `UILayerConfiguration` asset in the Inspector
-   - Set the `Layer Name` (e.g., "Menu", "Dialogue")
-   - Adjust the `Sorting Order` if needed (higher values render on top)
-
-3. **Assign to UIRoot**:
-   - Select the `UIRoot` GameObject in your scene
-   - In the Inspector, find the `Layer Configurations` list
-   - Add your newly created `UILayerConfiguration` assets to the list
-
-**Example Layer Setup:**
-
-```
-UILayer_Menu (Sorting Order: 100)
-UILayer_Dialogue (Sorting Order: 200)
-UILayer_Notification (Sorting Order: 300)
-```
-
-### Step 3: Create Your First `UIWindow`
-
-There are two ways to create a `UIWindow`: using the quick creation tool or manually. We'll cover both methods.
-
-#### Method 1: Quick Creation (Recommended for Beginners)
-
-The framework provides a convenient editor tool to create all necessary files at once.
-
-1. **Open the UIWindow Creator**:
-   - Go to **Tools > CycloneGames > UIWindow Creator** in the Unity menu bar
-   - A window will open with all the creation options
-
-2. **Fill in the Required Information**:
-   - **Window Name**: Enter a descriptive name (e.g., `MainMenuWindow`, `HUDWindow`)
-   - **Namespace** (Optional): If you use namespaces, enter it here (e.g., `MyGame.UI`)
-   - **Script Save Path**: Drag a folder where the C# script will be saved
-   - **Prefab Save Path**: Drag a folder where the prefab will be saved
-   - **Configuration Save Path**: Drag a folder where the `UIWindowConfiguration` asset will be saved
-   - **UILayer Configuration**: Select the `UILayerConfiguration` asset you created in Step 2
-   - **Template Prefab** (Optional): You can drag a template prefab to use as a base
-
-3. **Create the UIWindow**:
-   - Click the **"Create UIWindow"** button
-   - The tool will automatically create:
-     - A C# script inheriting from `UIWindow`
-     - A prefab with the script attached
-     - A `UIWindowConfiguration` asset linking everything together
-
-**Visual Guide:**
-
-- <img src="./Documents~/UIWindowCreator_1.png" alt="UIWindow Creator 1" style="width: 100%; height: auto; max-width: 800px;" />
-- <img src="./Documents~/UIWindowCreator_2.png" alt="UIWindow Creator 2" style="width: 100%; height: auto; max-width: 800px;" />
-
-#### Method 2: Manual Creation
-
-If you prefer to create files manually or need more control:
-
-1. **Create the Script**:
-
-   ```csharp
-   using CycloneGames.UIFramework.Runtime;
-   using UnityEngine;
-   using UnityEngine.UI;
-
-   public class MainMenuWindow : UIWindow
-   {
-       [SerializeField] private Button playButton;
-       [SerializeField] private Button settingsButton;
-       [SerializeField] private Button quitButton;
-
-       protected override void Awake()
-       {
-           base.Awake();
-
-           // Initialize button listeners
-           if (playButton != null)
-               playButton.onClick.AddListener(OnPlayClicked);
-           if (settingsButton != null)
-               settingsButton.onClick.AddListener(OnSettingsClicked);
-           if (quitButton != null)
-               quitButton.onClick.AddListener(OnQuitClicked);
-       }
-
-       private void OnPlayClicked()
-       {
-           Debug.Log("Play button clicked!");
-           // Add your game start logic here
-       }
-
-       private void OnSettingsClicked()
-       {
-           Debug.Log("Settings button clicked!");
-           // Add your settings logic here
-       }
-
-       private void OnQuitClicked()
-       {
-           Debug.Log("Quit button clicked!");
-           Application.Quit();
-       }
-   }
-   ```
-
-2. **Create the Prefab**:
-   - Create a new UI `Canvas` or `Panel` in your scene
-   - Add your `MainMenuWindow` component to the root `GameObject`
-   - Design your UI (add buttons, text, images, etc.)
-   - Assign UI element references to the serialized fields in the Inspector
-   - Save it as a prefab (drag from Hierarchy to Project window)
-
-3. **Create the Configuration**:
-   - Right-click in the Project window and select **Create > CycloneGames > UIFramework > UIWindow Configuration**
-   - Name it `UIWindow_MainMenu` (the name you'll use to open the window)
-   - In the Inspector:
-     - Assign your `MainMenuWindow` prefab to the `Window Prefab` field
-     - Assign the appropriate `UILayer` (e.g., `UILayer_Menu`) to the `Layer` field
-
-### Step 4: Initialize and Use the `UIService`
-
-The `UIService` is your main interface for opening and closing UI windows. You need to initialize it once at game startup.
-
-#### Basic Initialization (Using Resources)
-
-If you're using Unity's built-in `Resources.Load`:
-
-```csharp
-using CycloneGames.UIFramework.Runtime;
-using CycloneGames.Factory.Runtime;
-using CycloneGames.Service.Runtime;
 using CycloneGames.AssetManagement.Runtime;
-using Cysharp.Threading.Tasks;
-using UnityEngine;
-
-public class GameInitializer : MonoBehaviour
-{
-    private IUIService uiService;
-
-    async void Start()
-    {
-        // Initialize asset management (using Resources)
-        IAssetModule module = new ResourcesModule();
-        await module.InitializeAsync(new AssetManagementOptions());
-        var package = module.CreatePackage("DefaultResources");
-        await package.InitializeAsync(default);
-        AssetManagementLocator.DefaultPackage = package;
-
-        // Create required services
-        var assetPathBuilderFactory = new TemplateAssetPathBuilderFactory();
-        var objectSpawner = new DefaultUnityObjectSpawner();
-        var mainCameraService = new MainCameraService();
-
-        // Initialize UIService
-        uiService = new UIService();
-        uiService.Initialize(assetPathBuilderFactory, objectSpawner, mainCameraService);
-
-        // Now you can open UI windows!
-        await OpenMainMenu();
-    }
-
-    public async UniTask OpenMainMenu()
-    {
-        // "UIWindow_MainMenu" is the filename of your UIWindowConfiguration asset
-        UIWindow window = await uiService.OpenUIAsync("UIWindow_MainMenu");
-
-        if (window != null && window is MainMenuWindow mainMenu)
-        {
-            Debug.Log("Main menu opened successfully!");
-            // You can now interact with the window instance
-        }
-        else
-        {
-            Debug.LogError("Failed to open main menu window!");
-        }
-    }
-
-    public void CloseMainMenu()
-    {
-        uiService.CloseUI("UIWindow_MainMenu");
-    }
-}
-```
-
-#### Advanced Initialization (Using Asset Packages)
-
-If you're using Addressables, YooAsset, or other asset management systems:
-
-```csharp
 using CycloneGames.UIFramework.Runtime;
-using CycloneGames.AssetManagement.Runtime;
-// ... other using statements
+using CycloneGames.UIFramework.Runtime.Integrations;
 
-public class GameInitializer : MonoBehaviour
+public sealed class UiComposition
 {
-    private IUIService uiService;
-    private IAssetPackage uiPackage;
+    private readonly IUIService _ui;
 
-    async void Start()
+    public UiComposition(
+        UIRoot root,
+        IAssetPackage package,
+        IAssetPathBuilder configurationPathBuilder)
     {
-        // Initialize your asset management system
-        // This example assumes you have an IAssetPackage instance
-        uiPackage = await InitializeYourAssetPackageAsync();
-
-        // Create required services
-        var assetPathBuilderFactory = new YourAssetPathBuilderFactory();
-        var objectSpawner = new DefaultUnityObjectSpawner();
-        var mainCameraService = new MainCameraService();
-
-        // Initialize UIService with package
-        uiService = new UIService();
-        uiService.Initialize(assetPathBuilderFactory, objectSpawner, mainCameraService, uiPackage);
-
-        // Open UI windows
-        await OpenMainMenu();
-    }
-
-    // ... rest of your code
-}
-```
-
-### Step 5: Opening and Closing Windows
-
-Once `UIService` is initialized, opening and closing windows is straightforward:
-
-```csharp
-// Open a window asynchronously (recommended)
-UIWindow window = await uiService.OpenUIAsync("UIWindow_MainMenu");
-
-// Open a window with callback (fire-and-forget)
-uiService.OpenUI("UIWindow_MainMenu", (window) => {
-    if (window != null)
-        Debug.Log("Window opened!");
-});
-
-// Close a window
-uiService.CloseUI("UIWindow_MainMenu");
-
-// Close a window asynchronously
-await uiService.CloseUIAsync("UIWindow_MainMenu");
-
-// Check if a window is open
-bool isOpen = uiService.IsUIWindowValid("UIWindow_MainMenu");
-
-// Get a reference to an open window
-UIWindow window = uiService.GetUIWindow("UIWindow_MainMenu");
-if (window is MainMenuWindow mainMenu)
-{
-    // Interact with the window
-}
-```
-
-### Step 6: Working with Window Lifecycle
-
-Each `UIWindow` has a lifecycle managed by a state machine. You can override methods to hook into different states:
-
-```csharp
-public class MyWindow : UIWindow
-{
-    protected override void Awake()
-    {
-        base.Awake();
-        Debug.Log("Window is being created");
-    }
-
-    // Called when window starts opening (before animation)
-    protected override void OnStartOpen()
-    {
-        base.OnStartOpen();
-        Debug.Log("Window is opening");
-    }
-
-    // Called when window finishes opening (after animation)
-    protected override void OnFinishedOpen()
-    {
-        base.OnFinishedOpen();
-        Debug.Log("Window is fully open and interactive");
-    }
-
-    // Called when window starts closing (before animation)
-    protected override void OnStartClose()
-    {
-        base.OnStartClose();
-        Debug.Log("Window is closing");
-    }
-
-    // Called when window finishes closing (after animation, before destruction)
-    protected override void OnFinishedClose()
-    {
-        base.OnFinishedClose();
-        Debug.Log("Window is closed and will be destroyed");
-    }
-}
-```
-
-## UI Navigation System Tutorial
-
-After your windows are running, you may want the framework to remember **how the user got here** — so that pressing "Back" always returns to the right screen regardless of the entry path.
-
-The **UI Navigation System** records a live directed graph of window-opener relationships. Unlike a simple stack, it supports non-linear flows: e.g. you can close a middle window while its children remain alive, and "Back" will still resolve correctly.
-
-### Core Concepts
-
-| Term                 | Meaning                                                                                 |
-| -------------------- | --------------------------------------------------------------------------------------- |
-| **Node**             | A record for one window: who opened it, what payload it carried, when it was registered |
-| **Opener**           | The window that triggered this window to open                                           |
-| **Ancestor chain**   | The full causal path: `MainMenu → Shop → Detail → Checkout`                             |
-| **ChildClosePolicy** | What happens to children when their parent window closes                                |
-
-**ChildClosePolicy options:**
-
-| Policy                 | Effect                                                                |
-| ---------------------- | --------------------------------------------------------------------- |
-| `Reparent` _(default)_ | Surviving children are re-attached to the closing window's own opener |
-| `Cascade`              | All children (and their descendants) are force-closed                 |
-| `Detach`               | Children survive but lose their "back" target (become roots)          |
-
-### Step 1: Setting Up the Navigation Service
-
-Create a `UINavigationService` instance and attach it to your `IUIService` **once** during app startup:
-
-```csharp
-// Non-DI setup (e.g., in a bootstrap MonoBehaviour)
-var navService = new UINavigationService();
-uiService.SetNavigationService(navService);
-
-// Tell your PresenterBinder about the UIService so Presenters can navigate
-presenterBinder.SetUIService(uiService);
-```
-
-With DI (VContainer example):
-
-```csharp
-// In your VContainer LifetimeScope
-builder.Register<UINavigationService>(Lifetime.Singleton).AsImplementedInterfaces();
-// UIService accepts it via IUIService.SetNavigationService
-```
-
-### Step 2: Navigating Between Windows (from a Presenter)
-
-`UIPresenter<TView>` exposes two built-in helpers:
-
-```csharp
-[UIPresenterBind("UIWindow_Shop")]
-public class ShopPresenter : UIPresenter<IShopView>
-{
-    public void OnClickItemDetail(int itemId)
-    {
-        // Opens UIWindow_ItemDetail and registers ShopPresenter's window as its opener.
-        // The itemId context can be read by ItemDetailPresenter.
-        NavigateTo("UIWindow_ItemDetail", new ItemContext { ItemId = itemId });
-    }
-
-    public void OnClickBack()
-    {
-        // Closes this window and opens the nearest still-alive ancestor.
-        NavigateBack();
-    }
-}
-```
-
-### Step 3: Reading the Context in the Target Window
-
-```csharp
-[UIPresenterBind("UIWindow_ItemDetail")]
-public class ItemDetailPresenter : UIPresenter<IItemDetailView>
-{
-    public override void OnViewOpened()
-    {
-        // Retrieve the payload passed by the opener
-        var ctx = NavigationService?.GetContext("UIWindow_ItemDetail") as ItemContext;
-        if (ctx != null)
-            View.SetItem(ctx.ItemId);
-    }
-}
-```
-
-### Step 4: Non-Linear Flow — Closing a Middle Window
-
-The default `Reparent` policy handles this automatically. Given the path `A → B → C`:
-
-```csharp
-// Close B while C is still open
-uiService.CloseUI("UIWindow_B");
-// C's opener is now automatically re-parented to A.
-// NavigateBack() in C will correctly open A.
-```
-
-If B should drag C down with it (e.g., a modal wizard), use `Cascade`:
-
-```csharp
-uiService.NavigationService?.Unregister("UIWindow_B", ChildClosePolicy.Cascade);
-uiService.CloseUI("UIWindow_B");
-```
-
-### Step 5: Querying the Navigation Graph
-
-```csharp
-IUINavigationService nav = uiService.NavigationService;
-
-// Who is currently on top?
-string current = nav.CurrentWindow;
-
-// What is the full path that led here?
-List<string> path = nav.GetAncestors("UIWindow_Checkout");
-// → ["UIWindow_MainMenu", "UIWindow_Shop", "UIWindow_ItemDetail"]
-
-// Which windows did Shop open?
-List<string> children = nav.GetChildren("UIWindow_Shop");
-
-// Full ordered history (oldest first)
-List<UINavigationEntry> history = nav.GetHistory();
-
-// Where would Back go?
-string backTarget = nav.ResolveBackTarget("UIWindow_ItemDetail");
-```
-
-### API Reference
-
-| Method / Property             | Description                                                         |
-| ----------------------------- | ------------------------------------------------------------------- |
-| `CurrentWindow`               | Topmost registered window (most recently opened that's still alive) |
-| `CanNavigateBack`             | Whether a back-navigation target exists for the current window      |
-| `Register(name, opener, ctx)` | Record a new window node (called automatically by UIManager)        |
-| `Unregister(name, policy)`    | Remove a window node (called automatically by UIManager on close)   |
-| `Clear()`                     | Wipe the entire graph (e.g., on game restart)                       |
-| `GetOpener(name)`             | Who opened this window                                              |
-| `GetContext(name)`            | Payload object passed when this window was opened                   |
-| `GetAncestors(name)`          | Full causal chain, oldest opener first                              |
-| `GetChildren(name)`           | Immediate live children                                             |
-| `ResolveBackTarget(name)`     | Nearest alive ancestor                                              |
-| `GetHistory()`                | Snapshot of all registered windows in insertion order               |
-
-> **Thread Safety**: `Register`, `Unregister`, `Clear` must be called on the main thread. All query methods (`GetAncestors`, `GetHistory`, etc.) are safe from any thread.
-
-## UI Transition Coordinator Tutorial
-
-By default, when you call `NavigateTo()`, each window plays its own open/close animation independently — one finishes before the other starts. The **Transition Coordinator** system lets two windows animate _simultaneously_, creating seamless page-turn effects.
-
-### When to Use Which Approach
-
-| Scenario                                                | Use                                                       |
-| ------------------------------------------------------- | --------------------------------------------------------- |
-| Popup fades in over background (independent)            | `NavigateTo()` + `IUIWindowTransitionDriver` on the popup |
-| Page A slides out while Page B slides in (synchronised) | `NavigateToAsync()` + `IUITransitionCoordinator`          |
-| Cross-fade between two full-screen scenes               | `NavigateToAsync()` + `CrossFadeTransitionCoordinator`    |
-
-### Step 1: Register a Coordinator at Startup
-
-```csharp
-// Sequential: no coordinator, windows animate independently
-// (this is the default, no setup needed)
-
-// Coordinated slide (page-flip feel):
-var slideCoordinator = new SlideTransitionCoordinator(duration: 0.35f);
-uiService.SetTransitionCoordinator(slideCoordinator);
-
-// Coordinated cross-fade:
-var fadeCoordinator = new CrossFadeTransitionCoordinator(duration: 0.25f);
-uiService.SetTransitionCoordinator(fadeCoordinator);
-```
-
-### Step 2: Navigate With Coordinated Animation (from a Presenter)
-
-```csharp
-[UIPresenterBind("UIWindow_Shop")]
-public class ShopPresenter : UIPresenter<IShopView>
-{
-    // Simultaneous animation — A exits while B enters
-    public async void OnClickDetail(int itemId)
-    {
-        await NavigateToAsync(
-            "UIWindow_ItemDetail",
-            context: new ItemContext { ItemId = itemId },
-            direction: NavigationDirection.Forward);
-    }
-
-    // Going back
-    public async void OnClickBack()
-    {
-        await NavigateToAsync(
-            NavigationService?.ResolveBackTarget(/* myWindowName */) ?? "",
-            direction: NavigationDirection.Backward);
-        NavigateBack();
-    }
-
-    // No coordinator set? NavigateToAsync() silently falls back to NavigateTo()
-}
-```
-
-### Step 3: Implement a Custom Coordinator
-
-Any animation style is possible by implementing `IUITransitionCoordinator`:
-
-```csharp
-// Example: zoom + fade combo for modal dialogs
-public class ZoomFadeCoordinator : IUITransitionCoordinator
-{
-    public async UniTask TransitionAsync(UIWindow leaving, UIWindow entering,
-        NavigationDirection direction, CancellationToken ct)
-    {
-        // leaving: quick alpha fade out
-        // entering: scale 0.8 → 1.0 + alpha 0 → 1
-        var leavingCg  = leaving.GetComponent<CanvasGroup>();
-        var enteringCg = entering.GetComponent<CanvasGroup>();
-        var enteringRt = entering.GetComponent<RectTransform>();
-
-        float elapsed = 0f;
-        const float duration = 0.3f;
-        while (elapsed < duration && !ct.IsCancellationRequested)
+        var provider = new AssetManagementUIWindowAssetProvider(
+            package,
+            configurationPathBuilder);
+
+        var options = new UIServiceOptions
         {
-            elapsed += Time.unscaledDeltaTime;
-            float t = Mathf.Clamp01(elapsed / duration);
-            if (leavingCg  != null) leavingCg.alpha  = 1f - t;
-            if (enteringCg != null) enteringCg.alpha = t;
-            if (enteringRt != null) enteringRt.localScale = Vector3.LerpUnclamped(Vector3.one * 0.85f, Vector3.one, t);
-            await UniTask.Yield(PlayerLoopTiming.Update, ct);
-        }
-    }
-}
+            DefaultAssetLoadContext = new UIAssetLoadContext(
+                sharedBucket: "ui",
+                sharedTag: "frontend",
+                sharedOwner: "game-client"),
+        };
 
-// Register:
-uiService.SetTransitionCoordinator(new ZoomFadeCoordinator());
-```
-
-### NavigationDirection
-
-| Value      | When to Use                                                            |
-| ---------- | ---------------------------------------------------------------------- |
-| `Forward`  | Navigating to a new sub-screen (push). Slide: left exit / right entry. |
-| `Backward` | Going back (pop). Slide: right exit / left entry.                      |
-| `Replace`  | Replacing current without directional bias (cross-fade).               |
-
-> **Note**: If no coordinator is registered, `NavigateToAsync` automatically falls back to the same behaviour as `NavigateTo` (fire-and-forget, sequential). Existing code never breaks.
-
-### Coordinated Navigation Strategies
-
-When the user triggers rapid sequential navigations (e.g. tapping two tabs in quick succession while the first transition is still animating), the framework needs a policy for handling the overlap. `CoordinatedNavStrategy` controls this behaviour:
-
-```csharp
-// Set at startup (default is DirectJump)
-uiService.SetCoordinatedNavStrategy(CoordinatedNavStrategy.DirectJump);
-```
-
-| Strategy     | Behaviour                                                                                                                                                               | Best For                                         |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `DirectJump` | Cancels the in-flight transition and jumps directly from the **original** source to the **latest** destination. A→B mid-animation + B→C request = animate A→C directly. | Tab bars, flat navigation, bottom nav            |
-| `CardStack`  | Allows multiple transitions to **overlap** independently, producing a cascading stacked-card visual. A→B continues while B→C starts on top.                             | Drill-down flows, settings pages, detail screens |
-
-**DirectJump example:**
-
-```
-User taps Tab1 → Tab2 (A→B starts animating)
-User quickly taps Tab3 (before A→B finishes)
-  └─ Framework cancels A→B, tears down B
-  └─ Starts A→C directly (smooth skip)
-```
-
-**CardStack example:**
-
-```
-User opens Settings → Audio (A→B starts animating)
-User quickly taps EQ Detail (before A→B finishes)
-  └─ B→C starts immediately, overlapping A→B
-  └─ Both transitions run independently
-  └─ A is torn down when A→B finishes; B when B→C finishes
-```
-
-## Dynamic Atlas System Tutorial
-
-After mastering the basics of creating and opening UI windows, you can optimize your UI performance using the **Dynamic Atlas System**. This system reduces draw calls by combining multiple UI textures into a single atlas at runtime.
-
-### What is Dynamic Atlas?
-
-In Unity UI, each sprite texture typically requires a separate draw call. If you have 50 different icons on screen, that's potentially 50 draw calls. The Dynamic Atlas System packs these textures into a single large texture (atlas), allowing Unity to batch them together and reduce draw calls significantly.
-
-**Benefits:**
-
-- **Reduced Draw Calls**: Combine multiple textures into one, reducing CPU overhead
-- **Better Performance**: Especially important on mobile devices
-- **Runtime Packing**: No need to pre-create atlases - textures are packed on demand
-- **Automatic Management**: Reference counting ensures textures are freed when no longer needed
-
-### When to Use Dynamic Atlas?
-
-Use Dynamic Atlas when:
-
-- You have many small UI icons/sprites that change frequently
-- You want to reduce draw calls without pre-creating static atlases
-- Your UI uses many different textures that aren't always visible together
-- You need runtime flexibility (e.g., loading icons from server)
-
-Don't use Dynamic Atlas when:
-
-- You have a small number of static UI elements (pre-created atlases are better)
-- Your textures are very large (they'll be scaled down, losing quality)
-- You need pixel-perfect rendering (atlas packing may introduce slight offsets)
-
-### Step 1: Understanding the Three Usage Patterns
-
-The Dynamic Atlas System provides three ways to use it, each suited for different scenarios:
-
-#### Pattern 1: DynamicAtlasManager (Simplest - Recommended for Beginners)
-
-This is the easiest way to get started. It uses a singleton pattern and works out of the box.
-
-```csharp
-using CycloneGames.UIFramework.DynamicAtlas;
-using UnityEngine;
-using UnityEngine.UI;
-
-public class MyUIWindow : UIWindow
-{
-    [SerializeField] private Image iconImage;
-    private string currentIconPath;
-
-    protected override void Awake()
-    {
-        base.Awake();
-
-        // Configure Dynamic Atlas (only needed once, typically in initialization)
-        // This is optional - it will use defaults if not called
-        DynamicAtlasManager.Instance.Configure(
-            load: path => Resources.Load<Texture2D>(path),
-            unload: (path, tex) => Resources.UnloadAsset(tex),
-            size: 2048,  // Atlas page size in pixels
-            autoScaleLargeTextures: true
-        );
-    }
-
-    public void SetIcon(string iconPath)
-    {
-        // Release previous icon if any
-        if (!string.IsNullOrEmpty(currentIconPath))
-        {
-            DynamicAtlasManager.Instance.ReleaseSprite(currentIconPath);
-        }
-
-        // Get sprite from atlas (automatically loads and packs if needed)
-        Sprite sprite = DynamicAtlasManager.Instance.GetSprite(iconPath);
-
-        if (sprite != null && iconImage != null)
-        {
-            iconImage.sprite = sprite;
-            currentIconPath = iconPath;
-        }
-    }
-
-    protected override void OnDestroy()
-    {
-        // Always release sprites when window is destroyed
-        if (!string.IsNullOrEmpty(currentIconPath))
-        {
-            DynamicAtlasManager.Instance.ReleaseSprite(currentIconPath);
-            currentIconPath = null;
-        }
-        base.OnDestroy();
+        _ui = new UIService(root, provider, options);
     }
 }
 ```
 
-#### Pattern 2: Factory Pattern (Recommended for Dependency Injection)
+Effective `UIAssetLoadContext` metadata uses this precedence for every non-null field: per-open `UIOpenOptions.AssetLoadContext`, then `UIAssetContextProvider` on the `UIRoot`, then `UIServiceOptions.DefaultAssetLoadContext`. An empty string is an explicit value; use `null` to inherit a fallback field. The adapter disposes configuration and prefab handles on close, rollback, or shutdown.
 
-If you're using a DI framework or want more control over the atlas lifecycle:
+### Window with MVP
+
+MVP is opt-in. `UIPresenterBinder` stores registrations on a single binder instance without reflection discovery.
 
 ```csharp
-using CycloneGames.UIFramework.DynamicAtlas;
-using UnityEngine;
-using UnityEngine.UI;
-
-public class MyUIWindow : UIWindow
+public interface ILoginView
 {
-    [SerializeField] private Image iconImage;
-    private IDynamicAtlas atlas;
-    private string currentIconPath;
-
-    // Inject atlas through constructor or setter
-    public void SetAtlas(IDynamicAtlas atlasService)
-    {
-        atlas = atlasService;
-    }
-
-    public void SetIcon(string iconPath)
-    {
-        if (atlas == null)
-        {
-            Debug.LogError("Atlas not initialized!");
-            return;
-        }
-
-        // Release previous icon
-        if (!string.IsNullOrEmpty(currentIconPath))
-        {
-            atlas.ReleaseSprite(currentIconPath);
-        }
-
-        // Get sprite from atlas
-        Sprite sprite = atlas.GetSprite(iconPath);
-
-        if (sprite != null && iconImage != null)
-        {
-            iconImage.sprite = sprite;
-            currentIconPath = iconPath;
-        }
-    }
-
-    protected override void OnDestroy()
-    {
-        if (atlas != null && !string.IsNullOrEmpty(currentIconPath))
-        {
-            atlas.ReleaseSprite(currentIconPath);
-            currentIconPath = null;
-        }
-        base.OnDestroy();
-    }
+    void SetListener(ILoginViewListener listener);
+    void ShowValidationError(string message);
 }
 
-// In your initialization code:
-public class GameInitializer : MonoBehaviour
+public interface ILoginViewListener : IUIViewListener
 {
-    private IDynamicAtlasFactory atlasFactory;
-
-    void Start()
-    {
-        // Create factory
-        atlasFactory = new DynamicAtlasFactory();
-
-        // Create atlas with custom configuration
-        var config = new DynamicAtlasConfig(
-            pageSize: 2048,
-            autoScaleLargeTextures: true
-        );
-        IDynamicAtlas atlas = atlasFactory.Create(config);
-
-        // Inject into your UI windows
-        // (This depends on your DI framework)
-    }
-}
-```
-
-#### Pattern 3: Direct Service (Advanced)
-
-For maximum control, create the service directly:
-
-```csharp
-using CycloneGames.UIFramework.DynamicAtlas;
-using UnityEngine;
-using UnityEngine.UI;
-
-public class MyUIWindow : UIWindow
-{
-    [SerializeField] private Image iconImage;
-    private IDynamicAtlas atlas;
-    private string currentIconPath;
-
-    protected override void Awake()
-    {
-        base.Awake();
-
-        // Create atlas service directly
-        atlas = new DynamicAtlasService(
-            forceSize: 2048,
-            loadFunc: path => Resources.Load<Texture2D>(path),
-            unloadFunc: (path, tex) => Resources.UnloadAsset(tex),
-            autoScaleLargeTextures: true
-        );
-    }
-
-    public void SetIcon(string iconPath)
-    {
-        if (atlas == null) return;
-
-        // Release previous icon
-        if (!string.IsNullOrEmpty(currentIconPath))
-        {
-            atlas.ReleaseSprite(currentIconPath);
-        }
-
-        // Get sprite from atlas
-        Sprite sprite = atlas.GetSprite(iconPath);
-
-        if (sprite != null && iconImage != null)
-        {
-            iconImage.sprite = sprite;
-            currentIconPath = iconPath;
-        }
-    }
-
-    protected override void OnDestroy()
-    {
-        if (atlas != null)
-        {
-            // Release sprite
-            if (!string.IsNullOrEmpty(currentIconPath))
-            {
-                atlas.ReleaseSprite(currentIconPath);
-            }
-
-            // Dispose atlas (only if you created it directly)
-            atlas.Dispose();
-        }
-        base.OnDestroy();
-    }
-}
-```
-
-### Step 2: Complete Example - Icon List with Dynamic Atlas
-
-Here's a complete example showing how to use Dynamic Atlas in a real scenario - an icon list that loads icons dynamically:
-
-```csharp
-using CycloneGames.UIFramework.Runtime;
-using CycloneGames.UIFramework.DynamicAtlas;
-using UnityEngine;
-using UnityEngine.UI;
-using System.Collections.Generic;
-
-public class IconListWindow : UIWindow
-{
-    [SerializeField] private Transform iconContainer;
-    [SerializeField] private GameObject iconPrefab; // Prefab with Image component
-
-    private List<IconItem> iconItems = new List<IconItem>();
-
-    private class IconItem
-    {
-        public GameObject gameObject;
-        public Image image;
-        public string iconPath;
-    }
-
-    protected override void Awake()
-    {
-        base.Awake();
-
-        // Configure Dynamic Atlas (only once)
-        if (DynamicAtlasManager.Instance != null)
-        {
-            DynamicAtlasManager.Instance.Configure(
-                load: path => Resources.Load<Texture2D>(path),
-                unload: (path, tex) => Resources.UnloadAsset(tex),
-                size: 2048,
-                autoScaleLargeTextures: true
-            );
-        }
-    }
-
-    public void LoadIcons(List<string> iconPaths)
-    {
-        // Clear existing icons
-        ClearIcons();
-
-        // Load each icon
-        foreach (string iconPath in iconPaths)
-        {
-            CreateIconItem(iconPath);
-        }
-    }
-
-    private void CreateIconItem(string iconPath)
-    {
-        if (iconPrefab == null || iconContainer == null)
-            return;
-
-        // Instantiate icon prefab
-        GameObject iconObj = Instantiate(iconPrefab, iconContainer);
-        Image iconImage = iconObj.GetComponent<Image>();
-
-        if (iconImage == null)
-        {
-            Debug.LogError("Icon prefab must have an Image component!");
-            Destroy(iconObj);
-            return;
-        }
-
-        // Get sprite from Dynamic Atlas
-        Sprite sprite = DynamicAtlasManager.Instance.GetSprite(iconPath);
-
-        if (sprite != null)
-        {
-            iconImage.sprite = sprite;
-
-            // Track this icon item
-            iconItems.Add(new IconItem
-            {
-                gameObject = iconObj,
-                image = iconImage,
-                iconPath = iconPath
-            });
-        }
-        else
-        {
-            Debug.LogWarning($"Failed to load icon: {iconPath}");
-            Destroy(iconObj);
-        }
-    }
-
-    private void ClearIcons()
-    {
-        // Release all sprites from atlas
-        foreach (var item in iconItems)
-        {
-            if (!string.IsNullOrEmpty(item.iconPath))
-            {
-                DynamicAtlasManager.Instance.ReleaseSprite(item.iconPath);
-            }
-            if (item.gameObject != null)
-            {
-                Destroy(item.gameObject);
-            }
-        }
-        iconItems.Clear();
-    }
-
-    protected override void OnDestroy()
-    {
-        // Clean up all icons
-        ClearIcons();
-        base.OnDestroy();
-    }
-}
-```
-
-### Step 3: Integrating with Asset Management Systems
-
-If you're using Addressables, YooAsset, or other asset management systems, you can integrate them with Dynamic Atlas:
-
-```csharp
-using CycloneGames.UIFramework.DynamicAtlas;
-using CycloneGames.AssetManagement.Runtime;
-using Cysharp.Threading.Tasks;
-using UnityEngine;
-
-public class GameInitializer : MonoBehaviour
-{
-    private IAssetPackage assetPackage;
-
-    async void Start()
-    {
-        // Initialize your asset management system
-        assetPackage = await InitializeYourAssetPackageAsync();
-
-        // Configure Dynamic Atlas with DynamicAtlasConfig (recommended)
-        DynamicAtlasManager.Instance.Configure(new DynamicAtlasConfig
-        {
-            loadFunc = (path) => assetPackage.LoadAssetSync<Texture2D>(path).Asset,
-            unloadFunc = (path, tex) => assetPackage.ReleaseAsset(path),
-            loadFuncAsync = async (path) =>
-            {
-                var handle = await assetPackage.LoadAssetAsync<Texture2D>(path);
-                return handle.Asset;
-            },
-            pageSize = 2048,
-            autoScaleLargeTextures = true,
-            enableBleed = true,         // Prevent edge filtering artifacts
-            enableMipmap = false,       // Enable for world-space UI
-            maxPages = 0,               // 0 = unlimited
-        });
-    }
-}
-```
-
-> **Async Loading**: When `loadFuncAsync` is configured, you can use `GetSpriteAsync()` (see [Step 9](#step-9-async-loading)) for non-blocking texture loading. Disk I/O runs on a background thread while atlas insertion stays on the main thread.
-
-### Step 3b: Platform Tier Configuration
-
-Instead of manually setting every field, use the built-in `PlatformTier` presets to get recommended defaults for your target hardware:
-
-```csharp
-// Auto-detect based on current runtime platform
-var config = DynamicAtlasConfig.CreateForCurrentPlatform(
-    loadFunc:  path => assetPackage.LoadAssetSync<Texture2D>(path).Asset,
-    unloadFunc: (path, tex) => assetPackage.ReleaseAsset(path),
-    useCompression: true,              // Use ASTC/ETC2/BC7 instead of RGBA32
-    preferLowMemoryProfile: false      // true = smaller pages, stricter limits
-);
-DynamicAtlasManager.Instance.Configure(config);
-```
-
-**Available tiers:**
-
-| Tier                          | Page Size | Max Pages | Bleed | Mipmap | Notes                               |
-| ----------------------------- | --------- | --------- | ----- | ------ | ----------------------------------- |
-| `PlatformTier.DesktopHighEnd` | 4096      | Unlimited | ✅    | ❌     | PC / Mac / Console                  |
-| `PlatformTier.MobileHighEnd`  | 2048      | 8         | ✅    | ❌     | Modern phones / tablets             |
-| `PlatformTier.MobileLowEnd`   | 1024      | 4         | ❌    | ❌     | Budget devices, forces uncompressed |
-| `PlatformTier.WebGL`          | 1024      | 2         | ❌    | ❌     | No CopyTexture, RGBA32 only         |
-
-Or select a specific tier directly:
-
-```csharp
-// Target a specific hardware tier
-var config = DynamicAtlasConfig.CreateForTier(
-    DynamicAtlasConfig.PlatformTier.MobileHighEnd,
-    loadFunc:  path => Resources.Load<Texture2D>(path),
-    unloadFunc: (path, tex) => Resources.UnloadAsset(tex),
-    useCompression: true
-);
-DynamicAtlasManager.Instance.Configure(config);
-
-// One-liner convenience on DynamicAtlasManager
-DynamicAtlasManager.Instance.ConfigurePlatformOptimized(
-    load: path => Resources.Load<Texture2D>(path),
-    unload: (path, tex) => Resources.UnloadAsset(tex),
-    useCompression: true
-);
-```
-
-### Step 3c: Configuration Validation
-
-`DynamicAtlasConfig` includes a `Validate()` method that catches common misconfigurations before they become runtime issues:
-
-```csharp
-var config = new DynamicAtlasConfig
-{
-    pageSize = 8192,
-    padding = 1,
-    enableBleed = true,
-};
-
-if (!config.Validate(out string error))
-{
-    Debug.LogWarning($"Atlas config issue: {error}");
-    // Falls back to safe defaults
-}
-```
-
-Validation checks:
-
-- Texture format support on current platform
-- Page size vs. `SystemInfo.maxTextureSize`
-- Padding range (0–16)
-- Bleed requires `padding >= 2` (for uncompressed formats)
-- `maxPages` must be non-negative
-
-### Step 4: Best Practices and Tips
-
-1. **Always Release Sprites**: When a sprite is no longer needed, call `ReleaseSprite()` to decrement the reference count. This allows the atlas to free space when the count reaches zero.
-
-2. **Release in OnDestroy or OnDisable**: Always release sprites when your UI component is destroyed or disabled:
-
-```csharp
-protected override void OnDestroy()
-{
-    if (!string.IsNullOrEmpty(currentIconPath))
-    {
-        DynamicAtlasManager.Instance.ReleaseSprite(currentIconPath);
-        currentIconPath = null;
-    }
-    base.OnDestroy();
-}
-```
-
-3. **Use Appropriate Page Size**:
-   - **1024x1024**: For low-end devices or when memory is constrained
-   - **2048x2048**: Recommended for most cases (default)
-   - **4096x4096**: For high-end devices with plenty of memory
-
-4. **Enable Auto-Scaling**: Set `autoScaleLargeTextures: true` to automatically scale textures that are too large for the atlas. This prevents errors and ensures all textures can be packed.
-
-5. **Enable Bleed Pixels**: Keep `enableBleed: true` (default) to prevent visible seams when bilinear/trilinear filtering samples across sprite boundaries. The system automatically generates 1-pixel border replication using the GPU path (or CPU fallback when GPU CopyTexture is unavailable). Bleed is automatically disabled for compressed formats since sub-block pixel manipulation is not possible.
-
-6. **Use maxPages to Limit VRAM**: Set `maxPages` to a non-zero value to cap the number of atlas pages created. When the limit is reached, new sprite insertions will fail gracefully instead of allocating unbounded GPU memory.
-
-7. **Enable Mipmaps for World-Space UI**: Set `enableMipmap: true` if your atlas sprites are displayed on world-space UI or at varying camera distances. This allows the GPU to perform proper LOD filtering. Leave disabled for screen-space UI to save memory.
-
-8. **Sprite Metadata Preservation**: When using `GetSpriteFromSprite()`, the system automatically preserves the source sprite's pivot point and 9-slice border. No manual configuration is needed — your sliced sprites will work correctly in the atlas.
-
-9. **Monitor Atlas Usage**: In development, you can check how many pages are in use:
-
-```csharp
-// This requires accessing internal state, so it's mainly for debugging
-// The system automatically creates new pages when needed
-```
-
-10. **Texture Requirements**:
-    - Textures must be readable (enable "Read/Write Enabled" in texture import settings)
-    - Textures should be in a format that supports runtime modification (RGBA32, ARGB32, etc.)
-    - Compressed formats (DXT, ETC) may need to be converted
-
-11. **Performance Considerations**:
-    - Packing happens on the main thread, so avoid packing many large textures in a single frame
-    - Consider pre-loading commonly used icons during loading screens
-    - Use the atlas for small-to-medium textures (icons, buttons) rather than large background images
-    - Use `GetSpriteAsync()` with `loadFuncAsync` to avoid blocking the main thread during disk I/O
-
-### Step 5: Troubleshooting
-
-**Problem: Sprites appear black or missing**
-
-- Check that textures are readable (Texture Import Settings > Read/Write Enabled)
-- Verify the texture path is correct
-- Ensure textures are loaded successfully before calling `GetSprite()`
-
-**Problem: Textures are blurry**
-
-- Large textures are being scaled down to fit in the atlas
-- Consider using smaller source textures or increasing atlas page size
-- Check that `autoScaleLargeTextures` is enabled
-
-**Problem: Memory usage is high**
-
-- Make sure you're calling `ReleaseSprite()` when sprites are no longer needed
-- Reduce atlas page size if memory is constrained
-- Limit the number of textures packed simultaneously
-
-**Problem: Draw calls not reduced**
-
-- Ensure sprites from the atlas are on the same Canvas
-- Check that sprites use the same material/shader
-- Verify that Unity's batching is enabled
-
-### Step 6: Loading Sprites from SpriteAtlas
-
-The Dynamic Atlas supports copying sprites from existing Unity SpriteAtlas assets. This is useful when you want to combine static atlases with runtime batching.
-
-```csharp
-using CycloneGames.UIFramework.DynamicAtlas;
-using UnityEngine;
-using UnityEngine.U2D;
-
-public class SpriteAtlasExample : MonoBehaviour
-{
-    [SerializeField] private SpriteAtlas sourceAtlas;
-
-    void LoadFromAtlas()
-    {
-        // Get a sprite from SpriteAtlas
-        Sprite sourceSprite = sourceAtlas.GetSprite("icon_sword");
-
-        // Copy to Dynamic Atlas (uses GPU CopyTexture when available)
-        Sprite dynamicSprite = DynamicAtlasManager.Instance.GetSpriteFromSprite(sourceSprite);
-
-        // Use the sprite...
-
-        // Release when done
-        DynamicAtlasManager.Instance.ReleaseSprite(sourceSprite.name);
-    }
-
-    void LoadFromRegion()
-    {
-        // Copy a specific region from any texture
-        Texture2D texture = Resources.Load<Texture2D>("LargeTexture");
-        Rect region = new Rect(100, 100, 64, 64);
-
-        Sprite regionSprite = DynamicAtlasManager.Instance.GetSpriteFromRegion(
-            texture, region, "my_region_key"
-        );
-
-        // Release when done
-        DynamicAtlasManager.Instance.ReleaseSprite("my_region_key");
-    }
-}
-```
-
-> **Memory Warning**: Loading from SpriteAtlas keeps the entire source atlas in memory until explicitly unloaded. Consider using individual textures with Addressables for better memory control.
-
-### Step 7: Compressed Dynamic Atlas (Advanced)
-
-For maximum memory efficiency, use `CompressedDynamicAtlasService` which copies compressed texture blocks directly between GPU textures without decompression.
-
-**Key Requirements:**
-
-- Source SpriteAtlas and Dynamic Atlas must use **exactly the same** TextureFormat
-- GPU CopyTexture must be supported (all platforms except WebGL)
-
-```csharp
-using CycloneGames.UIFramework.DynamicAtlas;
-using UnityEngine;
-using UnityEngine.U2D;
-
-public class CompressedAtlasExample : MonoBehaviour
-{
-    [SerializeField] private SpriteAtlas sourceAtlas; // Must be ASTC_4x4 format
-    private CompressedDynamicAtlasService _atlas;
-
-    void Start()
-    {
-        // Create compressed atlas with same format as source
-        _atlas = new CompressedDynamicAtlasService(
-            format: TextureFormat.ASTC_4x4,  // Must match source!
-            pageSize: 2048
-        );
-    }
-
-    void LoadSprite()
-    {
-        Sprite source = sourceAtlas.GetSprite("icon");
-
-        // GPU direct block copy - zero CPU, zero GC
-        Sprite compressed = _atlas.GetSpriteFromSprite(source);
-    }
-
-    void OnDestroy()
-    {
-        _atlas?.Dispose();
-    }
-}
-```
-
-**Platform Format Recommendations:**
-
-| Platform          | Recommended Format                    |
-| ----------------- | ------------------------------------- |
-| iOS               | ASTC 4×4 or ASTC 6×6                  |
-| Android           | ASTC 4×4 (modern) or ETC2 (legacy)    |
-| Windows/Mac/Linux | BC7 (quality) or DXT5 (compatibility) |
-| PS4 / PS5         | BC7 (quality) or DXT5 (compatibility) |
-| Xbox Series / One | BC7 (quality) or DXT5 (compatibility) |
-| Nintendo Switch   | ASTC 4×4 or ETC2                      |
-| WebGL             | Not supported (use uncompressed)      |
-
-### CompressedDynamicAtlasFactory
-
-Instead of constructing `CompressedDynamicAtlasService` directly, you can use `CompressedDynamicAtlasFactory` for convenience and shared-instance management:
-
-```csharp
-var factory = new CompressedDynamicAtlasFactory();
-
-// 1. Create a new instance with explicit format
-var atlas = factory.Create(TextureFormat.ASTC_4x4, pageSize: 2048);
-
-// 2. Shared singleton — same format reuses one instance (thread-safe)
-var shared = factory.GetSharedInstance(TextureFormat.ASTC_4x4);
-
-// 3. Auto-detect best format for the current platform
-var optimized = factory.CreatePlatformOptimized(pageSize: 2048);
-// Returns null when no suitable compressed format is available (e.g. WebGL).
-
-// Release the shared instance when no longer needed
-CompressedDynamicAtlasFactory.ClearSharedInstance();
-```
-
-| Method                      | Description                                                                                                                                   |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Create()`                  | Creates a new atlas for the given `TextureFormat`                                                                                             |
-| `GetSharedInstance()`       | Thread-safe singleton; recreates if the requested format changes                                                                              |
-| `CreatePlatformOptimized()` | Picks the recommended compressed format via `TextureFormatHelper` and creates an atlas. Returns `null` if the platform has no suitable format |
-| `ClearSharedInstance()`     | Disposes and clears the shared singleton (static)                                                                                             |
-
-### Step 8: Editor Tools
-
-The framework ships with multiple editor windows for diagnostics and validation:
-
-#### Atlas Format Validator
-
-**Menu**: `Tools > CycloneGames > Dynamic Atlas > Atlas Format Validator`
-
-Scans `SpriteAtlas` assets and validates compression format compatibility with `CompressedDynamicAtlasService`. Shows per-platform format, validity status, and recommendations.
-
-#### Dynamic Atlas Debugger
-
-**Menu**: `Tools > CycloneGames > Dynamic Atlas > Dynamic Atlas Debugger`
-
-Play-mode visual debugger for the Dynamic Atlas system:
-
-- Sidebar lists all atlas pages with VRAM usage and fill-ratio progress bars
-- Main area renders the atlas texture with zoomable scroll view
-- Overlay draws sprite rects and names on top of the texture
-- Per-page sprite item list for detailed inspection
-
-### Step 9: Async Loading
-
-For large UI screens with many icons, loading textures synchronously can cause frame spikes. Use `GetSpriteAsync()` to perform disk I/O on a background thread while keeping atlas insertion on the main thread.
-
-**Setup:**
-
-```csharp
-// Configure async loader (e.g., during game initialization)
-DynamicAtlasManager.Instance.Configure(new DynamicAtlasConfig
-{
-    loadFunc = (path) => Resources.Load<Texture2D>(path),      // Sync fallback
-    unloadFunc = (path, tex) => Resources.UnloadAsset(tex),
-    loadFuncAsync = async (path) =>
-    {
-        // Use your asset management system's async API
-        var handle = await assetPackage.LoadAssetAsync<Texture2D>(path);
-        return handle.Asset;
-    },
-    pageSize = 2048,
-});
-```
-
-**Usage:**
-
-```csharp
-using Cysharp.Threading.Tasks;
-
-public class IconLoader : MonoBehaviour
-{
-    [SerializeField] private UnityEngine.UI.Image iconImage;
-
-    public async UniTaskVoid LoadIconAsync(string iconPath)
-    {
-        // Disk I/O runs off main thread; atlas insertion runs on main thread
-        Sprite sprite = await DynamicAtlasManager.Instance.GetSpriteAsync(iconPath);
-        if (sprite != null)
-        {
-            iconImage.sprite = sprite;
-        }
-    }
-
-    private void OnDestroy()
-    {
-        if (iconImage.sprite != null)
-        {
-            DynamicAtlasManager.Instance.ReleaseSprite(iconImage.sprite.name);
-        }
-    }
-}
-```
-
-> **Note**: `GetSpriteAsync()` requires `loadFuncAsync` to be configured. If only `loadFunc` is set, use `GetSprite()` (synchronous) instead. The async API returns `null` and logs an error if `loadFuncAsync` is not configured.
-
-### Advanced Architecture & Memory Management
-
-#### Memory & GC Strategy
-
-- **Zero-GC Copying:** The system exclusively relies on GPU-to-GPU copying (`Graphics.CopyTexture` and `Graphics.Blit`) to transfer texture data. Legacy CPU-bound methods (`Texture2D.SetPixels`, `GetRawTextureData`) that cause heavy GC spikes have been completely eliminated. Once the system is initialized, loading and packing sprites generates **0 Bytes of Garbage Collection**.
-- **Draw Call Reduction:** By packing discrete icons into large 2048×2048 or 4096×4096 pages, Unity can batch hundreds of different UI elements into a single Draw Call, significantly alleviating CPU pipeline pressure.
-- **Reference Counting with Atomic Safety:** Every sprite generated increments an `ActiveSpriteCount` and a `UsedPixelArea` tracker. All counters use `Interlocked` atomic operations to eliminate TOCTOU (Time-Of-Check-Time-Of-Use) races in multi-threaded scenarios. Integer overflow is guarded by casting to `(long)width * height` before comparison. Once a page's `ActiveSpriteCount` drops to 0, the entire page (`Texture2D`) is immediately destroyed, returning the VRAM back to the system.
-
-#### Bleed Pixel Support (Edge Bleeding / Gutter)
-
-When bilinear or trilinear texture filtering is enabled, sampling at sprite boundaries can accidentally read adjacent pixels from neighboring sprites, causing visible seams. The Dynamic Atlas system solves this with **automatic 1-pixel border replication (bleed)**:
-
-- **GPU Path (primary):** On platforms supporting `Graphics.CopyTexture` (all except WebGL), bleed pixels are generated by copying the edge rows/columns to the surrounding gutter region — zero-GC, executed entirely on GPU.
-- **CPU Path (fallback):** When texture data resides on the CPU side (e.g., after `RenderTexture` readback), `GetPixels`/`SetPixels` is used directly. This avoids unnecessary GPU↔CPU round trips that `Graphics.Blit` would introduce.
-- **Compressed Format Guard:** Bleed is automatically disabled when the atlas uses compressed formats (block size > 1), since sub-block pixel manipulation is physically impossible.
-- **Controlled by Config:** Set `enableBleed: true` (default) and ensure `padding > 0` for bleed to take effect.
-
-#### Sprite Metadata Preservation
-
-When copying sprites from a SpriteAtlas or other source via `GetSpriteFromSprite()`, the system preserves the original sprite's:
-
-- **Pivot point** — UI layout anchors remain correct
-- **9-slice border** — Sliced sprites render correctly without manual re-configuration
-
-This is critical for production UI pipelines where sprites carry rich metadata beyond raw pixels.
-
-#### Page Limits & Mipmap Support
-
-- **`maxPages`**: Set a non-zero value to cap the maximum number of atlas pages. When the limit is reached, `CreateNewPage()` returns `false` and the insertion is rejected instead of allocating unbounded VRAM. Set to `0` for unlimited pages (default).
-- **`enableMipmap`**: When `true`, atlas pages are created with mipmap support. This is essential for world-space UI elements rendered at varying camera distances, allowing the GPU to perform proper LOD filtering. Leave `false` for screen-space UI to save ~33% memory per page.
-
-#### Async Loading Convenience
-
-Disk I/O (loading source textures from AssetBundle/Addressable) can be fully asynchronous, but atlas insertion (`Graphics.CopyTexture` / `Blit`) **must** execute on the main thread. The `GetSpriteAsync()` API bridges this gap:
-
-1. `await loadFuncAsync(path)` — background thread loads the texture
-2. `Service.GetSpriteFromRegion()` — main thread inserts pixels into atlas
-3. `unloadFunc(path, tex)` — releases the source texture
-
-This integrates naturally with `CycloneGames.AssetManagement` via `LoadAssetAsync<Texture2D>`. No LRU/LFU is added at the atlas layer because source texture lifecycle is already managed by `AssetCacheService` (W-TinyLFU).
-
-#### Block Alignment for Compressed Formats
-
-When using `CompressedDynamicAtlasService`, hardware texture compression (ASTC, ETC2, BC7) is employed. However, compressed textures are not stored pixel-by-pixel, but in discrete blocks (e.g., 4×4, 6×6, 8×8 pixels per block).
-
-- **Format Parity Requirement:** The source sprites and the atlas page MUST share the exact same compression format.
-- **Block Padding & Alignment:** To prevent block artifacts from bleeding across sprite boundaries, the system automatically queries `TextureFormatHelper.GetBlockSize()`. If you push an 11×11 pixel icon into an ASTC 4×4 atlas, the internal shelf-packing algorithm will automatically allocate a 12×12 (aligned to 4) footprint in the VRAM. This guarantees that GPU block samplers will not accidentally read neighbor pixels, ensuring crisp visuals even with high compression.
-- **NativeArray Zero-GC Initialization:** `CompressedAtlasPage` uses `NativeArray<byte>` for initial texture data instead of managed byte arrays, eliminating a large GC allocation during page creation.
-
-#### Memory Defragmentation (Seamless Repacking)
-
-Over time, as UI windows open and close, atlas pages can become "Swiss cheese" — fragmented with empty gaps holding unreleased, scattered sprites. To reclaim VRAM without causing frame stutters, the framework implements a **Double-Buffering Defragmentation Strategy**:
-
-1. **Trigger:** Call `DynamicAtlasManager.Instance.Defragment(0.5f)`. This targets pages that are at least 50% empty (`FragmentationRatio > 0.5f`).
-2. **Double Buffering:** The system silently allocates a new pristine Page in the background.
-3. **GPU Blit:** Using zero-GC `CopyTexture`, it tightly repacks all currently active sprites from the fragmented old page into the new page. `ApplyIfNeeded()` is called after repacking to ensure the new page's pixel data is committed.
-4. **Seamless Pointer Swapping:** Existing C# `Sprite` wrapper objects in the cache are remapped.
-5. **Event Notification:** The system broadcasts `DynamicAtlasManager.Instance.OnSpriteRepacked` with the new Sprite reference. Subscribed UI Image components can catch this event to instantly swap their `.sprite` property gracefully.
-
-#### Platform Support Matrix
-
-| Platform          | `Graphics.CopyTexture` | Compressed Atlas | Bleed Support | Recommended Format |
-| ----------------- | ---------------------- | ---------------- | ------------- | ------------------ |
-| Windows/Mac/Linux | ✅                     | ✅               | ✅            | BC7 / DXT5         |
-| iOS               | ✅                     | ✅               | ✅            | ASTC 4×4           |
-| Android           | ✅                     | ✅               | ✅            | ASTC 4×4 / ETC2    |
-| PS4 / PS5         | ✅                     | ✅               | ✅            | BC7 / DXT5         |
-| Xbox Series / One | ✅                     | ✅               | ✅            | BC7 / DXT5         |
-| Nintendo Switch   | ✅                     | ✅               | ✅            | ASTC 4×4 / ETC2    |
-| WebGL             | ❌ (Blit fallback)     | ❌               | ✅ (CPU only) | RGBA32             |
-
-## Advanced Features
-
-### Custom Transition Drivers
-
-You can override the default open/close animations using `IUIWindowTransitionDriver`. This allows you to use **DOTween**, **LitMotion**, or Unity's **Animator**.
-
-```csharp
-using CycloneGames.UIFramework.Runtime;
-using Cysharp.Threading.Tasks;
-using System.Threading;
-using UnityEngine;
-
-public class FadeTransitionDriver : IUIWindowTransitionDriver
-{
-    public async UniTask PlayOpenAsync(UIWindow window, CancellationToken ct)
-    {
-        CanvasGroup canvasGroup = window.GetComponent<CanvasGroup>();
-        if (canvasGroup == null) return;
-
-        float duration = 0.3f;
-        float elapsed = 0f;
-
-        while (elapsed < duration && !ct.IsCancellationRequested)
-        {
-            elapsed += Time.deltaTime;
-            canvasGroup.alpha = Mathf.Clamp01(elapsed / duration);
-            await UniTask.Yield();
-        }
-
-        canvasGroup.alpha = 1f;
-    }
-
-    public async UniTask PlayCloseAsync(UIWindow window, CancellationToken ct)
-    {
-        CanvasGroup canvasGroup = window.GetComponent<CanvasGroup>();
-        if (canvasGroup == null) return;
-
-        float duration = 0.3f;
-        float elapsed = 0f;
-        float startAlpha = canvasGroup.alpha;
-
-        while (elapsed < duration && !ct.IsCancellationRequested)
-        {
-            elapsed += Time.deltaTime;
-            canvasGroup.alpha = Mathf.Lerp(startAlpha, 0f, elapsed / duration);
-            await UniTask.Yield();
-        }
-
-        canvasGroup.alpha = 0f;
-    }
+    void OnSubmit();
 }
 
-// Assign to a window:
-public class MyWindow : UIWindow
+public sealed class LoginWindow : UIWindow, ILoginView
 {
-    protected override void Awake()
-    {
-        base.Awake();
-        SetTransitionDriver(new FadeTransitionDriver());
-    }
-}
-```
-
----
-
-## Transition Animation System
-
-The UIFramework provides a flexible, extensible transition animation system supporting **LitMotion** and **DOTween**. You can use built-in presets or create custom animations.
-
-### Built-in Configurations
-
-| Config                              | Effect               | Usage                |
-| ----------------------------------- | -------------------- | -------------------- |
-| `FadeConfig.Default`                | Fade in/out          | Dialogs, popups      |
-| `ScaleConfig.Default`               | Scale from 80%       | Modal windows        |
-| `SlideConfig.Left/Right/Top/Bottom` | Slide from direction | Side panels, drawers |
-| `CompositeConfig.FadeScale`         | Fade + Scale         | Premium popups       |
-| `CompositeConfig.FadeSlideBottom`   | Fade + Slide up      | Mobile-style sheets  |
-
-### Quick Usage
-
-```csharp
-// Using LitMotion (requires LIT_MOTION_PRESENT define)
-var driver = new LitMotionTransitionDriver(FadeConfig.Default);
-window.SetTransitionDriver(driver);
-
-// Using DOTween (requires DO_TWEEN_PRESENT define)
-var driver = new DOTweenTransitionDriver(CompositeConfig.FadeScale);
-window.SetTransitionDriver(driver);
-```
-
-### Custom Configuration
-
-```csharp
-// Custom scale animation
-var config = new ScaleConfig(scaleFrom: 0.5f, duration: 0.4f);
-window.SetTransitionDriver(new LitMotionTransitionDriver(config));
-
-// Custom slide from bottom
-var slideConfig = new SlideConfig(
-    direction: SlideDirection.Bottom,
-    offset: 0.3f,
-    duration: 0.35f
-);
-window.SetTransitionDriver(new DOTweenTransitionDriver(slideConfig));
-
-// Composite: Fade + Scale + Slide
-var compositeConfig = new CompositeConfig(
-    fade: true,
-    scale: new ScaleConfig(0.9f),
-    slide: new SlideConfig(SlideDirection.Bottom, 0.2f),
-    duration: 0.3f
-);
-window.SetTransitionDriver(new LitMotionTransitionDriver(compositeConfig));
-```
-
-### Different Open/Close Animations
-
-```csharp
-var openConfig = CompositeConfig.FadeScale;
-var closeConfig = FadeConfig.Default;
-
-window.SetTransitionDriver(new LitMotionTransitionDriver(
-    openConfig: openConfig,
-    closeConfig: closeConfig,
-    easeIn: LitMotion.Ease.OutBack,
-    easeOut: LitMotion.Ease.InQuad
-));
-```
-
-### Setup Requirements
-
-#### LitMotion
-
-1.  **Install LitMotion**:
-    - Open **Window > Package Manager**
-    - Click **+ > Add package from git URL...**
-    - Enter `https://github.com/annulusgames/LitMotion.git`
-2.  **Done!**
-    - The `CycloneGames.UIFramework.Runtime.asmdef` handles definitions automatically (`LIT_MOTION_PRESENT`).
-    - You can now use `LitMotionTransitionDriver`.
-
-#### DOTween
-
-1.  **Install DOTween**: Import from Asset Store or Package Manager.
-2.  **Setup**: Run **Tools > Demigiant > DOTween Utility Panel** and click **Create ASMDEF**.
-3.  **Done!**
-    - The `CycloneGames.UIFramework.Runtime.asmdef` handles definitions automatically (`DO_TWEEN_PRESENT`).
-    - You can now use `DOTweenTransitionDriver`.
-
-### Extending the Animation System
-
-External projects can create custom transitions by inheriting from the base drivers:
-
-```csharp
-// 1. Create a custom config class
-public class RotateConfig : TransitionConfigBase
-{
-    public float Angle { get; }
-    public RotateConfig(float angle = 180f, float duration = 0.3f) : base(duration)
-    {
-        Angle = angle;
-    }
+    private ILoginViewListener _listener;
+    public void SetListener(ILoginViewListener listener) => _listener = listener;
+    public void ShowValidationError(string message) { }
+    public void UICmd_Submit() => _listener?.OnSubmit();
 }
 
-// 2. Extend the driver to handle your config
-public class MyTransitionDriver : LitMotionTransitionDriver
+public sealed class LoginPresenter :
+    UIPresenter<ILoginView>,
+    ILoginViewListener
 {
-    public MyTransitionDriver(TransitionConfigBase config) : base(config) { }
-
-    protected override async UniTask AnimateConfigAsync(
-        TransitionContext ctx, TransitionConfigBase config, bool isOpen, Ease ease, CancellationToken ct)
-    {
-        if (config is RotateConfig rotate)
-        {
-            // Custom rotation animation
-            float from = isOpen ? rotate.Angle : 0f;
-            float to = isOpen ? 0f : rotate.Angle;
-            var handle = LMotion.Create(from, to, rotate.Duration)
-                .WithEase(ease)
-                .Bind(v => ctx.Transform.rotation = Quaternion.Euler(0, 0, v));
-            await handle.ToUniTask(cancellationToken: ct);
-        }
-        else
-        {
-            await base.AnimateConfigAsync(ctx, config, isOpen, ease, ct);
-        }
-    }
-}
-```
-
-### Performance Notes
-
-- **Zero GC after warmup**: Both drivers use struct-based context and cached animations
-- **Proper cleanup**: Tweens are killed on cancellation to prevent memory leaks
-- **Unscaled time**: Animations use unscaled time, working correctly during Time.timeScale = 0
-
----
-
-## Performance Optimization Tools
-
-### `OptimizeHierarchy`
-
-Right-click your `UIWindow` component in the Inspector and select **Optimize Hierarchy**. This tool scans your UI hierarchy and disables `RaycastTarget` on non-interactive elements (like decorative Images or Texts), significantly reducing the cost of Unity's event system raycasts.
-
-### `SetVisible` API
-
-Use `window.SetVisible(bool)` instead of `gameObject.SetActive(bool)`.
-
-- **SetVisible**: Toggles `CanvasGroup.alpha`, `interactable`, and `blocksRaycasts`. This avoids the expensive rebuilding of the UI layout and mesh that happens when enabling/disabling GameObjects.
-
-```csharp
-// Instead of:
-gameObject.SetActive(false);
-
-// Use:
-SetVisible(false);
-```
-
-### Runtime Monitor
-
-**Menu**: `Tools > CycloneGames > UI Framework > Runtime Monitor`
-
-A live Play-mode editor dashboard that auto-repaints every tick. Displays the full `UIPerformanceStats` snapshot:
-
-| Metric                      | Description                                       |
-| --------------------------- | ------------------------------------------------- |
-| `ActiveWindowCount`         | Total open windows                                |
-| `SceneBoundWindowCount`     | Windows bound to the current scene                |
-| `InFlightOpenCount`         | Opens currently in progress (loading / animating) |
-| `CachedConfigHandleCount`   | Configuration asset handles held by UIManager     |
-| `CachedPrefabHandleCount`   | Prefab asset handles held by UIManager            |
-| `LayerCount`                | Active UI layers                                  |
-| `TotalLayerWindowCount`     | Sum of windows across all layers                  |
-| `IsolatedWindowCanvasCount` | Windows with their own sub-Canvas                 |
-| `HasPendingSceneSweep`      | Whether a scene-bound sweep is pending            |
-
-Below the summary, a **Layer Breakdown** table shows each layer's name, sorting order, and window count.
-
-```csharp
-// You can also query these stats from code:
-UIPerformanceStats stats = uiManager.GetPerformanceStats();
-
-var layerStats = new List<UILayerRuntimeStats>();
-uiManager.CopyLayerRuntimeStats(layerStats);
-```
-
-### Performance Auditor (Static Analysis)
-
-**Menu**: `Tools > CycloneGames > UI Framework > Performance Auditor`
-
-Offline tool that scans all `UIWindowConfiguration` assets (or a selection) and produces per-window audit reports. Features:
-
-- **Scan All / Scan Selection** for targeted or project-wide analysis
-- **Severity filter**: Info, Warning, Error
-- **Sort modes**: by warning count, name, graphics count, material variants
-- **Color-coded summary bar** with chip counts
-
-Metrics collected per window:
-
-| Metric                      | Description                                                         |
-| --------------------------- | ------------------------------------------------------------------- |
-| Graphics count              | Total `Graphic` components in the prefab                            |
-| Raycast targets             | `RaycastTarget` enabled count                                       |
-| Non-interactive raycasts    | Raycasts on elements with no `Selectable` / event handler           |
-| Layout groups               | `HorizontalLayoutGroup` / `VerticalLayoutGroup` / `GridLayoutGroup` |
-| Content size fitters        | `ContentSizeFitter` components (layout-rebuild cost)                |
-| Masks / Rect masks          | `Mask` and `RectMask2D` components                                  |
-| Canvas count                | Nested `Canvas` components                                          |
-| Material / texture variants | Distinct materials and textures (draw-call impact)                  |
-| Scroll rects                | `ScrollRect` components                                             |
-
-Issues flagged automatically:
-
-- `LayoutGroup` + `ContentSizeFitter` on the same object (Warning)
-- ≥3 layout components (Warning — likely over-nesting)
-- ≥2 `Mask` components (Warning — stencil cost)
-- ≥3 distinct materials (Warning — draw-call bloat)
-- ≥6 non-interactive raycast targets (Warning)
-- `ScrollRect` without nested sub-Canvas (Info)
-- ≥80 `Graphic` components (Info — consider splitting)
-
-### SubCanvasPolicy
-
-`UIWindowConfiguration` exposes a `SubCanvasPolicy` enum to control whether each window gets its own sub-Canvas:
-
-| Policy               | Behaviour                                                                                  |
-| -------------------- | ------------------------------------------------------------------------------------------ |
-| `InheritLayerCanvas` | Share the layer's Canvas — maximum batching, best for static windows                       |
-| `ForceOwnSubCanvas`  | Always create an isolated sub-Canvas — limits rebuild cost to this window only             |
-| `AutoDetect`         | Framework auto-isolates windows that contain high-churn markers (animations, scroll rects) |
-
-The Performance Auditor suggests an optimal policy for each window based on its component makeup.
-
----
-
-## Architecture Patterns (MVP with Auto-Binding)
-
-CycloneGames.UIFramework provides **optional** MVP (Model-View-Presenter) support with automatic Presenter lifecycle management. You can use the traditional approach (all logic in UIWindow) or the new MVP pattern with automatic binding.
-
-### Usage Levels
-
-| Level  | Pattern                                                    | Use Case                  |
-| ------ | ---------------------------------------------------------- | ------------------------- |
-| **L0** | `class MyUI : UIWindow`                                    | Simple windows, beginners |
-| **L1** | `class MyUI : UIWindow` + manual Presenter                 | Manual control            |
-| **L2** | `class MyUI : UIWindow` + `[UIPresenterBind]`              | Auto-binding, no DI       |
-| **L3** | `class MyUI : UIWindow` + `[UIPresenterBind]` + VContainer | Full DI integration       |
-
----
-
-### Level 0: Traditional (No Presenter)
-
-Write all logic directly in the UIWindow - simple and straightforward.
-
-```csharp
-public class UIWindowSimple : UIWindow
-{
-    [SerializeField] private Button closeBtn;
-
-    protected override void Awake()
-    {
-        base.Awake();
-        closeBtn.onClick.AddListener(() => Close());
-    }
-}
-```
-
----
-
-### Level 2: Auto-Binding (No DI Framework Required)
-
-Use `[UIPresenterBind]` to automatically create and manage Presenters entirely decoupled from Views.
-
-#### Step 1: Define View Interface
-
-```csharp
-public interface IInventoryView
-{
-    void SetGold(int amount);
-    void SetItemCount(int count);
-}
-```
-
-#### Step 2: Create the View (UIWindow)
-
-```csharp
-using CycloneGames.UIFramework.Runtime;
-using UnityEngine;
-using UnityEngine.UI;
-
-public class UIWindowInventory : UIWindow, IInventoryView
-{
-    [SerializeField] private Text goldText;
-    [SerializeField] private Text itemCountText;
-
-    public void SetGold(int amount) => goldText.text = amount.ToString("N0");
-    public void SetItemCount(int count) => itemCountText.text = count.ToString();
-}
-```
-
-#### Step 3: Create the Presenter
-
-```csharp
-using CycloneGames.UIFramework.Runtime;
-
-[UIPresenterBind("UIWindow_Inventory")]
-// Or use strongly typed binding: [UIPresenterBind(typeof(UIWindowInventory))]
-public class InventoryPresenter : UIPresenter<IInventoryView>
-{
-    // Auto-injected from UIServiceLocator (no DI framework needed)
-    [UIInject] private IInventoryService InventoryService { get; set; }
-
-    public override void OnViewOpened()
-    {
-        View.SetGold(InventoryService.Gold);
-        View.SetItemCount(InventoryService.ItemCount);
-    }
-
-    public override void OnViewClosing()
-    {
-        // Save or cleanup logic
-    }
-
+    protected override void OnViewBound() => View.SetListener(this);
+    public void OnSubmit() { /* Validate and invoke application services. */ }
     public override void Dispose()
     {
-        // Cleanup if needed
+        View?.SetListener(null);
+        base.Dispose();
     }
 }
 ```
 
-> [!NOTE]
->
-> `[UIInject]` is **optional**. If your Presenter works without external dependencies, or if you use a full DI framework (Level 3) that handles injection differently, you do not need to use this attribute.
-
-#### Step 4: Register Services (No DI Framework)
+Register before opening any window. For each successful binding, callbacks occur in order: `SetUIService`, `SetView` and `OnViewBound`, `OnViewOpening`, `OnViewOpened`, `OnViewClosing`, `OnViewClosed`, then the registered release delegate. A failed binding runs the release delegate during rollback.
 
 ```csharp
-using CycloneGames.UIFramework.Runtime;
+var presenterBinder = new UIPresenterBinder(initialCapacity: 8);
+presenterBinder.Register<LoginPresenter>("Login");
 
-public class GameBootstrap : MonoBehaviour
-{
-    void Awake()
-    {
-        // Register services for [UIInject] to work
-        UIServiceLocator.Register<IInventoryService>(new InventoryService());
-        UIServiceLocator.Register<IAudioService>(new AudioService());
-    }
-
-    void OnDestroy()
-    {
-        UIServiceLocator.Clear();
-    }
-}
+IUIWindowBinder[] binders = { presenterBinder };
+var ui = new UIService(root, assetProvider: provider, options: options, binders: binders);
 ```
 
-#### Lifecycle
-
-The Presenter lifecycle is fully automatic and maps 1:1 to UIWindow:
-
-| UIWindow Event      | Presenter Call    | Description            |
-| ------------------- | ----------------- | ---------------------- |
-| `Awake()`           | `SetView()`       | View binding           |
-| `OnStartOpen()`     | `OnViewOpening()` | Before open animation  |
-| `OnFinishedOpen()`  | `OnViewOpened()`  | Fully interactive      |
-| `OnStartClose()`    | `OnViewClosing()` | Before close animation |
-| `OnFinishedClose()` | `OnViewClosed()`  | After close animation  |
-| `OnDestroy()`       | `Dispose()`       | Cleanup                |
-
----
-
-### Level 3: VContainer Integration
-
-When your project has VContainer package (`jp.hadashikick.vcontainer`) installed, UIFramework automatically enables VContainer integration.
-
-> [!NOTE]
->
-> The `VCONTAINER_PRESENT` define symbol is configured in `CycloneGames.UIFramework.Runtime.asmdef` via `versionDefines`.
-> When Unity detects the VContainer package, it automatically adds this symbol. **No manual Project Settings configuration required**.
-
-#### Step 1: Understand Architecture
-
-UIFramework is designed to be **DI-agnostic**, VContainer integration is implemented via adapter pattern:
-
-```
-VContainer
-├── IUIService (UIService) ← Main entry point, initialized via RegisterBuildCallback
-│   ├── Dependency: IAssetPathBuilderFactory
-│   ├── Dependency: IUnityObjectSpawner
-│   ├── Dependency: IMainCameraService (optional)
-│   └── Dependency: IAssetPackage (optional)
-│
-├── VContainerWindowBinder ← Adapter connecting VContainer with Presenter factory
-│
-├── UISystemInitializer ← Initializes the binder
-│
-└── Presenter types (optional registration)
-    ├── Registered → Uses VContainer constructor injection
-    └── Not registered → Auto-fallback to Activator + [UIInject]
-```
-
-#### Step 2: Complete Configuration Example
+When a presenter must consume caller data during `OnViewOpening`, use the contextual factory. `OpenContext` is caller-owned in-memory data; validate its type and contents at the feature boundary.
 
 ```csharp
-using VContainer;
-using VContainer.Unity;
-using CycloneGames.UIFramework.Runtime;
-using CycloneGames.UIFramework.Runtime.Integrations;
-using CycloneGames.Factory.Runtime;
-using CycloneGames.Service.Runtime;
-using CycloneGames.AssetManagement.Runtime;
-
-public class GameLifetimeScope : LifetimeScope
-{
-    protected override void Configure(IContainerBuilder builder)
+presenterBinder.RegisterContextual<LoginPresenter>(
+    "Login",
+    context =>
     {
-        // ========================================
-        // 1. UIService Dependencies
-        // ========================================
-        builder.Register<IAssetPathBuilderFactory, TemplateAssetPathBuilderFactory>(Lifetime.Singleton);
-        builder.Register<IUnityObjectSpawner, DefaultUnityObjectSpawner>(Lifetime.Singleton);
-        builder.Register<IMainCameraService, MainCameraService>(Lifetime.Singleton);
-
-        // Hot-update projects: register IAssetPackage
-        // builder.RegisterInstance(yourAssetPackage).As<IAssetPackage>();
-
-        // ========================================
-        // 2. UIService - Use RegisterBuildCallback to Initialize
-        // ========================================
-        // UIService maintains DI-agnostic design, initialized via callback
-        builder.Register<IUIService, UIService>(Lifetime.Singleton);
-        builder.RegisterBuildCallback(resolver =>
+        if (!context.TryGetOpenContext<LoginOpenRequest>(out var request))
         {
-            var uiService = resolver.Resolve<IUIService>();
-            var factory = resolver.Resolve<IAssetPathBuilderFactory>();
-            var spawner = resolver.Resolve<IUnityObjectSpawner>();
-            var cameraService = resolver.Resolve<IMainCameraService>();
-
-            // If IAssetPackage is registered, use the overload with package
-            // var package = resolver.Resolve<IAssetPackage>();
-            // uiService.Initialize(factory, spawner, cameraService, package);
-
-            // Otherwise use default overload
-            uiService.Initialize(factory, spawner, cameraService);
-        });
-
-        // ========================================
-        // 3. UIFramework Presenter Support
-        // ========================================
-        builder.Register<VContainerWindowBinder>(Lifetime.Singleton);
-        builder.RegisterEntryPoint<UISystemInitializer>();
-
-        // ========================================
-        // 4. Business Services (used by Presenters)
-        // ========================================
-        builder.Register<IInventoryService, InventoryService>(Lifetime.Singleton);
-        builder.Register<IAudioService, AudioService>(Lifetime.Singleton);
-
-        // ========================================
-        // 5. Presenter Registration - OPTIONAL!
-        // ========================================
-        // If not registered, UIPresenterFactory auto-falls back to Activator
-        // Presenters in hot-update assemblies use [UIInject] for injection
-
-        // For constructor injection, register explicitly:
-        // builder.Register<InventoryPresenter>(Lifetime.Transient);
-    }
-}
+            throw new InvalidOperationException("LoginOpenRequest is required.");
+        }
+        return loginPresenterFactory.Create(request, context.LifetimeToken);
+    });
 ```
 
-> [!NOTE]
->
-> **About `[UIInject]` and VContainer Integration**
->
-> `VContainerWindowBinder` automatically registers VContainer's resolver with `UIServiceLocator` on creation.
-> This means `[UIInject]` can **automatically inject services registered in VContainer**:
->
-> ```csharp
-> // Register in VContainer
-> builder.Register<IAudioService, AudioService>(Lifetime.Singleton);
->
-> // Use [UIInject] in Presenter (no need to register Presenter in VContainer)
-> public class HotUpdatePresenter : UIPresenter<IView>
-> {
->     [UIInject] private IAudioService AudioService { get; set; } // ✅ Auto-resolved from VContainer
-> }
-> ```
->
-> Scene-scoped services are also supported: each `VContainerWindowBinder` maintains its own resolver in the stack, auto-cleaned on dispose.
+### Window with DI
 
-#### Step 3: Create UI System Initializer
-
-```csharp
-using VContainer;
-using VContainer.Unity;
-using CycloneGames.UIFramework.Runtime.Integrations;
-
-public class UISystemInitializer : IStartable
-{
-    private readonly VContainerWindowBinder _binder;
-
-    [Inject]
-    public UISystemInitializer(IObjectResolver resolver)
-    {
-        _binder = new VContainerWindowBinder(resolver);
-    }
-
-    public void Start()
-    {
-        CycloneGames.Logger.CLogger.Log("[UISystemInitializer] VContainer integration initialized");
-    }
-}
-```
-
-#### Step 4: Writing Presenters
-
-**Approach A: Using `[UIInject]` (No registration needed, hot-update friendly)**
+DI is a composition choice. A project-specific `IUIWindowBinder` can inject a window through any container. The optional VContainer adapter is enabled only when its UPM package is present.
 
 ```csharp
 using CycloneGames.UIFramework.Runtime;
-
-// No VContainer registration needed, auto-falls back to Activator
-public class InventoryPresenter : UIPresenter<IInventoryView>
-{
-    [UIInject] private IInventoryService InventoryService { get; set; }
-    [UIInject] private IAudioService AudioService { get; set; }
-
-    public override void OnViewOpened()
-    {
-        View.SetGold(InventoryService.Gold);
-        AudioService.PlaySFX("ui_open");
-    }
-}
-```
-
-**Approach B: Using Constructor Injection (Requires VContainer registration)**
-
-```csharp
-using VContainer;
-using CycloneGames.UIFramework.Runtime;
-
-// Requires registration: builder.Register<InventoryPresenter>(Lifetime.Transient);
-public class InventoryPresenter : UIPresenter<IInventoryView>
-{
-    private readonly IInventoryService _inventoryService;
-
-    [Inject]
-    public InventoryPresenter(IInventoryService inventoryService)
-    {
-        _inventoryService = inventoryService;
-    }
-
-    public override void OnViewOpened()
-    {
-        View.SetGold(_inventoryService.Gold);
-    }
-}
-```
-
-#### Step 5: Scene-Scoped Services (Optional)
-
-If your scene has exclusive services that need to be used in UI, simply register `UIServiceLocatorBridge`:
-
-```csharp
-using VContainer;
-using VContainer.Unity;
 using CycloneGames.UIFramework.Runtime.Integrations;
+using VContainer;
 
-public class BattleSceneLifetimeScope : LifetimeScope
+IUIWindowBinder[] binders =
 {
-    protected override void Configure(IContainerBuilder builder)
-    {
-        // Scene-exclusive services
-        builder.Register<IBattleService, BattleService>(Lifetime.Scoped);
-        builder.Register<IEnemySpawner, EnemySpawner>(Lifetime.Scoped);
+    new VContainerWindowBinder(resolver),
+};
 
-        // One line: pushes scene resolver immediately on construction, auto-pops on dispose
-        builder.Register<UIServiceLocatorBridge>(Lifetime.Scoped);
-    }
+var ui = new UIService(root, provider, options, binders);
+```
+
+Compose independent binders in the order required by the window. The first failing binder aborts the open transaction; already-created bindings are disposed in reverse order. Each binder has one responsibility.
+
+```csharp
+var presenterBinder = new UIPresenterBinder(initialCapacity: 8);
+presenterBinder.Register<LoginPresenter>(
+    "Login",
+    factory: () => resolver.Resolve<LoginPresenter>(),
+    release: presenter => presenter.Dispose());
+
+IUIWindowBinder[] binders =
+{
+    new VContainerWindowBinder(resolver), // inject the window first
+    presenterBinder,                      // then bind the presenter
+};
+```
+
+### Navigation
+
+Add a `UINavigationService` through options. The graph contains active windows only. `OpenerId` must already be active, cannot equal the child ID, and determines back navigation. Context is an in-memory object reference released when its node is removed or the graph is cleared.
+
+```csharp
+var navigation = new UINavigationService(initialCapacity: 16);
+var options = new UIServiceOptions { NavigationService = navigation };
+var ui = new UIService(root, provider, options);
+
+await ui.OpenAsync("MainMenu", cancellationToken: token);
+await ui.OpenAsync(
+    "Settings",
+    new UIOpenOptions(openerId: "MainMenu", context: settingsContext),
+    token);
+```
+
+Use caller-owned buffers for inspection. After warm-up, `CopyHistory`, `CopyAncestors`, and `CopyChildren` avoid query-result collection allocation when capacity is sufficient.
+
+```csharp
+var history = new List<UINavigationEntry>(16);
+ui.NavigationService.CopyHistory(history);
+```
+
+`NavigateAsync` opens or resolves the entering window, lets one coordinator animate both live windows, then closes the leaving window. Only one coordinated navigation may run per `UIService`; overlap fails fast. The entering window's individual open transition is suppressed. The commit point is immediately before the irreversible close of the leaving window.
+
+```csharp
+var coordinator = new SlideTransitionCoordinator(duration: 0.3f);
+
+UIWindow inventory = await ui.NavigateAsync(
+    leavingWindowId: "MainMenu",
+    enteringWindowId: "Inventory",
+    coordinator: coordinator,
+    direction: NavigationDirection.Forward,
+    enteringOptions: new UIOpenOptions(context: inventoryContext),
+    cancellationToken: token);
+```
+
+`CrossFadeTransitionCoordinator` and `SlideTransitionCoordinator` use unscaled time. `SlideTransitionCoordinator` uses cross-fade for `NavigationDirection.Replace`.
+
+### Window transitions
+
+`IUIWindowTransitionDriver` controls one window's open and close animation; `IUITransitionCoordinator` controls a pair during navigation. Set a default driver through `UIServiceOptions`, or override per open. Use `suppressWindowTransition: true` only when another authority animates the complete operation. Optional motion assemblies provide drivers for `FadeConfig`, `ScaleConfig`, `SlideConfig`, and `CompositeConfig`; they compile only when the corresponding package is installed.
+
+The built-in transitions share one cancellation contract. The three motion drivers (DOTween, LitMotion, PrimeTween) and the built-in coordinators throw `OperationCanceledException` when handed an already-cancelled token, so a caller can handle cancellation with a single `catch (OperationCanceledException)`. On both the completion and the cancellation path, a coordinator restores the `interactable` and `blocksRaycasts` flags of the leaving and entering windows to the snapshot captured before the transition, so input is never left blocked.
+
+All built-in transitions animate through a `CanvasGroup`. When a window has none, the CrossFade/Slide coordinators and the three motion drivers add one at runtime via `UIWindowTransitionUtility.GetOrAddCanvasGroup`. The added component is permanent and is destroyed together with the window GameObject.
+
+The LitMotion driver starts its fade, scale, and slide animations from the window's current value (alpha, local scale, anchored position) toward the target, so interrupting and re-entering a transition resumes smoothly instead of snapping to a fixed start pose.
+
+### Canvas, input, and resolution
+
+- Configure `CanvasScaler` on the root Canvas for the product's reference resolution and match policy.
+- Keep most windows on `InheritLayerCanvas`; it preserves batching and avoids an extra Canvas and raycaster. Use `IsolatedCanvas` only when measured to help.
+- Add `CanvasGroup` to windows that need visibility control; built-in transitions add one at runtime when missing (see [Window transitions](#window-transitions)).
+- Layer Canvases own sorting ranges; configuration priority controls sibling order only within one layer.
+
+`GetRootCanvasSize()` returns the current root `RectTransform` size. `GetUICamera()` may return `null` for overlay configurations.
+
+## Advanced Topics
+
+### Binder transaction semantics
+
+`UIService` invokes bindings in creation order from its owner thread and switches back to the Unity main thread after each asynchronous wait before touching authoritative state or Unity objects. A binding controls its own internal continuations and must marshal them before using Unity APIs. An opening-stage failure rolls back the complete session. Close-stage failures are aggregated while remaining callbacks and cleanup still run. A close requested during opening callback dispatch is deferred until that dispatch unwinds; an async callback must honor its token and must not await the same session's `CloseAsync` from inside its own lifecycle stage.
+
+### Presenter navigation
+
+`UIPresenter<TView>.NavigateToAsync` records the current window as the opener of the entering window. `NavigateBackAsync` closes only the current window using the selected `ChildClosePolicy`. When an active opener exists, that opener remains the same live session; its original `UIOpenOptions`, context, asset leases, and window instance are preserved without another `OpenAsync` call. When no active opener exists, the current window is still closed and no replacement window is created or loaded.
+
+### Editor authoring
+
+Open `Tools > CycloneGames > UI Framework > UIWindow Creator` to generate a window script, prefab, configuration, and optional MVP files. Before generation, choose project-owned output folders, template prefab, layer configuration, a stable window ID and source mode, and confirm every generated script folder resolves through its nearest asmdef/asmref to a Player-capable assembly referencing `CycloneGames.UIFramework.Runtime`. The creator revalidates the template, canonical `Assets/` paths, assembly graph, and collisions before writing. Script files use a same-directory temporary file and a create-new move; prefab and configuration assets are first created at unique temporary paths, then committed with `AssetDatabase.MoveAsset`. Pending binding uses a bounded, schema-versioned journal that survives reloads.
+
+For manual authoring, use:
+
+- `Assets > Create > CycloneGames > UIFramework > Window Configuration`
+- `Assets > Create > CycloneGames > UIFramework > Layer Configuration`
+- `Assets > Create > CycloneGames > UIFramework > UI Asset Context Asset`
+
+### Diagnostics and observability
+
+`GetPerformanceStats()` returns counts for sessions, lifecycle phases, scene-bound windows, binders, isolated Canvases, layers, and the configured maximum. `CopyLayerRuntimeStats` and `CopyActiveWindows` write into caller-owned buffers. `DynamicAtlasService.GetStats()` reports pages, entries, references, estimated texture bytes, utilization, copy paths, cache hits, and failures. `Tools > CycloneGames > UI Framework > Runtime Monitor` reads these bounded snapshots from an explicitly selected `UIManager`. `Performance Auditor` starts only when `Scan Project` is pressed; it reports review candidates for layout authority, raycasts, materials, textures, masks, and canvas boundaries without modifying assets.
+
+`UIPresenterBinder.LogMissingPresenterMappings` reports unmapped windows through `CycloneGames.UIFramework` during development. Its message uses deferred state formatting, so a disabled channel does not build the message. Keep the option disabled when missing mappings are intentionally common or when logging volume would be harmful.
+
+## Common Scenarios
+
+### Bootstrap a startup window with clean shutdown
+
+The Quick Start example shows the full lifetime: construct `UIService`, open a configuration, await cancellation, then shut down with `UIShutdownMode.Immediate` and dispose in `finally`. This pattern gives the composition root a deterministic teardown path that survives exceptions and cancellation.
+
+### Open by ID with AssetManagement
+
+```csharp
+public UniTask<UIWindow> OpenAsync(string windowId, CancellationToken token)
+{
+    return _ui.OpenAsync(windowId, cancellationToken: token);
 }
 ```
 
-> [!IMPORTANT]
->
-> **When is `UIServiceLocatorBridge` needed?**
->
-> | Scenario                                       | Required?                                      |
-> | ---------------------------------------------- | ---------------------------------------------- |
-> | Only using Root global services                | ❌ No (`VContainerWindowBinder` handles it)    |
-> | Scene-exclusive services via `[UIInject]`      | ✅ Yes, register in that scene's LifetimeScope |
-> | Using constructor injection (not `[UIInject]`) | ❌ No (VContainer handles parent-child scopes) |
->
-> **If you forget to register**: `[UIInject]` will return `null` for scene services, but won't throw.
+The configuration path builder resolves `WindowId` to the configuration asset location. A configuration using `PathLocation` or `AssetReference` then provides the prefab location. The adapter holds acquired handles through session leases and disposes them on close, rollback, or shutdown.
 
-Now scene UI can access scene services via `[UIInject]`:
+### Coordinated menu-to-inventory transition
 
 ```csharp
-public class BattleHUDPresenter : UIPresenter<IBattleHUDView>
-{
-    [UIInject] private IBattleService BattleService { get; set; }  // Scene service ✅
-    [UIInject] private IAudioService AudioService { get; set; }    // Global service ✅
+var coordinator = new SlideTransitionCoordinator(duration: 0.3f);
 
-    public override void OnViewOpened()
-    {
-        View.SetEnemyCount(BattleService.EnemyCount);
-    }
-}
+UIWindow inventory = await ui.NavigateAsync(
+    leavingWindowId: "MainMenu",
+    enteringWindowId: "Inventory",
+    coordinator: coordinator,
+    direction: NavigationDirection.Forward,
+    enteringOptions: new UIOpenOptions(context: inventoryContext),
+    cancellationToken: token);
 ```
 
-> [!TIP]
->
-> **How the Resolver Stack Works**
->
-> ```
-> Global Root Scope starts → VContainerWindowBinder Push(rootResolver)
-> Enter Battle Scene → UIServiceLocatorBridge Push(battleResolver)
->
-> [UIInject] resolves IBattleService:
->   1. Check battleResolver → Found!
->
-> [UIInject] resolves IAudioService:
->   1. Check battleResolver → Not found
->   2. Check rootResolver → Found!
->
-> Leave Battle Scene → UIServiceLocatorBridge.Dispose() Pop(battleResolver)
-> ```
+Built-in coordinators restore the leaving and entering windows' `interactable`/`blocksRaycasts` snapshot on both the completion and the cancellation path; custom coordinators must do the same before propagating pre-commit cancellation. A newly opened entering window is rolled back if opening, coordination, cancellation, or ownership validation fails before commit.
 
-#### Using UIService to Open UI
+### Scene-bound popup cleanup
 
-```csharp
-public class GameController
-{
-    private readonly IUIService _uiService;
+Set `IsSceneBound` on a configuration so a committed window closes automatically when a later active-scene change no longer matches the handle captured at open request time. This keeps popups tied to the scene that owns them without manual close calls in every transition path.
 
-    [Inject]
-    public GameController(IUIService uiService)
-    {
-        _uiService = uiService;
-    }
+## Performance and Memory
 
-    public void OpenInventory()
-    {
-        _uiService.OpenUI("UIWindow_Inventory");
-        // Business logic is handled purely by the InventoryPresenter automatically!
-    }
+### Capacity controls
 
-    public void CloseInventory()
-    {
-        _uiService.CloseUI("UIWindow_Inventory");
-    }
-}
+| Option | Default | Behavior |
+| --- | ---: | --- |
+| `InitialWindowCapacity` | 16 | Initial session dictionary/list capacity |
+| `MaxActiveWindows` | 64 | Hard bound for reserved, opening, open, and closing sessions |
+| `MaxInstantiatesPerFrame` | 2 | Per-service instantiation budget; excess requests yield to later Update frames |
+
+Choose values from measured concurrent UI demand. A larger initial capacity trades retained managed memory for fewer growth reallocations. The maximum is a stability boundary, not a target occupancy.
+
+### Allocation profile
+
+Open and close are lifecycle operations, not zero-allocation hot loops. A session can allocate a session object, cancellation source, completion sources, asset leases, a window instance, and a binding array. A provider-backed open also allocates one short-lived drain completion source for each configuration or prefab acquisition so awaited shutdown can prove no provider call remains in flight.
+
+For recurring diagnostics and navigation queries, retain and reuse `List<T>` buffers, pre-size them to the observed maximum, and use `CopyActiveWindows`, `CopyLayerRuntimeStats`, and navigation `Copy*` methods. The service has no per-frame polling loop; work occurs during explicit operations, active transitions, provider waits, and scene-change cleanup.
+
+### Cache and lease policy
+
+The window-session service keeps no window pool or closed-window cache. The provider may share underlying assets, but every successful acquisition returns a session-owned lease, disposed after binding cleanup and window destruction. Dynamic atlas retention is an independent, explicitly bounded cache with its own sprite leases and trimming policy. `DynamicAtlasSpriteLease` is a value-type handle over pooled records, so cache-hit acquisition allocates nothing; on a miss, `maxMissesPerFrame` bounds per-frame pixel work and excess misses return the transient `DynamicAtlasInsertStatus.Throttled`, which callers retry on a later frame. Add pooling only when profiling shows instance churn is a material cost and the product can define capacity, reset, exhaustion, stale-reference, scene, and shutdown policies.
+
+`DynamicAtlasStats` reports configured `PageCapacity`, `EntryCapacity`, and `MemoryBudgetBytes` beside current pages, entries, references, retained entries, estimated bytes, pending-destruction bytes, and pressure counters. Admission continues to fail through explicit `DynamicAtlasInsertStatus` values when a page, entry, or byte ceiling is reached; active sprite leases are never evicted. `TrimUnused(maximumEntriesToRemove)` is the safe owner-local mitigation and removes only zero-reference retained entries; values at or below zero are a no-op. The legacy no-argument call remains source-compatible and may drain every eligible entry, but total work is still bounded by validated `maxEntries` (hard maximum 65,535); pressure orchestration should always supply its smaller per-pump work budget.
+
+### Threading, AOT, and stripping
+
+`UIService` and `DynamicAtlasService` capture their Unity owner thread and reject use from another thread. Binders, presenters, lifecycle callbacks, transitions, hierarchy changes, locale layout application, texture copies, and lease consumption also run on that thread. An asset provider may perform backend I/O or decompression under its own policy; completed Unity objects are switched back to the main thread before validation and instantiation. Do not add locks around Unity object access; marshal work to the owner thread instead.
+
+The core avoids reflection discovery, runtime code generation, and JIT-only delegates; presenter mappings and binders are explicit, so IL2CPP/AOT composition works. A third-party container or content backend may still require its own generated registrations or `link.xml`. Validate stripping in a representative Player build; Editor compilation is insufficient evidence. WebGL has no general managed worker-thread assumption; the main-thread-confined API and asynchronous yielding work without background threads.
+
+### Memory safety checklist
+
+- Never retain a `UIWindow`, presenter view, binding context, or navigation context after its session ends.
+- Make binding and presenter disposal idempotent.
+- Do not destroy managed windows directly; call `CloseAsync`.
+- Do not dispose provider handles outside their lease owner.
+- Keep each dynamic-atlas lease alive while any `Image` uses its sprite, then dispose it exactly once.
+- Bound `MaxActiveWindows` and content-system cache budgets independently.
+- Profile retained Unity objects after repeated open/close and scene changes.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Resolution |
+| --- | --- | --- |
+| `Window configuration requires a stable WindowId` | `WindowId` empty | Populate `WindowId`; do not rely on asset or GameObject name |
+| `Opening by id requires an IUIWindowAssetProvider` | No provider supplied | Supply a provider or call `OpenAsync(configuration)` with a direct prefab |
+| Configuration incomplete | Missing source-specific reference/location or layer | Verify source-specific reference/location, layer, and layer name |
+| Layer not registered | Name mismatch | Match `UILayerConfiguration.LayerName` to `UILayer.LayerName` exactly |
+| Prefab does not contain `UIWindow` | Derived component missing | Put the derived component on the prefab root |
+| Window capacity reached | `MaxActiveWindows` hit | Close unused sessions or raise the measured budget |
+| Binder registration cannot change | Active sessions exist | Close all windows before registering/unregistering binders |
+| Navigation registration rejected | Invalid opener or self-reference | Use an active opener, a unique child ID, and no self-reference |
+| Coordinated navigation already in progress | Overlap call | Serialize navigation commands in the application flow |
+| Calls fail from a worker thread | Off-main-thread use | Marshal to the Unity main thread before using `IUIService` |
+| Asset retained after close | Provider sharing/cache policy | Inspect provider sharing/cache policy and confirm lease disposal |
+| Input blocked after a transition | Custom transition did not restore state | Built-in coordinators restore `CanvasGroup` `interactable`/`blocksRaycasts` on both completion and cancellation; custom drivers/coordinators must restore in `finally` |
+
+## Validation
+
+Run focused tests from Unity Test Runner:
+
+```text
+<UnityEditor> -batchmode -nographics -projectPath <repo-root>/UnityStarter \
+  -runTests -testPlatform EditMode \
+  -testFilter CycloneGames.UIFramework \
+  -testResults <result-path> -quit
 ```
 
-> [!IMPORTANT]
->
-> **How It Works**
->
-> ```
-> VContainer builds container
->     │
->     ▼
-> RegisterBuildCallback executes
->     │  - Resolves UIService and dependencies
->     │  - Calls uiService.Initialize(...)
->     ▼
-> UISystemInitializer.Start() called
->     │  - Creates VContainerWindowBinder
->     │  - Sets UIPresenterFactory.CustomFactory
->     ▼
-> Runtime: uiService.OpenUIAsync("UIWindow_Inventory")
->     │  - UIManager loads prefab
->     │  - Instantiates UIWindow
->     │  - UIManager triggers OnWindowCreated on binders
->     │  - VContainerWindowBinder matches [UIPresenterBind("UIWindow_Inventory")]
->     │  - UIPresenterFactory.Create() instantiates InventoryPresenter
->     ├─ VContainer registered → Constructor injection
->     └─ VContainer not registered → Activator + [UIInject] injection
-> ```
+Open `Samples/SampleScene.unity` to observe open, transition, and clean shutdown in Play Mode. The sample assembly is not auto-referenced. See [Samples/README.md](Samples/README.md) for the exact scene setup and run steps. Do not generalize an EditMode pass to Player, IL2CPP, WebGL, mobile, console, long-session stability, or global zero-GC behavior.
 
----
+For dynamic-atlas governance, configure a small page/entry/byte budget, retain one active lease, release several others, and call `TrimUnused` with a one-entry budget. Confirm one eligible entry is removed, the active lease remains valid, the capacity fields match configuration, and rejection/eviction counters match the operations.
 
-### Design Philosophy: Decoupled Binder Architecture
+## API Reference
 
-You might ask: _"Why does the framework use `[UIPresenterBind]` instead of the Presenter creating the View?"_
-
-We chose the **Binder-Driven** approach specifically for the Unity engine environment:
-
-1.  **Unity-Native Workflow**: In Unity, UI starts with Prefabs. The "Entry Point" is naturally the `UIWindow` component on a GameObject.
-2.  **Lifecycle Safety**: The Presenter's lifecycle is perfectly bound to the View (`OnWindowCreated` to `OnWindowDestroying`). You never have "Zombie Presenters" running without a View, which avoids many common memory leak errors.
-3.  **DI Compatible**: Even though the Window lifecycle initiates creation, the `UIPresenterBinder` serves as an indirection layer. This allows full DI frameworks (like VContainer) to intervene and inject dependencies, giving you the best of both worlds: **Unity-driven lifecycle + pure DI-driven logic**.
-
----
-
-### API Reference
-
-#### `UIPresenter<TView>`
-
-| Method            | Description                                  |
-| ----------------- | -------------------------------------------- |
-| `View`            | The bound view instance (protected property) |
-| `OnViewBound()`   | Called after SetView, before window opens    |
-| `OnViewOpening()` | Called when window starts opening            |
-| `OnViewOpened()`  | Called when window is fully open             |
-| `OnViewClosing()` | Called when window starts closing            |
-| `OnViewClosed()`  | Called after close animation                 |
-| `Dispose()`       | Called when window is destroyed              |
-
-#### `UIServiceLocator`
-
-| Method                        | Description                  |
-| ----------------------------- | ---------------------------- |
-| `Register<T>(T instance)`     | Register a singleton service |
-| `RegisterFactory<T>(Func<T>)` | Register a lazy factory      |
-| `Get<T>()`                    | Get a registered service     |
-| `Unregister<T>()`             | Remove a service             |
-| `Clear()`                     | Clear all services           |
-
-#### `UIPresenterFactory`
-
-| Property/Method | Description                         |
-| --------------- | ----------------------------------- |
-| `CustomFactory` | Set to integrate with DI frameworks |
-| `Create<T>()`   | Create a Presenter instance         |
-| `ClearCache()`  | Clear reflection cache              |
-
----
-
-### Performance Notes
-
-- **Zero GC after warmup**: Reflection results are cached
-- **Thread-safe**: UIServiceLocator uses locking for concurrent access
-- **Memory-safe**: Presenters are disposed with their windows
-- **No forced DI**: Works without any DI framework
-
----
-
-## Localization Integration (Optional)
-
-CycloneGames.UIFramework provides **optional** integration with [CycloneGames.Localization](../CycloneGames.Localization/README.md). When the `CycloneGames.Localization` package is detected, the scripting define `CYCLONE_LOCALIZATION` is emitted automatically — no manual setup required. If the package is absent, all localization code is compiled away with zero overhead.
-
-### Architecture
-
-```mermaid
-graph TD
-    subgraph UIFramework
-        LWB[LocalizationWindowBinder<br/><i>IUIWindowBinder</i>]
-        ULL[UILocaleLayout<br/><i>ILocaleResponder</i>]
-        ILR[ILocaleResponder]
-    end
-
-    subgraph Localization Package
-        LS[ILocalizationService]
-        LTT[LocalizeTMPText]
-        LI[LocalizeImage]
-    end
-
-    LS -- OnLocaleChanged --> LWB
-    LWB -- discovers ILocaleResponder<br/>in window hierarchy --> ILR
-    ULL -.implements.-> ILR
-    LTT -.implements.-> ILR
-    LWB -- OnWindowCreated --> ULL
-    ULL -- Apply snapshot --> RectTransform/TMP_Text
-```
-
-### Features at a Glance
-
-| Feature                         | Detail                                                                                                                                                                                             |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Per-Locale Layout Snapshots** | `UILocaleLayout` stores font size, line spacing, character spacing, anchored position, and size delta overrides per locale — the prefab's native state **is** the base locale (zero extra storage) |
-| **Automatic Window Binding**    | `LocalizationWindowBinder` implements `IUIWindowBinder`; register it once and every newly created `UIWindow` auto-discovers `ILocaleResponder` components                                          |
-| **Preview Mode**                | The editor lets you switch between locale snapshots in the Scene view without leaving Prefab mode — changes are fully reversible                                                                   |
-| **Auto-Capture on Save**        | When you press Ctrl+S in Prefab mode, unsaved layout changes are automatically captured into the active snapshot                                                                                   |
-| **Context Menu Tracking**       | Right-click any `TMP_Text`, `Image`, or `RectTransform` → _"Track Layout"_ to add it to the nearest `UILocaleLayout`                                                                               |
-| **Zero GC at Runtime**          | Baked parallel arrays (`RectTransform[]`, `TMP_Text[]`, `ElementSnapshot[]`) — no allocation on locale switch                                                                                      |
-
-### Quick Start
-
-#### Step 1: Add `UILocaleLayout` to Your Prefab
-
-Add the `UILocaleLayout` component to the root of your UI prefab (same level as `UIWindow`).
-
-```
-[UIWindow Prefab Root]
- ├── UIWindow
- ├── UILocaleLayout          ← add this
- ├── Header (TMP_Text)
- ├── BodyText (TMP_Text)
- └── IconImage (Image)
-```
-
-#### Step 2: Scan & Add Override Locales
-
-1. Open the prefab in Prefab Mode.
-2. In the `UILocaleLayout` Inspector, click **Scan Hierarchy** — all `TMP_Text` and `Image` components are discovered.
-3. Select a **Base Locale** (the prefab's native language, e.g. `en`).
-4. Click **+ Add Override** to add locales like `zh-CN`, `ja`, `ko`, etc.
-
-#### Step 3: Adjust & Capture
-
-1. Select the override locale (e.g. `zh-CN`) from the dropdown.
-2. Modify font sizes, positions, or spacing directly in the Scene view.
-3. Click **Capture** (or just press Ctrl+S) — the snapshot is saved.
-4. Use **Preview** to compare locales side-by-side without affecting the saved prefab.
-
-#### Step 4: Register the Binder at Startup
-
-```csharp
-// VContainer example
-public class UIInstaller : LifetimeScope
-{
-    protected override void Configure(IContainerBuilder builder)
-    {
-        builder.Register<LocalizationWindowBinder>(Lifetime.Singleton)
-               .AsImplementedInterfaces();
-    }
-}
-```
-
-Or register manually:
-
-```csharp
-var binder = new LocalizationWindowBinder(localizationService);
-uiManager.RegisterWindowBinder(binder);
-```
-
-Once registered, every `UIWindow` that opens will automatically propagate locale changes to all `ILocaleResponder` components in its hierarchy.
-
-### Key Components
-
-#### `UILocaleLayout` (MonoBehaviour, `ILocaleResponder`)
-
-Per-prefab locale layout manager. The prefab's natural state is the base locale — only override locales store snapshot data.
-
-| Member                      | Description                                                            |
-| --------------------------- | ---------------------------------------------------------------------- |
-| `_baseLocale`               | BCP 47 code for the prefab's design language                           |
-| `_elements`                 | Array of `TrackedElement` (RectTransform + optional TMP_Text)          |
-| `_snapshots`                | Array of `LocaleSnapshot` (one per override locale)                    |
-| `OnLocaleChanged(LocaleId)` | Applies the matching snapshot, or restores base layout if none matches |
-
-#### `LocalizationWindowBinder` (`IUIWindowBinder`)
-
-Bridges `ILocalizationService.OnLocaleChanged` to every `ILocaleResponder` in active windows.
-
-| Member                         | Description                                                                                       |
-| ------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `OnWindowCreated(UIWindow)`    | Scans the new window for `ILocaleResponder` components and immediately applies the current locale |
-| `OnWindowDestroying(UIWindow)` | Removes the window from tracking                                                                  |
-| `Dispose()`                    | Unsubscribes from the locale change event                                                         |
-
-#### `ILocaleResponder` (Interface)
-
-```csharp
-public interface ILocaleResponder
-{
-    void OnLocaleChanged(LocaleId newLocale);
-}
-```
-
-Implement on any MonoBehaviour inside a `UIWindow` hierarchy. The binder discovers all responders via `GetComponentsInChildren` using a shared cache (zero allocation).
-
-#### Data Structures
-
-| Type              | Description                                                               |
-| ----------------- | ------------------------------------------------------------------------- |
-| `TrackedElement`  | `RectTransform Target` + `TMP_Text Text` pair                             |
-| `ElementSnapshot` | Font size, line spacing, character spacing, anchored position, size delta |
-| `LocaleSnapshot`  | `string LocaleCode` + `ElementSnapshot[]`                                 |
-
-### Editor Workflow
-
-The `UILocaleLayoutEditor` custom inspector provides a comprehensive visual workflow:
-
-| Feature              | Description                                                                          |
-| -------------------- | ------------------------------------------------------------------------------------ |
-| **Locale dropdown**  | Auto-populated from `LocalizationSettings` asset                                     |
-| **Element grouping** | Hierarchical foldouts when tracked elements exceed 6                                 |
-| **Diff indicators**  | Green check = matches snapshot, orange dot = modified, red cross = missing reference |
-| **Preview mode**     | Blue banner, safe read-only switching between locales, auto-reverts on exit          |
-| **Auto-capture**     | Hooks into `PrefabStage.prefabSaving` to capture unsaved changes on Ctrl+S           |
-| **Close guard**      | Prompts Save/Discard/Cancel when closing prefab with unsaved layout changes          |
-
-### Context Menu
-
-Right-click any component in the Inspector header:
-
-| Menu Item                          | Action                                                      |
-| ---------------------------------- | ----------------------------------------------------------- |
-| `TMP_Text` → **Track Layout**      | Adds the text to the nearest `UILocaleLayout` tracking list |
-| `Image` → **Track Layout**         | Adds the image's RectTransform to the tracking list         |
-| `RectTransform` → **Track Layout** | Adds the transform directly                                 |
-
-If no `UILocaleLayout` exists on the prefab root, one is created automatically.
+| Type/member | Purpose |
+| --- | --- |
+| `UIService(UIRoot, IUIWindowAssetProvider, UIServiceOptions, IReadOnlyList<IUIWindowBinder>)` | Construct one explicit service authority |
+| `OpenAsync(string, UIOpenOptions, CancellationToken)` | Provider-backed open by stable ID |
+| `OpenAsync(UIWindowConfiguration, UIOpenOptions, CancellationToken)` | Open with an explicit configuration |
+| `CloseAsync(string, ChildClosePolicy, CancellationToken)` | Close one session and apply navigation child policy |
+| `NavigateAsync(string, string, IUITransitionCoordinator, NavigationDirection, UIOpenOptions, CancellationToken)` | Coordinated enter/leave transaction |
+| `ShutdownAsync(UIShutdownMode, CancellationToken)` | Ordered service teardown |
+| `Dispose()` | Immediate synchronous teardown |
+| `UIServiceOptions` | Initial/max capacity, instantiation budget, default load context/transition, navigation service |
+| `UIOpenOptions` | Opener, context, scene-bound override, per-open load context/transition, transition suppression |
+| `IUIWindowAssetProvider` | Acquire configuration and prefab leases |
+| `IAssetLease<T>` | Exactly-once session-owned asset acquisition |
+| `UIAssetReference` | Provider-neutral runtime location and Editor GUID metadata |
+| `UIAssetLoadContext` | Immutable bucket/tag/owner metadata for configuration and prefab |
+| `IUIWindowBinder` / `IUIWindowBinding` | Transactional per-window extension and lifetime handle |
+| `UIWindowBindingContext` | Window/service, opener, caller context, and session lifetime token |
+| `IAsyncUIWindowBinding` | Ordered, cancelable work at pre-commit and post-commit lifecycle boundaries |
+| `UIPresenterBinder` | Instance-owned explicit or contextual presenter registration |
+| `UIPresenter<TView>` | Optional strongly typed presenter lifecycle |
+| `IUINavigationService` | Active causal graph and caller-buffered queries |
+| `IUIWindowTransitionDriver` | One-window open/close transition |
+| `IUITransitionCoordinator` | Two-window navigation transition |
+| `TryGetWindow`, `CopyActiveWindows` | Active window lookup/snapshot |
+| `GetPerformanceStats`, `CopyLayerRuntimeStats` | Bounded runtime diagnostics |
+| `DynamicAtlasService`, `DynamicAtlasSpriteLease` | Bounded runtime sprite packing with explicit ownership |

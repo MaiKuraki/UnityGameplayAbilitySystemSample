@@ -1,4 +1,4 @@
-#if NAVIGATHENA_PRESENT
+#if CYCLONEGAMES_HAS_NAVIGATHENA
 using MackySoft.Navigathena.SceneManagement;
 using UnityEngine.SceneManagement;
 
@@ -8,7 +8,7 @@ namespace CycloneGames.AssetManagement.Runtime.Integrations.Navigathena
     /// Extension methods that bridge <see cref="SceneRef"/> to Navigathena's <see cref="ISceneIdentifier"/>.
     /// <code>
     /// // Usage:
-    /// ISceneIdentifier id = mySceneRef.ToSceneIdentifier(package);
+    /// ISceneIdentifier id = mySceneRef.ToSceneIdentifier(sceneLoader);
     /// await navigator.Push(id);
     /// </code>
     /// </summary>
@@ -19,11 +19,32 @@ namespace CycloneGames.AssetManagement.Runtime.Integrations.Navigathena
         /// </summary>
         public static ISceneIdentifier ToSceneIdentifier(
             this SceneRef sceneRef,
-            IAssetPackage package,
-            LoadSceneMode loadSceneMode = LoadSceneMode.Single,
-            bool activateOnLoad = true)
+            IAssetSceneLoader sceneLoader,
+            LoadSceneMode loadSceneMode = LoadSceneMode.Additive,
+            bool activateOnLoad = true,
+            string bucket = null)
         {
-            return new AssetManagementSceneIdentifier(package, sceneRef.Location, loadSceneMode, activateOnLoad);
+            return new AssetManagementSceneIdentifier(
+                sceneLoader,
+                sceneRef.Location,
+                loadSceneMode,
+                activateOnLoad,
+                bucket);
+        }
+
+        public static ISceneIdentifier ToSceneIdentifier(
+            this SceneRef sceneRef,
+            IAssetSceneLoader sceneLoader,
+            LoadSceneParameters loadParameters,
+            SceneActivationMode activationMode = SceneActivationMode.ActivateOnLoad,
+            string bucket = null)
+        {
+            return new AssetManagementSceneIdentifier(
+                sceneLoader,
+                sceneRef.Location,
+                loadParameters,
+                activationMode,
+                bucket);
         }
     }
 }

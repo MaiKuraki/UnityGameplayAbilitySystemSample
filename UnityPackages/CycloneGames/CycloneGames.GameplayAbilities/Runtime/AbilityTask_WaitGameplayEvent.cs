@@ -1,15 +1,18 @@
 using System;
 using CycloneGames.GameplayTags.Core;
+using CycloneGames.Logging;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
     /// <summary>
     /// AbilityTask that waits for a GameplayEvent with a specific tag to be received.
     /// Listens to the ASC's GameplayEvent delegate system (SendGameplayEventToActor pattern),
-    /// NOT tag count changes. This matches UE5's UAbilityTask_WaitGameplayEvent behavior.
+    /// NOT tag count changes.
     /// </summary>
     public class AbilityTask_WaitGameplayEvent : AbilityTask
     {
+        private static readonly LogChannel Log = GameplayAbilitiesLog.Channel;
+
         /// <summary>
         /// Fired when a matching GameplayEvent is received.
         /// </summary>
@@ -23,6 +26,14 @@ namespace CycloneGames.GameplayAbilities.Runtime
         private GameplayTag eventTag;
         private bool onlyTriggerOnce;
         private GameplayEventDelegate eventCallback;
+        private AbilitySystemComponent subscriptionOwner;
+        private bool terminalCallbackStarted;
+
+        public override void InitTask(GameplayAbility ability)
+        {
+            base.InitTask(ability);
+            terminalCallbackStarted = false;
+        }
 
         /// <summary>
         /// Creates a WaitGameplayEvent task.
@@ -40,47 +51,74 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         protected override void OnActivate()
         {
-            if (Ability?.AbilitySystemComponent == null || eventTag.IsNone)
+            subscriptionOwner = Ability?.AbilitySystemComponent;
+            if (subscriptionOwner == null || eventTag.IsNone)
             {
-                GASLog.Warning("WaitGameplayEvent: Invalid ability or event tag.");
+                Log.Warning("WaitGameplayEvent: Invalid ability or event tag.");
                 EndTask();
                 return;
             }
 
             // Register for gameplay events via the ASC's event delegate system
             eventCallback = HandleGameplayEvent;
-            Ability.AbilitySystemComponent.RegisterGameplayEventCallback(eventTag, eventCallback);
+            subscriptionOwner.RegisterGameplayEventCallback(eventTag, eventCallback);
         }
 
         private void HandleGameplayEvent(GameplayEventData eventData)
         {
             if (!IsActive || IsCancelled) return;
 
-            OnEventReceived?.Invoke(eventData);
-
             if (onlyTriggerOnce)
             {
-                EndTask();
+                if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                        this,
+                        ref terminalCallbackStarted,
+                        out ulong leaseGeneration)) return;
+                try
+                {
+                    OnEventReceived?.Invoke(eventData);
+                }
+                finally
+                {
+                    EndTaskIfCurrentLease(leaseGeneration);
+                }
+                return;
             }
+
+            OnEventReceived?.Invoke(eventData);
         }
 
         public override void CancelTask()
         {
-            OnCancelled?.Invoke();
-            base.CancelTask();
+            if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                    this,
+                    ref terminalCallbackStarted,
+                    out ulong leaseGeneration)) return;
+            try
+            {
+                OnCancelled?.Invoke();
+            }
+            finally
+            {
+                if (IsCurrentLease(leaseGeneration))
+                {
+                    base.CancelTask();
+                }
+            }
         }
 
         protected override void OnDestroy()
         {
             // Unregister callback from the event delegate system
-            if (Ability?.AbilitySystemComponent != null && eventCallback != null)
+            if (subscriptionOwner != null && eventCallback != null)
             {
-                Ability.AbilitySystemComponent.RemoveGameplayEventCallback(eventTag, eventCallback);
+                subscriptionOwner.RemoveGameplayEventCallback(eventTag, eventCallback);
             }
 
             OnEventReceived = null;
             OnCancelled = null;
             eventCallback = null;
+            subscriptionOwner = null;
             base.OnDestroy();
         }
     }

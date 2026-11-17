@@ -2,14 +2,18 @@ using System;
 using System.Collections.Generic;
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayTags.Core;
-using CycloneGames.Logger;
+using CycloneGames.GameplayTags.Unity.Runtime;
+using CycloneGames.Logging;
 using UnityEngine;
+using UnityEngine.Serialization;
 
 namespace CycloneGames.GameplayAbilities.Sample
 {
     [RequireComponent(typeof(AbilitySystemComponentHolder))]
     public class Character : MonoBehaviour
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private AbilitySystemComponentHolder ascHolder;
         public AbilitySystemComponent AbilitySystemComponent => ascHolder?.AbilitySystemComponent;
         public CharacterAttributeSet AttributeSet { get; private set; }
@@ -19,16 +23,17 @@ namespace CycloneGames.GameplayAbilities.Sample
         public List<GameplayAbilitySO> InitialAbilities;
         public GameplayEffectSO InitialAttributesEffect;
         public List<GameplayEffectSO> InitialPassiveEffects;
+        [FormerlySerializedAs("LevelingData")]
         public LevelUpDataSO LevelUpData;
 
         [Header("Faction")]
         // A character can now belong to multiple factions, e.g., "Faction.Player", "Faction.Team.Blue".
         [Tooltip("Tags that define this character's faction, team, or allegiances.")]
-        public GameplayTagContainer FactionTags;
+        public SerializableGameplayTagContainer FactionTags;
 
         [Header("Bounty")]
         [Tooltip("The GameplayEffect to grant to the killer when this character dies.")]
-        public GameplayEffectSO BountyEffect;   // TODO: maybe create a new class for EnemyCharacter?
+        public GameplayEffectSO BountyEffect;
 
         void Awake()
         {
@@ -78,7 +83,7 @@ namespace CycloneGames.GameplayAbilities.Sample
             {
                 if (abilitySO != null)
                 {
-                    AbilitySystemComponent.GrantAbility(abilitySO.CreateAbility());
+                    AbilitySystemComponent.GrantAbility(abilitySO.GetGameplayAbility());
                 }
             }
         }
@@ -122,7 +127,7 @@ namespace CycloneGames.GameplayAbilities.Sample
             if (levelsGained > 0)
             {
                 int finalLevel = initialLevel + levelsGained;
-                CLogger.LogInfo($"{name} gained {levelsGained} level(s)! Reached level {finalLevel}.");
+                Log.Info($"{name} gained {levelsGained} level(s)! Reached level {finalLevel}.");
 
                 var mods = new List<ModifierInfo>
                 {
@@ -137,7 +142,7 @@ namespace CycloneGames.GameplayAbilities.Sample
                 };
 
                 var levelUpEffect = new GameplayEffect($"GE_MultiLevelUp_ToLvl{finalLevel}", EDurationPolicy.Instant, 0, 0, mods,
-                    gameplayCues: new GameplayTagContainer { GASSampleTags.Event_Character_LeveledUp });
+                    gameplayCues: new GameplayTagContainer { GameplayTagManager.Request(GASSampleTags.Event_Character_LeveledUp) });
 
                 var spec = GameplayEffectSpec.Create(levelUpEffect, AbilitySystemComponent);
                 AbilitySystemComponent.ApplyGameplayEffectSpecToSelf(spec);
@@ -162,12 +167,11 @@ namespace CycloneGames.GameplayAbilities.Sample
 
             // Apply the bounty effect to the killer
             killerASC.ApplyGameplayEffectSpecToSelf(spec);
-            CLogger.LogInfo($"{killerASC.OwnerActor} received bounty from {this.name}.");
+            Log.Info($"{killerASC.OwnerActor} received bounty from {this.name}.");
         }
 
         void Update()
         {
-            // The Tick needs to be manually called for the AbilitySystemComponent.
             ascHolder?.Tick(Time.deltaTime);
         }
     }

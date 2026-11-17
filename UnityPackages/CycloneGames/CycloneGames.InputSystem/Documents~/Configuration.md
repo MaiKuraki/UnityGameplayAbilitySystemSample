@@ -1,0 +1,202 @@
+# Configuration Guide
+
+[English | 简体中文](Configuration.SCH.md)
+
+Related: [Getting started](GettingStarted.md) | [Runtime guide](RuntimeGuide.md) | [Module reference](../README.md)
+
+## Overview
+
+This guide explains the authoring model shared by YAML, the Input System Editor, and runtime validation. The Editor and YAML represent the same data: the Editor provides discoverable fields, tooltips, validation, safe writes, and code generation; YAML remains the reviewable source format.
+
+## Core Concepts
+
+### Configuration Hierarchy
+
+```mermaid
+flowchart TD
+    R["InputConfiguration"] --> J["Optional root join action"]
+    R --> P["Player slots"]
+    P --> S["Control schemes"]
+    S --> D["Device requirements"]
+    P --> C["Contexts"]
+    C --> A["Action bindings"]
+    A --> B["Direct control paths"]
+    A --> M["Composite bindings"]
+    M --> Q["Composite parts"]
+```
+
+### Root Fields
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `schemaVersion` | Yes | Runtime format version. Author new files with `InputConfiguration.CurrentSchemaVersion`. |
+| `schemaFingerprint` | No | Editor diagnostic value. Runtime acceptance is determined by schema and validation. |
+| `joinAction` | No | Shared join action considered for every player slot when lobby listening is active. |
+| `playerSlots` | Yes | Declared local-player configurations. Each `playerId` must be unique. |
+
+### Player Slot
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `playerId` | Yes | Stable local-player identity used by join, lookup, persistence, and diagnostics. |
+| `joinAction` | No | Join action specific to this slot. |
+| `defaultControlScheme` | No | Preferred declared scheme. Leave empty to select the best scheme supported by available devices. |
+| `controlSchemes` | Usually | Named device requirement sets used during join and device assignment. |
+| `pairAllMatchingDevices` | No | Claims devices for every layout referenced by this slot's bindings and leaves the control scheme unset. All bindings stay live on that player's paired-device whitelist. |
+| `maxDevicesPerLayout` | No | Devices claimed per referenced layout when `pairAllMatchingDevices` is enabled. Default `1`, clamped to `1..8`. |
+| `deviceSwitchDebounceMs` | No | Minimum dwell time before `ActiveDeviceKind` may switch again. Default `0` (immediate), clamped to `0..5000`. |
+| `contexts` | Yes | Context definitions and their action bindings. |
+
+Player IDs are configuration identities, not list positions. Sparse IDs are accepted when they remain within configured limits.
+
+A locked slot (one that selects a control scheme) narrows both the device whitelist and the binding mask to that scheme. A `pairAllMatchingDevices` slot widens the device whitelist to every referenced layout but keeps the binding mask open, which is how one player answers to a keyboard, a mouse and a gamepad without re-joining. Keep `maxDevicesPerLayout` small in local-multiplayer sessions so spare devices remain claimable by other players. Values outside the documented ranges are clamped, not rejected, so legacy files that omit these keys keep their previous behaviour.
+
+### Control Scheme
+
+```yaml
+controlSchemes:
+  - name: KeyboardMouse
+    bindingGroup: KeyboardMouse
+    deviceRequirements:
+      - controlPath: "<Keyboard>"
+        isOptional: false
+        isOr: false
+      - controlPath: "<Mouse>"
+        isOptional: true
+        isOr: false
+```
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Stable scheme name used by `defaultControlScheme`. |
+| `bindingGroup` | Group matched by action `bindingGroups`. |
+| `controlPath` | Unity Input System device layout path, such as `<Keyboard>` or `<Gamepad>`. |
+| `isOptional` | Allows the scheme to match without this requirement. |
+| `isOr` | Joins this requirement to the previous requirement as an alternative. |
+
+Use optional mouse requirements when keyboard-only operation is valid. Use `isOr` only when the intended device rule is an explicit alternative.
+
+### Context
+
+Contexts group actions by product state: `Gameplay` for character control, `Vehicle` for vehicle control, `Menu` for navigation, `Modal` for dialogs that must capture input.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `name` | Yes | Context identity used by runtime lookup and generated constants. |
+| `actionMap` | Yes | Unity Input System action-map name built for this context. |
+| `priority` | Yes | Higher values win when active contexts compete. |
+| `blocksLowerPriority` | Yes | Prevents lower-priority contexts from dispatching while this context is active. |
+| `bindings` | Yes | Action definitions available in the context. |
+
+Runtime `InputContext` instances refer to configured context/action-map identities and own command subscriptions. Configuration defines available actions; runtime code decides which contexts are active.
+
+## Usage Guide
+
+### Action Binding: Basic Fields
+
+| Field | Required | Meaning | Example |
+| --- | --- | --- | --- |
+| `Type` | Yes | Value shape exposed by the action. | `Button`, `Vector2` |
+| `Action Name` | Yes | Stable action identity. | `Confirm`, `Move` |
+| `Update Mode` | Yes | `EventDriven` publishes changes; `Polling` samples from the frame provider. | `EventDriven` |
+| `Device Bindings` | One binding source | Direct Unity Input System control paths. | `<Keyboard>/enter` |
+| `Device Binding Groups` | No | Per-binding control-scheme groups, positionally aligned with `Device Bindings`. An omitted list or an empty entry falls back to the action-level `Binding Groups`. | `Gamepad`, `KeyboardMouse` |
+| `Composite Bindings` | One binding source | Structured composites such as keyboard movement. | `2DVector` |
+| `Long Press Ms` | No | Module-level long-press duration. Zero disables it. | `500` |
+| `Press Threshold` | No | Actuation threshold used by long-press timing. | `0.5` |
+
+Direct and composite bindings may coexist. Each direct path must be unique inside one action.
+
+`Device Binding Groups` is optional and additive. When present it must contain exactly one entry per `Device Bindings` entry; each non-empty entry must reference a declared control-scheme `bindingGroup`. Giving each device its own group makes the scheme's `bindingMask` a second, independent defence: a gamepad binding tagged only `Gamepad` stays masked out under a `KeyboardMouse` scheme even if that player's device whitelist is later widened. Configurations that omit the key keep their previous behaviour unchanged.
+
+#### Choosing `Type`
+
+| Type | Typical controls | Runtime access |
+| --- | --- | --- |
+| `Button` | keyboard key, gamepad button | `GetButtonObservable`, `GetLongPressObservable` |
+| `Float` | trigger, axis | `GetScalarObservable`, synchronous float read |
+| `Vector2` | stick, pointer delta, 2D composite | `GetVector2Observable` |
+
+Choose the value shape consumed by product code. Validation checks that configured controls and action construction can satisfy the declaration.
+
+### Action Binding: Advanced Fields
+
+The Editor places optional metadata under `Advanced Options`.
+
+| Field | When to use | Syntax |
+| --- | --- | --- |
+| `Expected Type` | Require a specific Input System control layout. | `Button`, `Vector2` |
+| `Interactions` | Change actuation timing or phases. | `Tap`, `Hold(duration=0.5)` |
+| `Processors` | Transform values before consumers read them. | `NormalizeVector2`, `Scale(factor=2)` |
+| `Scheme Groups` | Limit a binding to declared scheme groups. | `KeyboardMouse;Gamepad` |
+
+Leave these fields empty when their constraint is not needed. Interactions belong to the action binding. Composite parts can define part-local processors; part-local interactions must remain empty.
+
+### Composite Binding Example
+
+```yaml
+compositeBindings:
+  - name: 2DVector
+    parameters: mode=2
+    bindingGroups: KeyboardMouse
+    parts:
+      - name: up
+        path: "<Keyboard>/w"
+      - name: down
+        path: "<Keyboard>/s"
+      - name: left
+        path: "<Keyboard>/a"
+      - name: right
+        path: "<Keyboard>/d"
+```
+
+Composite part names must match the selected composite. Validation constructs a temporary action graph against the active Input System registry, so unknown composites, parts, processors, interactions, and paths fail before runtime commit.
+
+### Join Actions
+
+Join actions are used only when `StartListeningForPlayers` is active. Root join paths are shared candidates. Slot join paths identify slot-specific candidates. Device-locking mode assigns the triggering device to the joined player. Do not duplicate the same direct path inside one join action.
+
+### Editor Commands and File Ownership
+
+| Command | Writes | Does not write |
+| --- | --- | --- |
+| `Load User` | Nothing | Reads the configured user file into the working copy. |
+| `Load Default` | Nothing | Reads the selected project-default file into the working copy. |
+| `Generate Default` | Project-default file | Does not write the user file or generated code. |
+| `Save User Config` | User file | Does not write project default or generated code. |
+| `Save User + Generate Code` | User file and `InputActions.cs` | Does not write project default. |
+| `Save Project Default` | Project-default file | Does not write user file or generated code. |
+| `Restore User from Default` | User file after loading and validating project default | Does not alter project default. |
+| `Clear` | Nothing | Destroys only the in-memory working copy. |
+
+All writes validate the configuration first. Existing targets use transactional replacement and retain a bounded recovery backup.
+
+### Validation States
+
+| State | Meaning | Available action |
+| --- | --- | --- |
+| `WAITING` | No working configuration is loaded. | Load or generate one. |
+| `EDITABLE` | A working copy exists. | Fields can be changed regardless of validation state. |
+| `VALID` | Structural and runtime validation passed. | Save or generate code. |
+| `REVIEW` | The document is usable with a review note. | Inspect the message before saving. |
+| `INVALID` | A field, identity, budget, or Input System registration failed validation. | Edit the indicated field; persistence remains blocked. |
+
+### Authoring Checklist
+
+- Player IDs are unique.
+- Context names are unique per player.
+- `context/actionMap/action` identities are intentional and stable.
+- Action names do not contain control characters.
+- Each direct binding is unique inside its action.
+- Control scheme names and binding groups match exactly.
+- Every composite and part exists in the installed Input System registry.
+- The Editor reports `VALID` before the file is committed.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Resolution |
+| --- | --- | --- |
+| Editor won't save | Validation reports `INVALID` state | Check the indicated field; resolve identity, budget, or Input System registration issues. |
+| `REVIEW` state | A non-critical issue exists with the configuration | Inspect the review message; saving is still permitted. |
+| Composite validation fails | Part names don't match, unknown composite, or missing Input System registration | Verify part names against the composite type; register custom composites before editor use. |
+| `FileInputConfigurationStore` returns `InvalidKey` | Path contains rooted segments, traversal, or unsafe characters | Use relative logical keys with `/` separator only. |

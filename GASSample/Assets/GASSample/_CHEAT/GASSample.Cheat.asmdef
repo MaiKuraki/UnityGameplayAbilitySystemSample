@@ -6,7 +6,8 @@
         "UnityDebugSheet",
         "UnityDebugSheet.IngameDebugConsole",
         "UnityDebugSheet.Unity",
-        "CycloneGames.Cheat"
+        "CycloneGames.Cheat.Core",
+        "CycloneGames.Cheat.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

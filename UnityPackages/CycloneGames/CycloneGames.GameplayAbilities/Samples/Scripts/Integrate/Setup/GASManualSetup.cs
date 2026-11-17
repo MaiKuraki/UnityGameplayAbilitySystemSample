@@ -1,45 +1,46 @@
-#if CYCLONE_GAMES_ASSET_MANAGEMENT_PRESENT
-
+using CycloneGames.AssetManagement.Runtime;
 using CycloneGames.GameplayAbilities.Core;
 using CycloneGames.GameplayAbilities.Runtime;
+using CycloneGames.GameplayAbilities.Runtime.Integrations.AssetManagement;
 
 namespace CycloneGames.GameplayAbilities.Integrate.Setup
 {
     /// <summary>
-    /// Manual (non-DI) initialization utilities.
-    /// Use this when not using a DI container.
-    /// 
-    /// 
-    /// NOTE: This class just sample for AssetManagement initialize, you must implement your own GAS initialize
+    /// Example manual startup utility for projects that use CycloneGames.AssetManagement without a DI container.
     /// </summary>
     public static class GASManualSetup
     {
         /// <summary>
-        /// Initializes GAS without DI. Call once at game startup.
+        /// Creates an explicitly owned runtime context and cue manager without a DI container.
+        /// Dispose every ASC first, then dispose the returned context and cue manager.
         /// </summary>
-        public static void Initialize(object assetPackage)
+        public static GASRuntimeContext CreateContext(
+            IAssetPackage assetPackage,
+            GameObjectPoolManager.PoolConfig cuePoolConfig,
+            out GameplayCueManager cueManager,
+            GASRuntimeThreadPolicy threadPolicy = GASRuntimeThreadPolicy.Throw,
+            GASRuntimeCacheProfile cacheProfile = null)
         {
-            // Access Instance to create default GameplayCueManager
-            var cueManager = GameplayCueManager.Instance;
-            
-            // Initialize with asset package
-            if (cueManager is GameplayCueManager unityManager)
+            if (assetPackage == null)
             {
-                unityManager.Initialize((CycloneGames.AssetManagement.Runtime.IAssetPackage)assetPackage);
+                throw new System.ArgumentNullException(nameof(assetPackage));
             }
-        }
-        
-        /// <summary>
-        /// Shuts down GAS. Call on application quit.
-        /// </summary>
-        public static void Shutdown()
-        {
-            if (GameplayCueManager.Instance is GameplayCueManager unityManager)
+
+            cueManager = new GameplayCueManager(cuePoolConfig);
+            try
             {
-                unityManager.Shutdown();
+                cueManager.Initialize(new AssetManagementResourceLocator(assetPackage));
+                return new GASRuntimeContext(
+                    cueManager: cueManager,
+                    threadPolicy: threadPolicy,
+                    cacheProfile: cacheProfile);
             }
-            GameplayCueManager.ResetInstance();
+            catch
+            {
+                cueManager.Dispose();
+                cueManager = null;
+                throw;
+            }
         }
     }
 }
-#endif

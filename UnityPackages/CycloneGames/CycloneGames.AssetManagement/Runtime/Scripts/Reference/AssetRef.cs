@@ -5,7 +5,7 @@ namespace CycloneGames.AssetManagement.Runtime
 {
     /// <summary>
     /// A serializable, type-safe reference to an asset managed by the asset management system.
-    /// Stores only a string location and editor GUID — zero heap allocation at runtime (struct).
+    /// Stores only a string location and Editor GUID; the struct itself does not allocate.
     /// <para>
     /// AssetRef is a pure data key. It does NOT hold a loaded handle or trigger loading on its own.
     /// Use <c>package.LoadAsync(assetRef)</c> to load the asset through an <see cref="IAssetPackage"/>.
@@ -19,6 +19,7 @@ namespace CycloneGames.AssetManagement.Runtime
 
         /// <summary>Runtime key used by the asset management system (e.g., asset path or address).</summary>
         public string Location => m_Location;
+        public string Guid => m_GUID;
 
         /// <summary>Whether this reference points to a valid location.</summary>
         public bool IsValid => !string.IsNullOrEmpty(m_Location);
@@ -54,6 +55,7 @@ namespace CycloneGames.AssetManagement.Runtime
 
         /// <summary>Runtime key used by the asset management system.</summary>
         public string Location => m_Location;
+        public string Guid => m_GUID;
 
         /// <summary>Whether this reference points to a valid location.</summary>
         public bool IsValid => !string.IsNullOrEmpty(m_Location);

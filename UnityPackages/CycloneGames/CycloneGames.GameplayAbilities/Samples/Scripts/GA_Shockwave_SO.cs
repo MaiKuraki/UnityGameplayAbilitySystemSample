@@ -1,12 +1,15 @@
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayTags.Core;
-using CycloneGames.Logger;
+using CycloneGames.GameplayTags.Unity.Runtime;
+using CycloneGames.Logging;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Sample
 {
     public class GA_Shockwave : GameplayAbility
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private readonly float radius;
         private readonly GameplayEffect damageEffect;
         private readonly GameplayTagContainer targetRequiredFactions;
@@ -16,8 +19,12 @@ namespace CycloneGames.GameplayAbilities.Sample
         {
             this.radius = radius;
             this.damageEffect = damageEffect;
-            this.targetRequiredFactions = required;
-            this.targetForbiddenFactions = forbidden;
+            this.targetRequiredFactions = required != null
+                ? new GameplayTagContainer(required)
+                : new GameplayTagContainer();
+            this.targetForbiddenFactions = forbidden != null
+                ? new GameplayTagContainer(forbidden)
+                : new GameplayTagContainer();
         }
 
         public override void ActivateAbility(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, GameplayAbilityActivationInfo activationInfo)
@@ -38,7 +45,7 @@ namespace CycloneGames.GameplayAbilities.Sample
             targetTask.OnValidData += OnTargetDataReceived;
             targetTask.OnCancelled += () =>
             {
-                CLogger.LogInfo("Shockwave hit no targets.");
+                Log.Info("Shockwave hit no targets.");
                 EndAbility();
             };
 
@@ -48,18 +55,23 @@ namespace CycloneGames.GameplayAbilities.Sample
         private void OnTargetDataReceived(TargetData data)
         {
             var multiTargetData = data as GameplayAbilityTargetData_MultiTarget;
-            if (multiTargetData == null || multiTargetData.Actors.Count == 0)
+            if (multiTargetData == null || multiTargetData.ActorCount == 0)
             {
                 EndAbility();
                 return;
             }
 
             // The TargetActor has already filtered for valid enemies. We can now commit the ability.
-            CommitAbility(ActorInfo, Spec);
-
-            CLogger.LogInfo($"Shockwave hit {multiTargetData.Actors.Count} targets.");
-            foreach (var targetObject in multiTargetData.Actors)
+            if (!CommitAbility(ActorInfo, Spec).Succeeded)
             {
+                EndAbility();
+                return;
+            }
+
+            Log.Info($"Shockwave hit {multiTargetData.ActorCount} targets.");
+            for (int i = 0; i < multiTargetData.ActorCount; i++)
+            {
+                var targetObject = multiTargetData.GetActor(i);
                 if (damageEffect != null && targetObject.TryGetComponent<AbilitySystemComponentHolder>(out var holder))
                 {
                     var damageSpec = GameplayEffectSpec.Create(damageEffect, AbilitySystemComponent, Spec.Level);
@@ -70,28 +82,22 @@ namespace CycloneGames.GameplayAbilities.Sample
             EndAbility();
         }
 
-        public override GameplayAbility CreatePoolableInstance()
+        public override GameplayAbility CreateRuntimeInstance()
         {
-            var ability = new GA_Shockwave(this.radius, this.damageEffect, this.targetRequiredFactions, this.targetForbiddenFactions);
-
-            ability.Initialize(
-                this.Name,
-                this.InstancingPolicy,
-                this.NetExecutionPolicy,
-                this.CostEffectDefinition,
-                this.CooldownEffectDefinition,
-                this.AbilityTags,
-                this.ActivationBlockedTags,
-                this.ActivationRequiredTags,
-                this.CancelAbilitiesWithTag,
-                this.BlockAbilitiesWithTag
-            );
-
-            return ability;
+            return new GA_Shockwave(radius, damageEffect, targetRequiredFactions, targetForbiddenFactions);
         }
     }
 
-    [CreateAssetMenu(fileName = "GA_Shockwave", menuName = "CycloneGames/GameplayAbilitySystem/Samples/Ability/Shockwave")]
+    /// <summary>
+    /// [INTERMEDIATE] Radial knockback-style AoE that only hits hostile factions.
+    /// Combines area targeting with tag-based faction filtering.
+    ///
+    /// Key Concepts:
+    /// - Faction filtering with GameplayTagContainer
+    /// - Area-of-effect damage application
+    /// - CommitAbility with cost and cooldown
+    /// </summary>
+    [CreateAssetMenu(fileName = "GA_Shockwave", menuName = "CycloneGames/GameplayAbilities/Samples/Ability/Shockwave")]
     public class GA_Shockwave_SO : GameplayAbilitySO
     {
         // NEW: Configurable properties for the shockwave.
@@ -103,28 +109,16 @@ namespace CycloneGames.GameplayAbilities.Sample
 
         [Header("Targeting")]
         [Tooltip("Targets found must have ALL of these faction tags to be affected (e.g., Faction.Enemy).")]
-        public GameplayTagContainer TargetRequiredFactions;
+        public SerializableGameplayTagContainer TargetRequiredFactions;
 
         [Tooltip("Targets found that have ANY of these faction tags will be ignored.")]
-        public GameplayTagContainer TargetForbiddenFactions;
+        public SerializableGameplayTagContainer TargetForbiddenFactions;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
             var effect = DamageEffect ? DamageEffect.GetGameplayEffect() : null;
             var ability = new GA_Shockwave(Radius, effect, TargetRequiredFactions, TargetForbiddenFactions);
-
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
+            InitializeAbility(ability);
             return ability;
         }
     }

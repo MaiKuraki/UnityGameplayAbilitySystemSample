@@ -1,28 +1,142 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Threading;
+
 using UnityEngine;
+
+using Cysharp.Threading.Tasks;
+using CycloneGames.Logging;
 
 namespace CycloneGames.AssetManagement.Runtime.Cache
 {
-    /// <summary>
-    /// Multi-tier asset cache implementing a W-TinyLFU-inspired strategy:
-    /// - Active (ARC): handles with RefCount > 0 are pinned and never evicted.
-    /// - Trial (W-LRU): zero-refcount handles on first idle entry; guards against scan-burst pollution.
-    /// - Main (LFU+LRU): handles promoted after multiple accesses; evicts by recency within frequency tier.
-    /// - Bucket: logical lifetime groups for deterministic mass-eviction (e.g. per-scene).
-    /// - Aging: periodic right-shift of AccessCount prevents stale history from blocking promotion.
-    /// </summary>
-    public sealed class AssetCacheService : IDisposable
+    internal readonly struct AssetCacheKey : IEquatable<AssetCacheKey>
     {
+        public readonly string Location;
+        public readonly Type AssetType;
+        public readonly AssetCacheEntryKind Kind;
+
+        private readonly int _hashCode;
+
+        public AssetCacheKey(string location, Type assetType, AssetCacheEntryKind kind)
+        {
+            Location = location;
+            AssetType = assetType;
+            Kind = kind;
+
+            unchecked
+            {
+                int hash = StringComparer.Ordinal.GetHashCode(location ?? string.Empty);
+                hash = (hash * 397) ^ (assetType?.GetHashCode() ?? 0);
+                _hashCode = (hash * 397) ^ (int)kind;
+            }
+        }
+
+        public bool IsValid => !string.IsNullOrEmpty(Location);
+
+        public bool Equals(AssetCacheKey other)
+        {
+            return Kind == other.Kind &&
+                   ReferenceEquals(AssetType, other.AssetType) &&
+                   string.Equals(Location, other.Location, StringComparison.Ordinal);
+        }
+
+        public override bool Equals(object obj)
+        {
+            return obj is AssetCacheKey other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            return _hashCode;
+        }
+
+        public string ToDiagnosticString()
+        {
+            return string.Concat(
+                ((byte)Kind).ToString(),
+                "|",
+                Location,
+                "|",
+                AssetType?.FullName ?? string.Empty);
+        }
+    }
+
+    internal interface IAssetCacheClock
+    {
+        long Timestamp { get; }
+        TimeSpan GetElapsed(long startTimestamp, long endTimestamp);
+    }
+
+    internal sealed class StopwatchAssetCacheClock : IAssetCacheClock
+    {
+        public static readonly StopwatchAssetCacheClock Instance = new StopwatchAssetCacheClock();
+
+        private StopwatchAssetCacheClock()
+        {
+        }
+
+        public long Timestamp => Stopwatch.GetTimestamp();
+
+        public TimeSpan GetElapsed(long startTimestamp, long endTimestamp)
+        {
+            long delta = endTimestamp - startTimestamp;
+            if (delta <= 0L)
+            {
+                return TimeSpan.Zero;
+            }
+
+            return TimeSpan.FromSeconds(delta / (double)Stopwatch.Frequency);
+        }
+    }
+
+    /// <summary>
+    /// Bounded segmented-LRU asset cache:
+    /// - Active: handles with RefCount > 0 are pinned and never evicted.
+    /// - Probation: zero-refcount handles on first idle entry; guards the protected segment from scan bursts.
+    /// - Protected: handles promoted after reuse; eviction is recency-based.
+    /// - Bucket: logical lifetime groups for deterministic mass-eviction (e.g. per-scene).
+    /// </summary>
+    internal sealed class AssetCacheService : IDisposable
+    {
+        private static readonly LogChannel Log = AssetManagementLog.Channel;
+
+        private const int MAX_METADATA_VALUES_PER_KIND = 8;
+        private const int MAX_IDLE_ENTRIES_PER_SEGMENT = 131_072;
+        private const long MAX_ESTIMATED_ENTRY_BYTES = 1L * 1024 * 1024 * 1024 * 1024;
+
+        private enum EvictionReason : byte
+        {
+            Capacity,
+            MemoryBudget,
+            Retention,
+            Pressure,
+            Explicit
+        }
+
         private sealed class CacheNode
         {
-            public string Location;
+#if UNITY_EDITOR
+            public long DiagnosticId;
+            public string DiagnosticKey;
+            public string DiagnosticAssetType;
+            public string DiagnosticProviderType;
+#endif
+            public AssetCacheKey Key;
             public string Bucket;
             public string Tag;
             public string Owner;
+            public List<string> AdditionalBuckets;
+            public List<string> AdditionalTags;
+            public List<string> AdditionalOwners;
+            public bool MetadataOverflow;
             public IReferenceCounted Handle;
             public int AccessCount;
+            // Approximate runtime footprint in bytes, computed when the node enters the idle pool.
+            public long EstimatedBytes;
+            // Monotonic timestamp captured when the node enters the idle pool (RefCount == 0). 0 while active.
+            public long IdleSinceTimestamp;
 
             public CacheNode Next;
             public CacheNode Prev;
@@ -30,12 +144,23 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
             public bool IsInMainPool;
         }
 
-        private sealed class CacheKeyPoolNode
+        private sealed class HandleReferenceComparer : IEqualityComparer<IReferenceCounted>
         {
-            public (string Location, Type AssetType) Key;
-            public string CacheKey;
-            public CacheKeyPoolNode Prev;
-            public CacheKeyPoolNode Next;
+            public static readonly HandleReferenceComparer Instance = new HandleReferenceComparer();
+
+            private HandleReferenceComparer()
+            {
+            }
+
+            public bool Equals(IReferenceCounted x, IReferenceCounted y)
+            {
+                return ReferenceEquals(x, y);
+            }
+
+            public int GetHashCode(IReferenceCounted obj)
+            {
+                return RuntimeHelpers.GetHashCode(obj);
+            }
         }
 
         private static class NodePool
@@ -46,19 +171,39 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
 
             public static CacheNode Get()
             {
-                lock (_lock) return _pool.Count > 0 ? _pool.Pop() : new CacheNode();
+                CacheNode node;
+                lock (_lock)
+                {
+                    node = _pool.Count > 0 ? _pool.Pop() : new CacheNode();
+                }
+
+#if UNITY_EDITOR
+                node.DiagnosticId = Interlocked.Increment(ref _nextDiagnosticId);
+#endif
+                return node;
             }
 
             public static void Release(CacheNode node)
             {
-                node.Location = null;
+#if UNITY_EDITOR
+                node.DiagnosticKey = null;
+                node.DiagnosticAssetType = null;
+                node.DiagnosticProviderType = null;
+#endif
+                node.Key = default;
                 node.Bucket = null;
                 node.Tag = null;
                 node.Owner = null;
+                node.AdditionalBuckets?.Clear();
+                node.AdditionalTags?.Clear();
+                node.AdditionalOwners?.Clear();
+                node.MetadataOverflow = false;
                 node.Handle = null;
                 node.Next = null;
                 node.Prev = null;
                 node.AccessCount = 0;
+                node.EstimatedBytes = 0;
+                node.IdleSinceTimestamp = 0;
                 node.IsInMainPool = false;
 
                 lock (_lock)
@@ -68,19 +213,28 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
             }
         }
 
-        private readonly IAssetPackage _package;
+        private readonly IAssetCacheClock _clock;
 
-        private readonly int _maxTrialEntries;
-        private readonly int _maxMainEntries;
+        private int _maxTrialEntries;
+        private int _maxMainEntries;
+        private bool _clearIdleOnLowMemory;
 
         // Handles currently held by at least one consumer (RefCount > 0).
-        private readonly Dictionary<string, CacheNode> _activeMap;
+        private readonly Dictionary<AssetCacheKey, CacheNode> _activeMap;
+        // Handles detached from keyed lookup by a provider generation change. They remain caller-owned and
+        // must stay enumerable until their final release or package shutdown.
+        private readonly Dictionary<IReferenceCounted, CacheNode> _generationDetachedMap;
+        // A provider release can fail after a node has been detached from keyed lookup. Keep the node and handle
+        // strongly owned until a later cleanup attempt confirms release; otherwise shutdown could report success
+        // while the provider still owns native resources.
+        private readonly Dictionary<IReferenceCounted, CacheNode> _releaseRetryMap;
         // Handles idle (RefCount == 0), partitioned into trial and main LRU lists.
-        private readonly Dictionary<string, CacheNode> _idleMap;
-        // Reverse index: bucket name → set of CacheNodes in that bucket (idle only).
+        private readonly Dictionary<AssetCacheKey, CacheNode> _idleMap;
+        // Reverse index: bucket name to CacheNodes in that bucket (idle only).
         // Enables O(1) bucket lookup in ClearBucket instead of O(N) linked-list scan.
         private readonly Dictionary<string, HashSet<CacheNode>> _bucketIndex;
         private readonly List<CacheNode> _nodesToClearScratch;
+        private readonly HashSet<CacheNode> _nodesToClearSetScratch;
         private readonly List<string> _matchedBucketsScratch;
 
         private CacheNode _trialHead;
@@ -91,183 +245,307 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
         private CacheNode _mainTail;
         private int _mainCount;
 
-        // Aging: every N release operations, halve all AccessCounts in the main pool to prevent
-        // stale hot-history from blocking newly-popular assets from being promoted.
-        private int _releaseOpCount;
-        private const int AGING_INTERVAL = 512;
+        // Memory-budget eviction: idle (RefCount == 0) handles are evicted not only by entry count
+        // but also when their aggregate estimated footprint exceeds this budget. This prevents a few
+        // large assets (e.g. 4K textures) from silently blowing the memory ceiling on low-end devices.
+        private long _idleBytes;
+        private long _maxIdleBytes;
 
-        private readonly ReaderWriterLockSlim _rwLock = new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion);
+        // Lifetime activity counters. All writes happen while _gate is held. Snapshot reads copy the same coherent
+        // state without enumerating entries or allocating. These are cumulative for the lifetime of this cache.
+        private long _activeHitCount;
+        private long _idleHitCount;
+        private long _cacheMissCount;
+        private long _idleAdmissionCount;
+        private long _failedOperationRejectionCount;
+        private long _metadataOverflowRejectionCount;
+        private long _unknownFootprintRejectionCount;
+        private long _oversizeRejectionCount;
+        private long _footprintEstimationFailureCount;
+        private long _evictionCount;
+        private long _capacityEvictionCount;
+        private long _memoryBudgetEvictionCount;
+        private long _retentionEvictionCount;
+        private long _pressureEvictionCount;
+        private long _explicitEvictionCount;
+        private long _evictedBytesApprox;
+        private long _providerReleaseFailureCount;
+        private int _peakActiveCount;
+        private int _peakIdleCount;
+        private long _peakIdleBytesApprox;
+
+        // All cache mutations and telemetry snapshots run inside _gate. Mutations are main-thread-affine because
+        // eviction releases Unity/provider resources (AssetRuntimeGuard.EnsureMainThread), so the monitor has no
+        // contention on its intended call paths. It does not make provider operations safe on worker threads.
+        private readonly object _gate = new object();
+        // 0 = active, 1 = shutdown requested with cleanup pending, 2 = cleanup completed.
         private int _disposed;
+        private int _evaluatingRetentionRules;
 
         /// <summary>
-        /// Creates a cache service. Pass 0/0 to auto-size based on device memory.
+        /// Creates a cache service. Pass 0 for any sizing argument to auto-size based on device memory and platform.
         /// </summary>
-        public AssetCacheService(IAssetPackage package, int maxTrialEntries = 0, int maxMainEntries = 0)
+        public AssetCacheService(IAssetPackage package, int maxTrialEntries = 0, int maxMainEntries = 0, long maxIdleBytes = 0)
+            : this(package, maxTrialEntries, maxMainEntries, maxIdleBytes, StopwatchAssetCacheClock.Instance)
         {
-            _package = package ?? throw new ArgumentNullException(nameof(package));
+        }
+
+        internal AssetCacheService(IAssetPackage package, int maxTrialEntries, int maxMainEntries, long maxIdleBytes, IAssetCacheClock clock)
+        {
+            if (package == null)
+            {
+                throw new ArgumentNullException(nameof(package));
+            }
+
+            _clock = clock ?? throw new ArgumentNullException(nameof(clock));
+
+            ValidateEntryLimit(maxTrialEntries, nameof(maxTrialEntries));
+            ValidateEntryLimit(maxMainEntries, nameof(maxMainEntries));
+            if (maxIdleBytes < 0L)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxIdleBytes));
+            }
 
             if (maxTrialEntries <= 0 || maxMainEntries <= 0)
             {
-                // Adaptive sizing: scale cache to available device RAM.
-                int ramMB = SystemInfo.systemMemorySize;
-                if (ramMB >= 4096) { maxTrialEntries = 64; maxMainEntries = 512; }
-                else if (ramMB >= 2048) { maxTrialEntries = 32; maxMainEntries = 256; }
-                else { maxTrialEntries = 16; maxMainEntries = 128; }
+                AssetCacheTuning tuning = AssetPlatformDefaults.CacheTuning;
+                if (maxTrialEntries <= 0) maxTrialEntries = tuning.ProbationEntryLimit;
+                if (maxMainEntries <= 0) maxMainEntries = tuning.ProtectedEntryLimit;
             }
 
             _maxTrialEntries = Math.Max(1, maxTrialEntries);
             _maxMainEntries = Math.Max(1, maxMainEntries);
+            _maxIdleBytes = ResolveIdleBudget(maxIdleBytes);
+            _clearIdleOnLowMemory = true;
 
-            _activeMap = new Dictionary<string, CacheNode>(128, StringComparer.Ordinal);
-            _idleMap = new Dictionary<string, CacheNode>(_maxTrialEntries + _maxMainEntries, StringComparer.Ordinal);
+            _activeMap = new Dictionary<AssetCacheKey, CacheNode>(128);
+            _generationDetachedMap = new Dictionary<IReferenceCounted, CacheNode>(
+                16,
+                HandleReferenceComparer.Instance);
+            _releaseRetryMap = new Dictionary<IReferenceCounted, CacheNode>(
+                4,
+                HandleReferenceComparer.Instance);
+            int idleWarmCapacity = (int)Math.Min(
+                1_024L,
+                (long)_maxTrialEntries + _maxMainEntries);
+            _idleMap = new Dictionary<AssetCacheKey, CacheNode>(idleWarmCapacity);
             _bucketIndex = new Dictionary<string, HashSet<CacheNode>>(16, StringComparer.Ordinal);
             _nodesToClearScratch = new List<CacheNode>(16);
+            _nodesToClearSetScratch = new HashSet<CacheNode>();
             _matchedBucketsScratch = new List<string>(8);
 
+            // On memory pressure (iOS/Android), drain the entire idle pool immediately. Active handles
+            // (RefCount > 0) are never touched, so in-use assets remain valid. Editor uses a weak global
+            // subscription so disabled domain reload cannot make diagnostics retain an abandoned service.
 #if UNITY_EDITOR
-            lock (_globalInstancesLock) { GlobalInstances.Add(this); }
+            RegisterEditorInstance(this);
+#else
+            Application.lowMemory += HandleLowMemory;
 #endif
         }
 
         /// <summary>
-        /// Builds a cache key that includes type information to prevent cross-type collisions.
-        /// E.g. LoadAssetAsync<Texture2D>("atlas") and LoadAssetAsync<Sprite>("atlas")
-        /// must map to different cache entries.
-        /// Results are cached so that repeated loads of the same (location, type) pair
-        /// produce zero string allocations after the first call.
-        /// A bounded LRU is used instead of an unbounded dictionary so long-lived sessions
-        /// do not accumulate metadata forever.
+        /// Resolves the effective idle memory budget. A positive value is used verbatim (floored to 1 MB);
+        /// 0 or negative falls back to the automatic, platform-aware default derived from device RAM.
         /// </summary>
-        private static readonly Dictionary<(string, Type), CacheKeyPoolNode> _cacheKeyPool =
-            new Dictionary<(string, Type), CacheKeyPoolNode>(128);
-        private static readonly object _cacheKeyPoolLock = new object();
-        private const int MAX_CACHE_KEY_POOL_SIZE = 4096;
-        private static CacheKeyPoolNode _cacheKeyPoolHead;
-        private static CacheKeyPoolNode _cacheKeyPoolTail;
-        private static int _cacheKeyPoolCount;
-
-        internal static string BuildCacheKey(string location, Type assetType)
+        private static long ResolveIdleBudget(long requested)
         {
-            // For the common single-type case, avoid allocation by returning location directly
-            // when the caller passes null (e.g. RawFile which has no type ambiguity).
-            if (assetType == null) return location;
-
-            var key = (location, assetType);
-            lock (_cacheKeyPoolLock)
+            long bytes = requested;
+            if (bytes <= 0)
             {
-                if (_cacheKeyPool.TryGetValue(key, out var node))
-                {
-                    MoveCacheKeyNodeToHead(node);
-                    return node.CacheKey;
-                }
+                bytes = AssetPlatformDefaults.CacheTuning.IdleByteBudget;
+            }
+            return Math.Max(1L * 1024 * 1024, bytes);
+        }
+
+        private static void ValidateEntryLimit(int value, string parameterName)
+        {
+            if (value < 0 || value > MAX_IDLE_ENTRIES_PER_SEGMENT)
+            {
+                throw new ArgumentOutOfRangeException(parameterName);
+            }
+        }
+
+        /// <summary>
+        /// Overrides the idle (RefCount == 0) memory budget at runtime. Pass a positive byte value to set an
+        /// explicit budget, or 0 to restore the automatic platform-aware default. Immediately runs an
+        /// eviction pass so the idle pool is brought back under the new budget. Main-thread only.
+        /// </summary>
+        public void SetIdleMemoryBudget(long maxIdleBytes)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
+            if (maxIdleBytes < 0L)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxIdleBytes));
             }
 
-            var result = string.Concat(location, "|", assetType.FullName);
-            lock (_cacheKeyPoolLock)
+            if (Volatile.Read(ref _disposed) != 0) return;
+            List<Exception> failures = null;
+            lock (_gate)
             {
-                if (_cacheKeyPool.TryGetValue(key, out var existingNode))
-                {
-                    MoveCacheKeyNodeToHead(existingNode);
-                    return existingNode.CacheKey;
-                }
-
-                var node = new CacheKeyPoolNode
-                {
-                    Key = key,
-                    CacheKey = result
-                };
-
-                AddCacheKeyNodeToHead(node);
-                _cacheKeyPool[key] = node;
-                _cacheKeyPoolCount++;
-
-                if (_cacheKeyPoolCount > MAX_CACHE_KEY_POOL_SIZE)
-                {
-                    EvictOldestCacheKeyNode();
-                }
+                if (Volatile.Read(ref _disposed) != 0) return;
+                RetryPendingReleasesBestEffort(ref failures);
+                _maxIdleBytes = ResolveIdleBudget(maxIdleBytes);
+                EvictIfNeeded(ref failures);
             }
-            return result;
+
+            ThrowReleaseFailures(
+                failures,
+                "One or more idle provider handles failed to release while applying the cache memory budget.");
         }
 
-        private static void AddCacheKeyNodeToHead(CacheKeyPoolNode node)
+        internal void Configure(AssetCacheTuning tuning)
         {
-            node.Prev = null;
-            node.Next = _cacheKeyPoolHead;
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
+            if (Volatile.Read(ref _disposed) != 0) return;
 
-            if (_cacheKeyPoolHead != null) _cacheKeyPoolHead.Prev = node;
-            _cacheKeyPoolHead = node;
+            tuning = tuning.Normalized();
+            List<Exception> failures = null;
+            lock (_gate)
+            {
+                if (Volatile.Read(ref _disposed) != 0) return;
+                RetryPendingReleasesBestEffort(ref failures);
+                _maxTrialEntries = tuning.ProbationEntryLimit;
+                _maxMainEntries = tuning.ProtectedEntryLimit;
+                _maxIdleBytes = tuning.IdleByteBudget;
+                _clearIdleOnLowMemory = tuning.ClearIdleOnLowMemory;
+                EvictIfNeeded(ref failures);
+            }
 
-            if (_cacheKeyPoolTail == null) _cacheKeyPoolTail = node;
+            ThrowReleaseFailures(
+                failures,
+                "One or more idle provider handles failed to release while applying cache tuning.");
         }
 
-        private static void MoveCacheKeyNodeToHead(CacheKeyPoolNode node)
+        private void HandleLowMemory()
         {
-            if (ReferenceEquals(node, _cacheKeyPoolHead)) return;
-
-            RemoveCacheKeyNode(node);
-            AddCacheKeyNodeToHead(node);
+            if (Volatile.Read(ref _disposed) != 0 || !_clearIdleOnLowMemory) return;
+            ThrowIfEvaluatingRetentionRules();
+            try
+            {
+                ClearAll();
+            }
+            catch (Exception ex) when (AssetRuntimeGuard.IsRecoverableException(ex))
+            {
+                // Unity invokes low-memory subscribers as a multicast event. A provider release failure must not
+                // prevent other packages or systems from receiving the same pressure notification.
+                Log.Error(
+                    ex,
+                    "[AssetCacheService] A low-memory release callback failed.");
+            }
         }
 
-        private static void RemoveCacheKeyNode(CacheKeyPoolNode node)
+        /// <summary>
+        /// Builds an allocation-free value key that includes operation kind and asset type.
+        /// </summary>
+        internal static AssetCacheKey BuildCacheKey(string location, Type assetType)
         {
-            if (node.Prev != null) node.Prev.Next = node.Next;
-            else _cacheKeyPoolHead = node.Next;
-
-            if (node.Next != null) node.Next.Prev = node.Prev;
-            else _cacheKeyPoolTail = node.Prev;
-
-            node.Prev = null;
-            node.Next = null;
+            return BuildCacheKey(
+                location,
+                assetType,
+                assetType == null ? AssetCacheEntryKind.RawFile : AssetCacheEntryKind.Asset);
         }
 
-        private static void EvictOldestCacheKeyNode()
+        internal static AssetCacheKey BuildCacheKey(
+            string location,
+            Type assetType,
+            AssetCacheEntryKind operationKind)
         {
-            var victim = _cacheKeyPoolTail;
-            if (victim == null) return;
-
-            RemoveCacheKeyNode(victim);
-            _cacheKeyPool.Remove(victim.Key);
-            _cacheKeyPoolCount--;
+            return new AssetCacheKey(location, assetType, operationKind);
         }
 
         /// <summary>
         /// Registers a freshly-loaded handle (RefCount == 1) into the active map.
         /// The cacheKey must be built via <see cref="BuildCacheKey"/> by the caller.
         /// </summary>
-        internal void RegisterNew(string cacheKey, string bucket, string tag, string owner, IReferenceCounted handle)
+        internal IReferenceCounted RegisterNew(
+            AssetCacheKey cacheKey,
+            string bucket,
+            string tag,
+            string owner,
+            IReferenceCounted handle)
         {
-            if (Volatile.Read(ref _disposed) != 0 || string.IsNullOrEmpty(cacheKey)) return;
-
-            _rwLock.EnterWriteLock();
-            try
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
+            if (handle == null) throw new ArgumentNullException(nameof(handle));
+            if (!cacheKey.IsValid) throw new ArgumentException("Cache key is invalid.", nameof(cacheKey));
+            if (handle is IOperation operation)
             {
-                if (_idleMap.Remove(cacheKey, out var oldIdle))
+                // Custom providers may expose a faulted memoized task directly instead of using the built-in
+                // broadcast helper. Observe it once at the ownership boundary so an abandoned lease cannot report
+                // the same provider failure later from a completion-source finalizer.
+                AssetOperationBroadcast.Observe(operation.Task);
+            }
+
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                List<Exception> shutdownFailures = null;
+                lock (_gate)
                 {
-                    RemoveFromLru(oldIdle);
-                    RemoveFromBucketIndex(oldIdle);
-                    ForceDisposeHandle(oldIdle.Handle);
-                    NodePool.Release(oldIdle);
+                    DisposeUntrackedHandleBestEffort(handle, ref shutdownFailures);
                 }
 
-                if (_activeMap.Remove(cacheKey, out var oldActive))
+                ThrowReleaseFailures(
+                    shutdownFailures,
+                    "The newly loaded provider handle failed to release after cache shutdown.");
+                throw new ObjectDisposedException(nameof(AssetCacheService));
+            }
+
+            lock (_gate)
+            {
+                if (_activeMap.TryGetValue(cacheKey, out CacheNode activeNode))
                 {
-                    ForceDisposeHandle(oldActive.Handle);
-                    NodePool.Release(oldActive);
+                    if (!ReferenceEquals(activeNode.Handle, handle))
+                    {
+                        List<Exception> duplicateFailures = null;
+                        DisposeUntrackedHandleBestEffort(handle, ref duplicateFailures);
+                        ThrowReleaseFailures(
+                            duplicateFailures,
+                            "A duplicate provider handle failed to release while reusing an active cache entry.");
+                    }
+
+                    activeNode.Handle.Retain();
+                    IncrementAccessCount(activeNode);
+                    AddMetadata(activeNode, bucket, tag, owner);
+                    return activeNode.Handle;
+                }
+
+                if (_idleMap.Remove(cacheKey, out CacheNode idleNode))
+                {
+                    if (!ReferenceEquals(idleNode.Handle, handle))
+                    {
+                        List<Exception> duplicateFailures = null;
+                        DisposeUntrackedHandleBestEffort(handle, ref duplicateFailures);
+                        ThrowReleaseFailures(
+                            duplicateFailures,
+                            "A duplicate provider handle failed to release while reviving an idle cache entry.");
+                    }
+
+                    RemoveFromLru(idleNode);
+                    RemoveFromBucketIndex(idleNode);
+                    idleNode.Handle.Retain();
+                    MarkTrackedHandleActive(idleNode.Handle);
+                    IncrementAccessCount(idleNode);
+                    AddMetadata(idleNode, bucket, tag, owner);
+                    _activeMap[cacheKey] = idleNode;
+                    UpdatePeaks();
+                    return idleNode.Handle;
                 }
 
                 var node = NodePool.Get();
-                node.Location = cacheKey;
+                node.Key = cacheKey;
                 node.Bucket = bucket;
                 node.Tag = tag;
                 node.Owner = owner;
                 node.Handle = handle;
                 node.AccessCount = 1;
+                AddMetadata(node, bucket, tag, owner);
 
                 _activeMap[cacheKey] = node;
-            }
-            finally
-            {
-                _rwLock.ExitWriteLock();
+                UpdatePeaks();
+                return handle;
             }
         }
 
@@ -275,115 +553,253 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
         /// Returns an existing handle, auto-retaining it. Returns null on cache miss.
         /// The cacheKey must be built via <see cref="BuildCacheKey"/> by the caller.
         /// </summary>
-        internal IReferenceCounted Get(string cacheKey, string bucket, string tag, string owner)
+        internal IReferenceCounted Get(AssetCacheKey cacheKey, string bucket, string tag, string owner)
         {
-            if (Volatile.Read(ref _disposed) != 0 || string.IsNullOrEmpty(cacheKey)) return null;
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
+            if (Volatile.Read(ref _disposed) != 0 || !cacheKey.IsValid) return null;
 
-            _rwLock.EnterUpgradeableReadLock();
-            try
+            lock (_gate)
             {
                 if (_activeMap.TryGetValue(cacheKey, out var activeNode))
                 {
+                    _activeHitCount++;
                     activeNode.Handle.Retain();
-                    activeNode.AccessCount++;
-                    if (!string.IsNullOrEmpty(tag)) activeNode.Tag = tag;
-                    if (!string.IsNullOrEmpty(owner)) activeNode.Owner = owner;
+                    IncrementAccessCount(activeNode);
+                    AddMetadata(activeNode, bucket, tag, owner);
                     return activeNode.Handle;
                 }
 
-                if (_idleMap.TryGetValue(cacheKey, out _))
+                if (_idleMap.TryGetValue(cacheKey, out var idleNode))
                 {
-                    _rwLock.EnterWriteLock();
-                    try
-                    {
-                        if (_idleMap.TryGetValue(cacheKey, out var idleNode))
-                        {
-                            _idleMap.Remove(cacheKey);
-                            RemoveFromLru(idleNode);
-                            RemoveFromBucketIndex(idleNode);
+                    _idleHitCount++;
+                    _idleMap.Remove(cacheKey);
+                    RemoveFromLru(idleNode);
+                    RemoveFromBucketIndex(idleNode);
 
-                            idleNode.AccessCount++;
-                            idleNode.Handle.Retain();
+                    IncrementAccessCount(idleNode);
+                    idleNode.Handle.Retain();
+                    MarkTrackedHandleActive(idleNode.Handle);
+                    AddMetadata(idleNode, bucket, tag, owner);
 
-                            if (!string.IsNullOrEmpty(bucket)) idleNode.Bucket = bucket;
-                            if (!string.IsNullOrEmpty(tag)) idleNode.Tag = tag;
-                            if (!string.IsNullOrEmpty(owner)) idleNode.Owner = owner;
-
-                            _activeMap[cacheKey] = idleNode;
-                            return idleNode.Handle;
-                        }
-                    }
-                    finally
-                    {
-                        _rwLock.ExitWriteLock();
-                    }
+                    _activeMap[cacheKey] = idleNode;
+                    UpdatePeaks();
+                    return idleNode.Handle;
                 }
 
+                _cacheMissCount++;
                 return null;
             }
-            finally
+        }
+
+        /// <summary>
+        /// Returns true if a handle for the given cache key is currently retained (active) or pooled (idle).
+        /// Does not load anything and does not affect LRU ordering or reference counts.
+        /// </summary>
+        internal bool Contains(AssetCacheKey cacheKey)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            if (Volatile.Read(ref _disposed) != 0 || !cacheKey.IsValid) return false;
+            lock (_gate)
             {
-                _rwLock.ExitUpgradeableReadLock();
+                return _activeMap.ContainsKey(cacheKey) || _idleMap.ContainsKey(cacheKey);
+            }
+        }
+
+        /// <summary>
+        /// Invalidates every key mapping after a provider catalog or manifest commit. Idle handles are disposed
+        /// immediately. Active handles remain valid for their current owners, but are detached from lookup so a
+        /// subsequent load resolves against the committed provider generation; their final release disposes them.
+        /// </summary>
+        internal void AdvanceGeneration()
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                throw new ObjectDisposedException(nameof(AssetCacheService));
+            }
+
+            List<Exception> failures = null;
+            lock (_gate)
+            {
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    throw new ObjectDisposedException(nameof(AssetCacheService));
+                }
+
+                RetryPendingReleasesBestEffort(ref failures);
+                ClearIdleInternalBestEffort(EvictionReason.Explicit, ref failures);
+                foreach (KeyValuePair<AssetCacheKey, CacheNode> pair in _activeMap)
+                {
+                    // The caller still owns the handle. Detach it from keyed lookup so the next load resolves
+                    // against the new provider generation, while retaining enumerable shutdown ownership.
+                    _generationDetachedMap[pair.Value.Handle] = pair.Value;
+                }
+
+                _activeMap.Clear();
+            }
+
+            if (failures != null)
+            {
+                throw new AggregateException(
+                    "One or more idle provider handles failed to release while advancing the cache generation.",
+                    failures);
             }
         }
 
         /// <summary>
         /// Called via the keyed release callback when a handle's RefCount reaches zero.
-        /// O(1): the key is passed directly by the handle, eliminating the previous O(N) scan.
+        /// O(1): the handle passes its key directly, so the cache does not scan its entries.
         /// </summary>
-        internal void OnHandleReleased(string cacheKey, IReferenceCounted handle)
+        internal void OnHandleReleased(AssetCacheKey cacheKey, IReferenceCounted handle)
         {
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
             if (Volatile.Read(ref _disposed) != 0)
             {
-                ForceDisposeHandle(handle);
+                List<Exception> shutdownFailures = null;
+                lock (_gate)
+                {
+                    DisposeUntrackedHandleBestEffort(handle, ref shutdownFailures);
+                }
+
+                ThrowReleaseFailures(
+                    shutdownFailures,
+                    "A provider handle failed to release after cache shutdown.");
                 return;
             }
 
-            // Handles that are not registered in the cache (e.g. Scene, Instantiate) pass null as
-            // cacheKey. They must be disposed directly — no map lookup needed.
-            if (string.IsNullOrEmpty(cacheKey))
+            // Handles that are not registered in the cache (e.g. Scene, Instantiate) pass an invalid
+            // cacheKey. They must be disposed directly; no map lookup is needed.
+            if (!cacheKey.IsValid)
             {
-                ForceDisposeHandle(handle);
+                List<Exception> untrackedFailures = null;
+                lock (_gate)
+                {
+                    DisposeUntrackedHandleBestEffort(handle, ref untrackedFailures);
+                }
+
+                ThrowReleaseFailures(
+                    untrackedFailures,
+                    "An untracked provider handle failed to release.");
                 return;
             }
 
-            _rwLock.EnterWriteLock();
-            try
+            List<Exception> failures = null;
+            lock (_gate)
             {
                 if (!_activeMap.TryGetValue(cacheKey, out var node) || node.Handle != handle)
                 {
-                    ForceDisposeHandle(handle);
-                    return;
+                    if (!_generationDetachedMap.TryGetValue(handle, out node))
+                    {
+                        DisposeUntrackedHandleBestEffort(handle, ref failures);
+                        ThrowReleaseFailures(
+                            failures,
+                            "A provider handle that was no longer indexed by the cache failed to release.");
+                        return;
+                    }
+
+                    // A detached handle is never admitted back into the keyed cache. Its last caller release
+                    // retires it directly, while a concurrent revival keeps the detached ownership record alive.
+                    if (handle.RefCount != 0)
+                    {
+                        return;
+                    }
+
+                    _generationDetachedMap.Remove(handle);
+                    DisposeNodeBestEffort(node, ref failures);
+                    node = null;
                 }
 
-                _activeMap.Remove(cacheKey);
-                _idleMap[cacheKey] = node;
-                AddToBucketIndex(node);
-
-                // Promotion: multiple-access or previously-promoted → main pool; first-time idle → trial pool.
-                if (node.AccessCount > 1 || node.IsInMainPool)
+                if (node != null)
                 {
-                    node.IsInMainPool = true;
-                    AddToMainHead(node);
-                }
-                else
-                {
-                    node.IsInMainPool = false;
-                    AddToTrialHead(node);
-                }
+                    // Revival guard: the refcount drop to zero happens before this lock is taken, so another
+                    // caller may have re-acquired (Retained) the same key in between. If so the handle is live
+                    // again and must stay in the active map. Never sink a still-referenced handle into the idle
+                    // pool, where it could be evicted and disposed out from under its owner.
+                    if (handle.RefCount != 0)
+                    {
+                        return;
+                    }
 
-                MaybeAge();
-                EvictIfNeeded();
+                    // Only a successfully completed provider operation has a stable value that can enter the idle cache.
+                    // Pending, faulted, and canceled operations are disposed even when diagnostic Error text is empty.
+                    if (handle is IOperation operation &&
+                        operation.Task.Status != UniTaskStatus.Succeeded)
+                    {
+                        _failedOperationRejectionCount++;
+                        _activeMap.Remove(cacheKey);
+                        DisposeNodeBestEffort(node, ref failures);
+                    }
+                    else if (node.MetadataOverflow)
+                    {
+                        _metadataOverflowRejectionCount++;
+                        _activeMap.Remove(cacheKey);
+                        DisposeNodeBestEffort(node, ref failures);
+                    }
+                    else
+                    {
+                        _activeMap.Remove(cacheKey);
+                        bool hasKnownFootprint = false;
+                        try
+                        {
+                            hasKnownFootprint = TryEstimateHandleBytes(handle, out node.EstimatedBytes);
+                        }
+                        catch (Exception ex) when (AssetRuntimeGuard.IsRecoverableException(ex))
+                        {
+                            _footprintEstimationFailureCount++;
+                            AddReleaseFailure(ref failures, ex);
+                            node.EstimatedBytes = 0L;
+                        }
+
+                        if (!hasKnownFootprint)
+                        {
+                            // Unknown footprints cannot be governed by the byte budget. A single entry larger than the
+                            // complete idle budget also cannot become resident; reject it before admission so it cannot
+                            // churn an existing hot set while the eviction pass eventually removes the candidate itself.
+                            _unknownFootprintRejectionCount++;
+                            DisposeNodeBestEffort(node, ref failures);
+                        }
+                        else if (node.EstimatedBytes > _maxIdleBytes)
+                        {
+                            _oversizeRejectionCount++;
+                            DisposeNodeBestEffort(node, ref failures);
+                        }
+                        else
+                        {
+                            _idleMap[cacheKey] = node;
+                            node.IdleSinceTimestamp = _clock.Timestamp;
+                            AddToBucketIndex(node);
+
+                            // Reused entries enter the protected segment; first-use idle entries enter probation.
+                            if (node.AccessCount > 1 || node.IsInMainPool)
+                            {
+                                node.IsInMainPool = true;
+                                AddToMainHead(node);
+                            }
+                            else
+                            {
+                                node.IsInMainPool = false;
+                                AddToTrialHead(node);
+                            }
+
+                            _idleAdmissionCount++;
+                            UpdatePeaks();
+                            EvictIfNeeded(ref failures);
+                        }
+                    }
+                }
             }
-            finally
-            {
-                _rwLock.ExitWriteLock();
-            }
+
+            ThrowReleaseFailures(
+                failures,
+                "One or more failures occurred while returning an asset to the cache.");
         }
 
         /// <summary>
         /// Disposes a handle that is not (or no longer) tracked by the cache.
-        /// All handles must implement IInternalCacheable — reflection is intentionally not used.
+        /// All handles must implement IInternalCacheable. The cache performs no reflection.
         /// </summary>
         private static void ForceDisposeHandle(IReferenceCounted handle)
         {
@@ -393,79 +809,466 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
                 handle.Dispose();
         }
 
+        private void DisposeUntrackedHandleBestEffort(
+            IReferenceCounted handle,
+            ref List<Exception> failures)
+        {
+            if (_releaseRetryMap.TryGetValue(handle, out CacheNode retainedNode))
+            {
+                DetachNodeFromCacheIndexes(retainedNode);
+                DisposeNodeBestEffort(retainedNode, ref failures);
+                return;
+            }
+
+            CacheNode node = NodePool.Get();
+            node.Handle = handle;
+            DisposeNodeBestEffort(node, ref failures);
+        }
+
         public void ClearBucket(string bucket)
         {
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
             if (Volatile.Read(ref _disposed) != 0 || string.IsNullOrEmpty(bucket)) return;
 
-            _rwLock.EnterWriteLock();
-            try
+            List<Exception> failures = null;
+            lock (_gate)
             {
-                ClearBucketsInternal(bucket, includeChildren: false);
+                RetryPendingReleasesBestEffort(ref failures);
+                ClearBucketsInternal(bucket, false, ref failures);
             }
-            finally
-            {
-                _rwLock.ExitWriteLock();
-            }
+
+            ThrowReleaseFailures(
+                failures,
+                "One or more idle provider handles failed to release while clearing the cache bucket.");
         }
 
         public void ClearBucketsByPrefix(string bucketPrefix)
         {
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
             if (Volatile.Read(ref _disposed) != 0 || string.IsNullOrEmpty(bucketPrefix)) return;
 
-            _rwLock.EnterWriteLock();
-            try
+            List<Exception> failures = null;
+            lock (_gate)
             {
-                ClearBucketsInternal(bucketPrefix, includeChildren: true);
+                RetryPendingReleasesBestEffort(ref failures);
+                ClearBucketsInternal(bucketPrefix, true, ref failures);
             }
-            finally
-            {
-                _rwLock.ExitWriteLock();
-            }
+
+            ThrowReleaseFailures(
+                failures,
+                "One or more idle provider handles failed to release while clearing the cache bucket hierarchy.");
         }
 
         public void ClearAll()
         {
-            _rwLock.EnterWriteLock();
-            try
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
+            List<Exception> failures = null;
+            lock (_gate)
             {
-                DrainList(_trialHead);
-                DrainList(_mainHead);
-
-                _idleMap.Clear();
-                _bucketIndex.Clear();
-
-                _trialHead = null;
-                _trialTail = null;
-                _trialCount = 0;
-
-                _mainHead = null;
-                _mainTail = null;
-                _mainCount = 0;
+                RetryPendingReleasesBestEffort(ref failures);
+                ClearIdleInternalBestEffort(EvictionReason.Explicit, ref failures);
             }
-            finally
+
+            if (failures != null)
             {
-                _rwLock.ExitWriteLock();
+                throw new AggregateException(
+                    "One or more idle provider handles failed to release while clearing the cache.",
+                    failures);
             }
         }
 
-        // Static to avoid delegate allocation on every ClearAll call.
-        private static void DrainList(CacheNode head)
+        /// <summary>
+        /// Evicts idle (RefCount == 0) handles matched by <paramref name="policy"/> and disposes them.
+        /// Active (RefCount &gt; 0) handles are never touched. Returns the number of handles evicted.
+        /// The cache carries no timer and no frame driver; callers own the scheduling policy.
+        /// Main-thread only.
+        /// </summary>
+        public int TrimIdle(AssetCacheRetentionPolicy policy)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
+            if (Volatile.Read(ref _disposed) != 0) return 0;
+
+            List<Exception> failures = null;
+            int evicted;
+            lock (_gate)
+            {
+                if (Volatile.Read(ref _disposed) != 0) return 0;
+                RetryPendingReleasesBestEffort(ref failures);
+                if (_trialHead == null && _mainHead == null)
+                {
+                    evicted = 0;
+                }
+                else
+                {
+                    long nowTimestamp = _clock.Timestamp;
+
+                    _nodesToClearScratch.Clear();
+                    _evaluatingRetentionRules = 1;
+                    try
+                    {
+                        CollectMatching(_trialHead, nowTimestamp, policy, _nodesToClearScratch);
+                        CollectMatching(_mainHead, nowTimestamp, policy, _nodesToClearScratch);
+                    }
+                    finally
+                    {
+                        _evaluatingRetentionRules = 0;
+                    }
+
+                    evicted = _nodesToClearScratch.Count;
+                    for (int i = 0; i < evicted; i++)
+                    {
+                        EvictNodeBestEffort(_nodesToClearScratch[i], EvictionReason.Retention, ref failures);
+                    }
+
+                    _nodesToClearScratch.Clear();
+                }
+            }
+
+            ThrowReleaseFailures(
+                failures,
+                "One or more idle provider handles failed to release while trimming the cache.");
+            return evicted;
+        }
+
+        /// <summary>
+        /// Removes at most <paramref name="maxWork"/> idle handles from owner cache storage.
+        /// Active handles are never inspected or released. Main-thread only.
+        /// </summary>
+        public AssetCacheTrimResult TrimIdleStep(int maxWork)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
+            if (maxWork <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxWork));
+            }
+
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return default;
+            }
+
+            List<Exception> failures = null;
+            AssetCacheTrimResult result;
+            lock (_gate)
+            {
+                RetryPendingReleasesBestEffort(ref failures);
+                long beforeBytes = _idleBytes;
+                int processed = 0;
+                while (processed < maxWork && (_trialTail != null || _mainTail != null))
+                {
+                    EvictNodeBestEffort(
+                        _trialTail ?? _mainTail,
+                        EvictionReason.Pressure,
+                        ref failures);
+                    processed++;
+                }
+
+                long releasedBytes = beforeBytes - _idleBytes;
+                if (releasedBytes < 0L)
+                {
+                    releasedBytes = 0L;
+                }
+
+                result = new AssetCacheTrimResult(
+                    processed,
+                    processed,
+                    releasedBytes,
+                    _trialCount + _mainCount);
+            }
+
+            ThrowReleaseFailures(
+                failures,
+                "One or more idle provider handles failed to release during bounded cache maintenance.");
+            return result;
+        }
+
+        private void ThrowIfEvaluatingRetentionRules()
+        {
+            if (_evaluatingRetentionRules != 0)
+            {
+                throw new InvalidOperationException(
+                    "Cache mutation is not allowed from an asset retention rule callback.");
+            }
+        }
+
+        /// <summary>
+        /// Retries at most <paramref name="maxWork"/> parked provider-release failures and returns the number of
+        /// release failures still parked after this pass. Best effort: recoverable provider failures are
+        /// counted by release-failure telemetry and stay parked for a later pass instead of throwing, so a periodic
+        /// maintenance driver can drain the queue without owning exception policy. Fatal exceptions
+        /// (out-of-memory, access violation) still propagate. Main-thread only.
+        /// </summary>
+        public int RetryPendingReleaseFailures(int maxWork)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            ThrowIfEvaluatingRetentionRules();
+            if (maxWork <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxWork));
+            }
+
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return 0;
+            }
+
+            List<Exception> failures = null;
+            int remaining;
+            lock (_gate)
+            {
+                int pending = _releaseRetryMap.Count;
+                if (pending == 0)
+                {
+                    return 0;
+                }
+
+                int work = pending < maxWork ? pending : maxWork;
+                // Enumerate without mutation, then dispose outside the enumeration. DisposeNodeBestEffort may
+                // re-park a failing node, so a key snapshot taken here stays valid for this pass.
+                _nodesToClearScratch.Clear();
+                foreach (KeyValuePair<IReferenceCounted, CacheNode> pair in _releaseRetryMap)
+                {
+                    _nodesToClearScratch.Add(pair.Value);
+                    if (_nodesToClearScratch.Count >= work)
+                    {
+                        break;
+                    }
+                }
+
+                for (int i = 0; i < _nodesToClearScratch.Count; i++)
+                {
+                    CacheNode node = _nodesToClearScratch[i];
+                    // A fatal release can interrupt a caller before its normal post-pass clears the source index.
+                    // Detach explicitly before retry so a successful retry can safely return the node to the pool.
+                    DetachNodeFromCacheIndexes(node);
+                    DisposeNodeBestEffort(node, ref failures);
+                }
+
+                _nodesToClearScratch.Clear();
+
+                remaining = _releaseRetryMap.Count;
+            }
+
+            // Recoverable failures do not surface here: each failure was already counted by
+            // release-failure telemetry, and the returned pending count tells drivers whether to schedule
+            // another pass. Throwing would turn background maintenance into an error pump.
+            return remaining;
+        }
+
+        // Eviction must not happen while iterating the list (EvictNode rewires links), so matching nodes are
+        // collected first, then evicted by the caller.
+        private void CollectMatching(CacheNode head, long nowTimestamp, AssetCacheRetentionPolicy policy, List<CacheNode> outList)
         {
             var current = head;
             while (current != null)
             {
-                var next = current.Next;
-                ForceDisposeHandle(current.Handle);
-                NodePool.Release(current);
-                current = next;
+                var entry = new AssetCacheEntryInfo(
+                    current.Key,
+                    current.Bucket,
+                    current.Tag,
+                    current.Owner,
+                    current.AdditionalBuckets,
+                    current.AdditionalTags,
+                    current.AdditionalOwners,
+                    current.AccessCount,
+                    current.EstimatedBytes,
+                    _clock.GetElapsed(current.IdleSinceTimestamp, nowTimestamp),
+                    current.IsInMainPool ? AssetCacheIdleTier.Protected : AssetCacheIdleTier.Probation);
+
+                if (policy.ShouldEvict(in entry))
+                {
+                    outList.Add(current);
+                }
+
+                current = current.Next;
             }
         }
 
-        private void ClearBucketsInternal(string bucketOrPrefix, bool includeChildren)
+        private void ClearIdleInternalBestEffort(EvictionReason reason, ref List<Exception> failures)
+        {
+            CacheNode current = _trialHead;
+            while (current != null)
+            {
+                CacheNode next = current.Next;
+                RecordEviction(current, reason);
+                DisposeNodeBestEffort(current, ref failures);
+                current = next;
+            }
+
+            current = _mainHead;
+            while (current != null)
+            {
+                CacheNode next = current.Next;
+                RecordEviction(current, reason);
+                DisposeNodeBestEffort(current, ref failures);
+                current = next;
+            }
+
+            _idleMap.Clear();
+            _bucketIndex.Clear();
+
+            _trialHead = null;
+            _trialTail = null;
+            _trialCount = 0;
+
+            _mainHead = null;
+            _mainTail = null;
+            _mainCount = 0;
+
+            _idleBytes = 0;
+        }
+
+        private void ClearAllInternalBestEffort(out List<Exception> failures)
+        {
+            failures = null;
+            RetryPendingReleasesBestEffort(ref failures);
+
+            foreach (KeyValuePair<AssetCacheKey, CacheNode> pair in _activeMap)
+            {
+                DisposeNodeBestEffort(pair.Value, ref failures);
+            }
+
+            _activeMap.Clear();
+            foreach (KeyValuePair<IReferenceCounted, CacheNode> pair in _generationDetachedMap)
+            {
+                DisposeNodeBestEffort(pair.Value, ref failures);
+            }
+
+            _generationDetachedMap.Clear();
+            ClearIdleInternalBestEffort(EvictionReason.Explicit, ref failures);
+        }
+
+        private void DisposeNodeBestEffort(CacheNode node, ref List<Exception> failures)
+        {
+            try
+            {
+                ForceDisposeHandle(node.Handle);
+            }
+            catch (Exception ex)
+            {
+                // Keep a strong ownership record before classifying or rethrowing the provider failure. Otherwise
+                // a fatal exception (for example OutOfMemoryException) could escape after the node was detached
+                // from its active/idle index, making a later deterministic cleanup retry impossible.
+                RetainNodeForReleaseRetry(node);
+                _providerReleaseFailureCount++;
+                if (!AssetRuntimeGuard.IsRecoverableException(ex))
+                {
+                    throw;
+                }
+
+                AddReleaseFailure(ref failures, ex);
+                return;
+            }
+
+            IReferenceCounted releasedHandle = node.Handle;
+            if (releasedHandle != null)
+            {
+                _releaseRetryMap.Remove(releasedHandle);
+            }
+
+            NodePool.Release(node);
+        }
+
+        private void RetainNodeForReleaseRetry(CacheNode node)
+        {
+            IReferenceCounted handle = node.Handle;
+            if (handle == null)
+            {
+                throw new InvalidOperationException(
+                    "A provider release retry cannot retain a cache node without a handle.");
+            }
+
+            if (_releaseRetryMap.TryGetValue(handle, out CacheNode retainedNode))
+            {
+                if (!ReferenceEquals(retainedNode, node))
+                {
+                    NodePool.Release(node);
+                }
+
+                return;
+            }
+
+            _releaseRetryMap.Add(handle, node);
+        }
+
+        private void RetryPendingReleasesBestEffort(ref List<Exception> failures)
+        {
+            if (_releaseRetryMap.Count == 0)
+            {
+                return;
+            }
+
+            _nodesToClearScratch.Clear();
+            foreach (KeyValuePair<IReferenceCounted, CacheNode> pair in _releaseRetryMap)
+            {
+                _nodesToClearScratch.Add(pair.Value);
+            }
+
+            for (int i = 0; i < _nodesToClearScratch.Count; i++)
+            {
+                CacheNode node = _nodesToClearScratch[i];
+                // A fatal release can interrupt a caller before its normal post-pass clears the source index.
+                // Detach explicitly before retry so a successful retry can safely return the node to the pool.
+                DetachNodeFromCacheIndexes(node);
+                DisposeNodeBestEffort(node, ref failures);
+            }
+
+            _nodesToClearScratch.Clear();
+        }
+
+        private void DetachNodeFromCacheIndexes(CacheNode node)
+        {
+            if (_activeMap.TryGetValue(node.Key, out CacheNode activeNode) &&
+                ReferenceEquals(activeNode, node))
+            {
+                _activeMap.Remove(node.Key);
+            }
+
+            IReferenceCounted handle = node.Handle;
+            if (handle != null &&
+                _generationDetachedMap.TryGetValue(handle, out CacheNode detachedNode) &&
+                ReferenceEquals(detachedNode, node))
+            {
+                _generationDetachedMap.Remove(handle);
+            }
+
+            if (_idleMap.TryGetValue(node.Key, out CacheNode idleNode) &&
+                ReferenceEquals(idleNode, node))
+            {
+                _idleMap.Remove(node.Key);
+                RemoveFromLru(node);
+                RemoveFromBucketIndex(node);
+            }
+        }
+
+        private static void AddReleaseFailure(ref List<Exception> failures, Exception exception)
+        {
+            failures ??= new List<Exception>();
+            failures.Add(exception);
+        }
+
+        private static void ThrowReleaseFailures(List<Exception> failures, string message)
+        {
+            if (failures != null)
+            {
+                throw new AggregateException(message, failures);
+            }
+        }
+
+        private void ClearBucketsInternal(
+            string bucketOrPrefix,
+            bool includeChildren,
+            ref List<Exception> failures)
         {
             if (_bucketIndex.Count == 0) return;
 
             _nodesToClearScratch.Clear();
+            _nodesToClearSetScratch.Clear();
             _matchedBucketsScratch.Clear();
 
             foreach (var kvp in _bucketIndex)
@@ -479,68 +1282,108 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
                 _matchedBucketsScratch.Add(kvp.Key);
                 foreach (var node in kvp.Value)
                 {
-                    _nodesToClearScratch.Add(node);
+                    if (_nodesToClearSetScratch.Add(node))
+                    {
+                        _nodesToClearScratch.Add(node);
+                    }
                 }
             }
 
             if (_matchedBucketsScratch.Count == 0) return;
 
-            for (int i = 0; i < _matchedBucketsScratch.Count; i++)
-            {
-                _bucketIndex.Remove(_matchedBucketsScratch[i]);
-            }
-
             for (int i = 0; i < _nodesToClearScratch.Count; i++)
             {
-                var node = _nodesToClearScratch[i];
-                RemoveFromLru(node);
-                _idleMap.Remove(node.Location);
-                ForceDisposeHandle(node.Handle);
-                NodePool.Release(node);
+                EvictNodeBestEffort(_nodesToClearScratch[i], EvictionReason.Explicit, ref failures);
             }
 
             _nodesToClearScratch.Clear();
+            _nodesToClearSetScratch.Clear();
             _matchedBucketsScratch.Clear();
         }
 
-        /// <summary>
-        /// Periodically halves all AccessCount values in the main pool.
-        /// Prevents long-lived historical hot-assets from permanently locking the main pool
-        /// and blocking newly-frequent assets from being promoted.
-        /// Must be called inside the write lock.
-        /// </summary>
-        private void MaybeAge()
+        private void EvictIfNeeded(ref List<Exception> failures)
         {
-            if (++_releaseOpCount % AGING_INTERVAL != 0) return;
-
-            var node = _mainHead;
-            while (node != null)
+            while (_mainCount > _maxMainEntries && _mainTail != null)
             {
-                if (node.AccessCount > 1) node.AccessCount >>= 1;
-                node = node.Next;
+                CacheNode demoted = _mainTail;
+                RemoveFromLru(demoted);
+                demoted.IsInMainPool = false;
+                AddToTrialHead(demoted);
+            }
+
+            while (_trialCount > _maxTrialEntries && _trialTail != null)
+            {
+                EvictNodeBestEffort(_trialTail, EvictionReason.Capacity, ref failures);
+            }
+
+            // Memory-budget pass: even within entry-count limits, a few large assets can blow the byte
+            // budget. Evict idle handles (trial/probation first, then main) until back under budget.
+            while (_idleBytes > _maxIdleBytes && (_trialTail != null || _mainTail != null))
+            {
+                EvictNodeBestEffort(_trialTail ?? _mainTail, EvictionReason.MemoryBudget, ref failures);
             }
         }
 
-        private void EvictIfNeeded()
+        private void EvictNodeBestEffort(
+            CacheNode victim,
+            EvictionReason reason,
+            ref List<Exception> failures)
         {
-            while (_trialCount > _maxTrialEntries && _trialTail != null)
+            RecordEviction(victim, reason);
+            RemoveFromLru(victim);
+            RemoveFromBucketIndex(victim);
+            _idleMap.Remove(victim.Key);
+            DisposeNodeBestEffort(victim, ref failures);
+        }
+
+        private void RecordEviction(CacheNode victim, EvictionReason reason)
+        {
+            _evictionCount++;
+            switch (reason)
             {
-                var victim = _trialTail;
-                RemoveFromLru(victim);
-                RemoveFromBucketIndex(victim);
-                _idleMap.Remove(victim.Location);
-                ForceDisposeHandle(victim.Handle);
-                NodePool.Release(victim);
+                case EvictionReason.Capacity:
+                    _capacityEvictionCount++;
+                    break;
+                case EvictionReason.MemoryBudget:
+                    _memoryBudgetEvictionCount++;
+                    break;
+                case EvictionReason.Retention:
+                    _retentionEvictionCount++;
+                    break;
+                case EvictionReason.Pressure:
+                    _pressureEvictionCount++;
+                    break;
+                default:
+                    _explicitEvictionCount++;
+                    break;
             }
 
-            while (_mainCount > _maxMainEntries && _mainTail != null)
+            long bytes = victim.EstimatedBytes;
+            if (bytes > 0L)
             {
-                var victim = _mainTail;
-                RemoveFromLru(victim);
-                RemoveFromBucketIndex(victim);
-                _idleMap.Remove(victim.Location);
-                ForceDisposeHandle(victim.Handle);
-                NodePool.Release(victim);
+                _evictedBytesApprox = _evictedBytesApprox > long.MaxValue - bytes
+                    ? long.MaxValue
+                    : _evictedBytesApprox + bytes;
+            }
+        }
+
+        private void UpdatePeaks()
+        {
+            int activeCount = _activeMap.Count + _generationDetachedMap.Count;
+            if (activeCount > _peakActiveCount)
+            {
+                _peakActiveCount = activeCount;
+            }
+
+            int idleCount = _trialCount + _mainCount;
+            if (idleCount > _peakIdleCount)
+            {
+                _peakIdleCount = idleCount;
+            }
+
+            if (_idleBytes > _peakIdleBytesApprox)
+            {
+                _peakIdleBytesApprox = _idleBytes;
             }
         }
 
@@ -552,6 +1395,7 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
             _trialHead = node;
             if (_trialTail == null) _trialTail = node;
             _trialCount++;
+            _idleBytes += node.EstimatedBytes;
         }
 
         private void AddToMainHead(CacheNode node)
@@ -562,6 +1406,7 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
             _mainHead = node;
             if (_mainTail == null) _mainTail = node;
             _mainCount++;
+            _idleBytes += node.EstimatedBytes;
         }
 
         private void RemoveFromLru(CacheNode node)
@@ -579,48 +1424,370 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
                 _trialCount--;
             }
 
+            _idleBytes -= node.EstimatedBytes;
+            if (_idleBytes < 0) _idleBytes = 0;
+
             node.Next = null;
             node.Prev = null;
         }
 
+        private static void AddMetadata(
+            CacheNode node,
+            string bucket,
+            string tag,
+            string owner)
+        {
+            if (!AddMetadataValue(ref node.Bucket, ref node.AdditionalBuckets, bucket) ||
+                !AddMetadataValue(ref node.Tag, ref node.AdditionalTags, tag) ||
+                !AddMetadataValue(ref node.Owner, ref node.AdditionalOwners, owner))
+            {
+                node.MetadataOverflow = true;
+            }
+        }
+
+        private static void IncrementAccessCount(CacheNode node)
+        {
+            if (node.AccessCount < int.MaxValue)
+            {
+                node.AccessCount++;
+            }
+        }
+
+        private static bool TryEstimateHandleBytes(IReferenceCounted handle, out long estimatedBytes)
+        {
+            estimatedBytes = 0L;
+            if (handle is not IAssetMemoryFootprint footprint)
+            {
+                return false;
+            }
+
+            estimatedBytes = footprint.EstimateRuntimeBytes();
+            if (estimatedBytes <= 0L)
+            {
+                estimatedBytes = 0L;
+                return false;
+            }
+
+            estimatedBytes = Math.Min(estimatedBytes, MAX_ESTIMATED_ENTRY_BYTES);
+            return true;
+        }
+
+        private static bool AddMetadataValue(
+            ref string primary,
+            ref List<string> additional,
+            string value)
+        {
+            if (string.IsNullOrEmpty(value) || string.Equals(primary, value, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (string.IsNullOrEmpty(primary))
+            {
+                primary = value;
+                return true;
+            }
+
+            if (additional != null)
+            {
+                for (int i = 0; i < additional.Count; i++)
+                {
+                    if (string.Equals(additional[i], value, StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            int currentCount = 1 + (additional?.Count ?? 0);
+            if (currentCount >= MAX_METADATA_VALUES_PER_KIND)
+            {
+                return false;
+            }
+
+            additional ??= new List<string>(2);
+            additional.Add(value);
+            return true;
+        }
+
         private void AddToBucketIndex(CacheNode node)
         {
-            if (string.IsNullOrEmpty(node.Bucket)) return;
-            if (!_bucketIndex.TryGetValue(node.Bucket, out var set))
+            AddBucketIndexValue(node, node.Bucket);
+            List<string> additionalBuckets = node.AdditionalBuckets;
+            int count = additionalBuckets?.Count ?? 0;
+            for (int i = 0; i < count; i++)
             {
-                set = new HashSet<CacheNode>();
-                _bucketIndex[node.Bucket] = set;
+                AddBucketIndexValue(node, additionalBuckets[i]);
             }
-            set.Add(node);
         }
 
         private void RemoveFromBucketIndex(CacheNode node)
         {
-            if (string.IsNullOrEmpty(node.Bucket)) return;
-            if (_bucketIndex.TryGetValue(node.Bucket, out var set))
+            RemoveBucketIndexValue(node, node.Bucket);
+            List<string> additionalBuckets = node.AdditionalBuckets;
+            int count = additionalBuckets?.Count ?? 0;
+            for (int i = 0; i < count; i++)
+            {
+                RemoveBucketIndexValue(node, additionalBuckets[i]);
+            }
+        }
+
+        private void AddBucketIndexValue(CacheNode node, string bucket)
+        {
+            if (string.IsNullOrEmpty(bucket)) return;
+            if (!_bucketIndex.TryGetValue(bucket, out HashSet<CacheNode> set))
+            {
+                set = new HashSet<CacheNode>();
+                _bucketIndex[bucket] = set;
+            }
+
+            set.Add(node);
+        }
+
+        private void RemoveBucketIndexValue(CacheNode node, string bucket)
+        {
+            if (string.IsNullOrEmpty(bucket)) return;
+            if (_bucketIndex.TryGetValue(bucket, out HashSet<CacheNode> set))
             {
                 set.Remove(node);
-                if (set.Count == 0) _bucketIndex.Remove(node.Bucket);
+                if (set.Count == 0) _bucketIndex.Remove(bucket);
+            }
+        }
+
+        // --- Runtime-visible diagnostics ---
+        // Lightweight, allocation-free counters usable in any build (not Editor-only). Intended for retention
+        // schedulers, in-game memory HUDs, or telemetry. Per-entry enumeration stays Editor-only (see below).
+
+        /// <summary>Approximate aggregate footprint (bytes) of all idle (RefCount == 0) handles. Thread-safe.</summary>
+        public long IdleBytesApprox { get { lock (_gate) { return _idleBytes; } } }
+
+        /// <summary>The idle memory budget (bytes) above which idle handles are evicted regardless of count.</summary>
+        public long MaxIdleBytesBudget => Volatile.Read(ref _maxIdleBytes);
+
+        /// <summary>Number of idle (RefCount == 0) handles currently pooled across the trial and main tiers. Thread-safe.</summary>
+        public int IdleCount { get { lock (_gate) { return _trialCount + _mainCount; } } }
+
+        /// <summary>Number of active (RefCount &gt; 0) handles currently pinned and never evictable. Thread-safe.</summary>
+        public int ActiveCount { get { lock (_gate) { return _activeMap.Count + _generationDetachedMap.Count; } } }
+
+        internal int PendingReleaseRetryCount { get { lock (_gate) { return _releaseRetryMap.Count; } } }
+
+        /// <summary>
+        /// Creates a compact runtime snapshot without enumerating cache entries.
+        /// Intended for telemetry, stress HUDs, and automatic memory governance.
+        /// </summary>
+        internal CycloneGames.AssetManagement.Runtime.AssetRuntimeCacheSnapshot CreateRuntimeSnapshot(string packageName, string providerName)
+        {
+            lock (_gate)
+            {
+                return new CycloneGames.AssetManagement.Runtime.AssetRuntimeCacheSnapshot(
+                    packageName,
+                    providerName,
+                    _activeMap.Count + _generationDetachedMap.Count,
+                    _trialCount + _mainCount,
+                    _idleBytes,
+                    _maxIdleBytes,
+                    _activeHitCount,
+                    _idleHitCount,
+                    _cacheMissCount,
+                    _idleAdmissionCount,
+                    _failedOperationRejectionCount,
+                    _metadataOverflowRejectionCount,
+                    _unknownFootprintRejectionCount,
+                    _oversizeRejectionCount,
+                    _footprintEstimationFailureCount,
+                    _evictionCount,
+                    _capacityEvictionCount,
+                    _memoryBudgetEvictionCount,
+                    _retentionEvictionCount,
+                    _pressureEvictionCount,
+                    _explicitEvictionCount,
+                    _evictedBytesApprox,
+                    _providerReleaseFailureCount,
+                    _peakActiveCount,
+                    _peakIdleCount,
+                    _peakIdleBytesApprox);
             }
         }
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-            ClearAll();
-            _rwLock.Dispose();
+            AssetRuntimeGuard.EnsureMainThread();
+            int previousState = Interlocked.CompareExchange(ref _disposed, 1, 0);
+            if (previousState == 2)
+            {
+                return;
+            }
 
-#if UNITY_EDITOR
-            lock (_globalInstancesLock) { GlobalInstances.Remove(this); }
+            if (previousState == 0)
+            {
+#if !UNITY_EDITOR
+                Application.lowMemory -= HandleLowMemory;
+#else
+                UnregisterEditorInstance(this);
 #endif
+            }
+
+            List<Exception> failures;
+            lock (_gate)
+            {
+                ClearAllInternalBestEffort(out failures);
+                if (failures == null && _releaseRetryMap.Count == 0)
+                {
+                    Volatile.Write(ref _disposed, 2);
+                }
+            }
+
+            if (failures != null)
+            {
+                throw new AggregateException(
+                    "One or more cached provider handles failed to release. Cleanup ownership is retained for retry.",
+                    failures);
+            }
+        }
+
+        private static void MarkTrackedHandleActive(IReferenceCounted handle)
+        {
+            if (handle is ITrackedAssetHandle tracked)
+            {
+                HandleTracker.MarkActive(tracked.DiagnosticHandleId);
+            }
         }
 
 #if UNITY_EDITOR
+        private static long _nextDiagnosticId;
         private static readonly object _globalInstancesLock = new object();
-        public static readonly List<AssetCacheService> GlobalInstances = new List<AssetCacheService>();
+        private static readonly List<WeakReference<AssetCacheService>> _globalInstances =
+            new List<WeakReference<AssetCacheService>>();
+        private static readonly List<AssetCacheService> _lowMemoryTargets = new List<AssetCacheService>(4);
+        private static bool _globalLowMemorySubscribed;
+
+        private static void RegisterEditorInstance(AssetCacheService service)
+        {
+            lock (_globalInstancesLock)
+            {
+                PruneDeadEditorInstancesUnderLock();
+                _globalInstances.Add(new WeakReference<AssetCacheService>(service));
+                if (!_globalLowMemorySubscribed)
+                {
+                    Application.lowMemory += HandleGlobalLowMemory;
+                    _globalLowMemorySubscribed = true;
+                }
+            }
+        }
+
+        private static void UnregisterEditorInstance(AssetCacheService service)
+        {
+            lock (_globalInstancesLock)
+            {
+                for (int i = _globalInstances.Count - 1; i >= 0; i--)
+                {
+                    if (!_globalInstances[i].TryGetTarget(out AssetCacheService target) ||
+                        target == null ||
+                        ReferenceEquals(target, service))
+                    {
+                        _globalInstances.RemoveAt(i);
+                    }
+                }
+
+                UnsubscribeGlobalLowMemoryWhenEmptyUnderLock();
+            }
+        }
+
+        private static void HandleGlobalLowMemory()
+        {
+            lock (_globalInstancesLock)
+            {
+                _lowMemoryTargets.Clear();
+                PruneDeadEditorInstancesUnderLock();
+                for (int i = 0; i < _globalInstances.Count; i++)
+                {
+                    if (_globalInstances[i].TryGetTarget(out AssetCacheService service) && service != null)
+                    {
+                        _lowMemoryTargets.Add(service);
+                    }
+                }
+            }
+
+            try
+            {
+                for (int i = 0; i < _lowMemoryTargets.Count; i++)
+                {
+                    _lowMemoryTargets[i].HandleLowMemory();
+                }
+            }
+            finally
+            {
+                _lowMemoryTargets.Clear();
+            }
+        }
+
+        internal static void CopyGlobalInstancesTo(List<AssetCacheService> destination)
+        {
+            if (destination == null)
+            {
+                throw new ArgumentNullException(nameof(destination));
+            }
+
+            lock (_globalInstancesLock)
+            {
+                destination.Clear();
+                PruneDeadEditorInstancesUnderLock();
+                for (int i = 0; i < _globalInstances.Count; i++)
+                {
+                    if (_globalInstances[i].TryGetTarget(out AssetCacheService service) && service != null)
+                    {
+                        destination.Add(service);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Begins an Editor diagnostics epoch and returns the number of externally retained cache services that
+        /// survived subsystem registration. The weak registry does not own those services, keeps their low-memory
+        /// handling active, and leaves them visible for diagnosis when domain reload is disabled. Identity counters
+        /// remain monotonic so a survivor cannot collide with a later Play Mode observation epoch.
+        /// </summary>
+        internal static int BeginEditorDiagnosticsEpoch()
+        {
+            lock (_globalInstancesLock)
+            {
+                PruneDeadEditorInstancesUnderLock();
+                return _globalInstances.Count;
+            }
+        }
+
+        private static void PruneDeadEditorInstancesUnderLock()
+        {
+            for (int i = _globalInstances.Count - 1; i >= 0; i--)
+            {
+                if (!_globalInstances[i].TryGetTarget(out AssetCacheService service) ||
+                    service == null ||
+                    Volatile.Read(ref service._disposed) != 0)
+                {
+                    _globalInstances.RemoveAt(i);
+                }
+            }
+
+            UnsubscribeGlobalLowMemoryWhenEmptyUnderLock();
+        }
+
+        private static void UnsubscribeGlobalLowMemoryWhenEmptyUnderLock()
+        {
+            if (_globalInstances.Count == 0 && _globalLowMemorySubscribed)
+            {
+                Application.lowMemory -= HandleGlobalLowMemory;
+                _globalLowMemorySubscribed = false;
+            }
+        }
 
         public struct CacheDiagnosticEntry
         {
+            /// <summary>Unique row identity for the current Editor session.</summary>
+            public long DiagnosticId;
+            /// <summary>Exact built-in provider handle identity, or 0 when a custom handle does not expose one.</summary>
+            public long HandleId;
             /// <summary>Clean asset path for display (without type suffix).</summary>
             public string Location;
             /// <summary>Short asset type name (e.g. "Texture2D"), or null for typeless entries.</summary>
@@ -630,115 +1797,156 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
             public string Bucket;
             public string Tag;
             public string Owner;
+            public int BucketAssociationCount;
+            public int TagAssociationCount;
+            public int OwnerAssociationCount;
             public int RefCount;
             public int AccessCount;
             public string ProviderType;
+            public bool IsGenerationDetached;
+            /// <summary>Approximate runtime footprint (bytes) of the underlying asset.</summary>
+            public long EstimatedBytes;
         }
 
-        /// <summary>
-        /// Splits a composite cache key ("location|TypeFullName") into a clean location and short type name.
-        /// </summary>
-        internal static void ParseCacheKey(string cacheKey, out string location, out string assetTypeName)
+        internal readonly struct CacheDiagnosticCapture
         {
-            if (string.IsNullOrEmpty(cacheKey))
+            public readonly int ActiveTotal;
+            public readonly int ProbationTotal;
+            public readonly int ProtectedTotal;
+            public readonly int ActiveCaptured;
+            public readonly int ProbationCaptured;
+            public readonly int ProtectedCaptured;
+
+            public CacheDiagnosticCapture(
+                int activeTotal,
+                int probationTotal,
+                int protectedTotal,
+                int activeCaptured,
+                int probationCaptured,
+                int protectedCaptured)
             {
-                location = cacheKey;
-                assetTypeName = null;
-                return;
+                ActiveTotal = activeTotal;
+                ProbationTotal = probationTotal;
+                ProtectedTotal = protectedTotal;
+                ActiveCaptured = activeCaptured;
+                ProbationCaptured = probationCaptured;
+                ProtectedCaptured = protectedCaptured;
             }
 
-            int sep = cacheKey.LastIndexOf('|');
-            if (sep < 0)
-            {
-                location = cacheKey;
-                assetTypeName = null;
-            }
-            else
-            {
-                location = cacheKey.Substring(0, sep);
-                string fullName = cacheKey.Substring(sep + 1);
-                int dot = fullName.LastIndexOf('.');
-                assetTypeName = dot >= 0 ? fullName.Substring(dot + 1) : fullName;
-            }
+            public bool IsTruncated =>
+                ActiveCaptured < ActiveTotal ||
+                ProbationCaptured < ProbationTotal ||
+                ProtectedCaptured < ProtectedTotal;
         }
 
         public void GetDiagnostics(List<CacheDiagnosticEntry> active, List<CacheDiagnosticEntry> trial, List<CacheDiagnosticEntry> main)
         {
+            GetDiagnostics(active, trial, main, int.MaxValue, int.MaxValue, int.MaxValue);
+        }
+
+        internal CacheDiagnosticCapture GetDiagnostics(
+            List<CacheDiagnosticEntry> active,
+            List<CacheDiagnosticEntry> trial,
+            List<CacheDiagnosticEntry> main,
+            int maxActiveEntries,
+            int maxProbationEntries,
+            int maxProtectedEntries)
+        {
+            if (maxActiveEntries < 0) throw new ArgumentOutOfRangeException(nameof(maxActiveEntries));
+            if (maxProbationEntries < 0) throw new ArgumentOutOfRangeException(nameof(maxProbationEntries));
+            if (maxProtectedEntries < 0) throw new ArgumentOutOfRangeException(nameof(maxProtectedEntries));
+
             active?.Clear();
             trial?.Clear();
             main?.Clear();
 
-            _rwLock.EnterReadLock();
-            try
+            lock (_gate)
             {
-                if (active != null)
+                int activeTotal = _activeMap.Count + _generationDetachedMap.Count;
+                int probationTotal = _trialCount;
+                int protectedTotal = _mainCount;
+
+                if (active != null && maxActiveEntries > 0)
                 {
+                    // Detached generations are operationally important and normally rare. Capture them first so a
+                    // large keyed set cannot hide stale-generation ownership from a bounded Editor snapshot.
+                    foreach (var kvp in _generationDetachedMap)
+                    {
+                        if (active.Count >= maxActiveEntries)
+                        {
+                            break;
+                        }
+
+                        active.Add(CreateDiagnosticEntry(kvp.Value, isGenerationDetached: true));
+                    }
+
                     foreach (var kvp in _activeMap)
                     {
-                        ParseCacheKey(kvp.Value.Location, out var loc, out var typeName);
-                        active.Add(new CacheDiagnosticEntry
+                        if (active.Count >= maxActiveEntries)
                         {
-                            Location = loc,
-                            AssetType = typeName,
-                            CacheKey = kvp.Value.Location,
-                            Bucket = kvp.Value.Bucket,
-                            Tag = kvp.Value.Tag,
-                            Owner = kvp.Value.Owner,
-                            RefCount = kvp.Value.Handle.RefCount,
-                            AccessCount = kvp.Value.AccessCount,
-                            ProviderType = GetProviderType(kvp.Value.Handle)
-                        });
+                            break;
+                        }
+
+                        active.Add(CreateDiagnosticEntry(kvp.Value, isGenerationDetached: false));
                     }
                 }
 
-                if (trial != null)
+                if (trial != null && maxProbationEntries > 0)
                 {
                     var node = _trialHead;
-                    while (node != null)
+                    while (node != null && trial.Count < maxProbationEntries)
                     {
-                        ParseCacheKey(node.Location, out var loc, out var typeName);
-                        trial.Add(new CacheDiagnosticEntry
-                        {
-                            Location = loc,
-                            AssetType = typeName,
-                            CacheKey = node.Location,
-                            Bucket = node.Bucket,
-                            Tag = node.Tag,
-                            Owner = node.Owner,
-                            RefCount = node.Handle?.RefCount ?? 0,
-                            AccessCount = node.AccessCount,
-                            ProviderType = GetProviderType(node.Handle)
-                        });
+                        trial.Add(CreateDiagnosticEntry(node, isGenerationDetached: false));
                         node = node.Next;
                     }
                 }
 
-                if (main != null)
+                if (main != null && maxProtectedEntries > 0)
                 {
                     var node = _mainHead;
-                    while (node != null)
+                    while (node != null && main.Count < maxProtectedEntries)
                     {
-                        ParseCacheKey(node.Location, out var loc, out var typeName);
-                        main.Add(new CacheDiagnosticEntry
-                        {
-                            Location = loc,
-                            AssetType = typeName,
-                            CacheKey = node.Location,
-                            Bucket = node.Bucket,
-                            Tag = node.Tag,
-                            Owner = node.Owner,
-                            RefCount = node.Handle?.RefCount ?? 0,
-                            AccessCount = node.AccessCount,
-                            ProviderType = GetProviderType(node.Handle)
-                        });
+                        main.Add(CreateDiagnosticEntry(node, isGenerationDetached: false));
                         node = node.Next;
                     }
                 }
+
+                return new CacheDiagnosticCapture(
+                    activeTotal,
+                    probationTotal,
+                    protectedTotal,
+                    active?.Count ?? 0,
+                    trial?.Count ?? 0,
+                    main?.Count ?? 0);
             }
-            finally
+        }
+
+        private static CacheDiagnosticEntry CreateDiagnosticEntry(
+            CacheNode node,
+            bool isGenerationDetached)
+        {
+            AssetCacheKey key = node.Key;
+            return new CacheDiagnosticEntry
             {
-                _rwLock.ExitReadLock();
-            }
+                DiagnosticId = node.DiagnosticId,
+                HandleId = (node.Handle as ITrackedAssetHandle)?.DiagnosticHandleId ?? 0L,
+                Location = key.Location,
+                AssetType = GetDiagnosticAssetType(node, key.AssetType),
+                CacheKey = GetDiagnosticKey(node, key),
+                Bucket = node.Bucket,
+                Tag = node.Tag,
+                Owner = node.Owner,
+                BucketAssociationCount = GetAssociationCount(node.Bucket, node.AdditionalBuckets),
+                TagAssociationCount = GetAssociationCount(node.Tag, node.AdditionalTags),
+                OwnerAssociationCount = GetAssociationCount(node.Owner, node.AdditionalOwners),
+                RefCount = node.Handle?.RefCount ?? 0,
+                AccessCount = node.AccessCount,
+                ProviderType = GetDiagnosticProviderType(node, node.Handle),
+                IsGenerationDetached = isGenerationDetached,
+                // Active handles use their last cached idle estimate (or 0 before first release). Diagnostics
+                // must not issue a native memory query per asset on every refresh.
+                EstimatedBytes = node.EstimatedBytes
+            };
         }
 
         private static string GetProviderType(IReferenceCounted handle)
@@ -749,6 +1957,43 @@ namespace CycloneGames.AssetManagement.Runtime.Cache
             if (name.StartsWith("Addressable")) return "Addressables";
             if (name.StartsWith("Resources")) return "Resources";
             return name;
+        }
+
+        private static string GetDiagnosticKey(CacheNode node, AssetCacheKey key)
+        {
+            string diagnosticKey = node.DiagnosticKey;
+            if (diagnosticKey != null) return diagnosticKey;
+
+            diagnosticKey = key.ToDiagnosticString();
+            node.DiagnosticKey = diagnosticKey;
+            return diagnosticKey;
+        }
+
+        private static string GetDiagnosticAssetType(CacheNode node, Type assetType)
+        {
+            if (assetType == null) return null;
+
+            string typeName = node.DiagnosticAssetType;
+            if (typeName != null) return typeName;
+
+            typeName = assetType.Name;
+            node.DiagnosticAssetType = typeName;
+            return typeName;
+        }
+
+        private static string GetDiagnosticProviderType(CacheNode node, IReferenceCounted handle)
+        {
+            string providerType = node.DiagnosticProviderType;
+            if (providerType != null) return providerType;
+
+            providerType = GetProviderType(handle);
+            node.DiagnosticProviderType = providerType;
+            return providerType;
+        }
+
+        private static int GetAssociationCount(string primary, List<string> additional)
+        {
+            return (string.IsNullOrEmpty(primary) ? 0 : 1) + (additional?.Count ?? 0);
         }
 #endif
     }

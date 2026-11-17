@@ -24,9 +24,9 @@ namespace GASSample.Gameplay
             EnterGameplayCamera();
         }
 
-        public override void UnPossess()
+        protected override void OnUnPossess()
         {
-            base.UnPossess();
+            base.OnUnPossess();
 
             SetBaseCameraMode(new ViewTargetCameraMode());
         }

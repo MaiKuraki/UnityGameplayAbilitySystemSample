@@ -1,289 +1,452 @@
 using System;
-using System.IO;
-using CycloneGames.Logger;
+using System.Threading;
+using CycloneGames.Logging;
 using Cysharp.Threading.Tasks;
-using UnityEngine.Networking;
-using VYaml.Serialization;
 
 namespace CycloneGames.InputSystem.Runtime
 {
     /// <summary>
-    /// Loads input configuration and initializes InputManager. Supports user config with default fallback.
+    /// Controls whether bootstrap is skipped, tolerates an absent configuration, or requires one.
+    /// </summary>
+    public enum InputSystemBootstrapMode
+    {
+        Disabled,
+        Optional,
+        Required
+    }
+
+    /// <summary>
+    /// Immutable composition-root policy for configuration discovery and optional user persistence.
+    /// The runtime core does not assign meaning to source keys or assume a Unity asset location.
+    /// </summary>
+    public sealed class InputSystemBootstrapOptions
+    {
+        public InputSystemBootstrapMode Mode { get; }
+        public IInputConfigurationSource DefaultSource { get; }
+        public string DefaultKey { get; }
+        public IInputConfigurationStore UserStore { get; }
+        public string UserKey { get; }
+        public bool PersistDefaultToUser { get; }
+
+        public static InputSystemBootstrapOptions Disabled { get; } =
+            new InputSystemBootstrapOptions(InputSystemBootstrapMode.Disabled);
+
+        public InputSystemBootstrapOptions(
+            InputSystemBootstrapMode mode,
+            IInputConfigurationSource defaultSource = null,
+            string defaultKey = null,
+            IInputConfigurationStore userStore = null,
+            string userKey = null,
+            bool persistDefaultToUser = false)
+        {
+            if ((uint)mode > (uint)InputSystemBootstrapMode.Required)
+            {
+                throw new ArgumentOutOfRangeException(nameof(mode));
+            }
+
+            if (mode != InputSystemBootstrapMode.Disabled)
+            {
+                ValidateSourceKey(defaultSource, defaultKey, nameof(defaultSource), nameof(defaultKey));
+                ValidateSourceKey(userStore, userKey, nameof(userStore), nameof(userKey));
+                if (defaultSource == null && userStore == null)
+                {
+                    throw new ArgumentException(
+                        "Optional and required bootstrap modes need at least one configuration source.");
+                }
+            }
+
+            if (persistDefaultToUser && userStore == null)
+            {
+                throw new ArgumentException(
+                    "Default persistence requires an explicit user store.",
+                    nameof(persistDefaultToUser));
+            }
+
+            Mode = mode;
+            DefaultSource = defaultSource;
+            DefaultKey = defaultKey;
+            UserStore = userStore;
+            UserKey = userKey;
+            PersistDefaultToUser = persistDefaultToUser;
+        }
+
+        private static void ValidateSourceKey(
+            object source,
+            string key,
+            string sourceParameter,
+            string keyParameter)
+        {
+            if (source == null)
+            {
+                if (!string.IsNullOrEmpty(key))
+                {
+                    throw new ArgumentException(
+                        "A configuration key cannot be supplied without its source.",
+                        keyParameter);
+                }
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                throw new ArgumentException(
+                    "A configuration source requires a non-empty logical key.",
+                    sourceParameter);
+            }
+        }
+    }
+
+    public enum InputSystemLoadStatus
+    {
+        SuccessFromUserConfiguration,
+        SuccessFromDefaultConfiguration,
+        DefaultConfigurationUnavailable,
+        ConfigurationInvalid,
+        InitializationFailed,
+        NotConfigured
+    }
+
+    public enum InputSystemPersistenceStatus
+    {
+        NotRequested,
+        Succeeded,
+        Failed,
+        Canceled,
+        SerializationFailed
+    }
+
+    public readonly struct InputSystemLoadResult
+    {
+        public InputSystemLoadStatus Status { get; }
+        public InputConfigurationStorageStatus UserStorageStatus { get; }
+        public string Error { get; }
+        public InputSystemPersistenceStatus PersistenceStatus { get; }
+        public string PersistenceError { get; }
+        public bool IsSuccess =>
+            Status == InputSystemLoadStatus.SuccessFromUserConfiguration ||
+            Status == InputSystemLoadStatus.SuccessFromDefaultConfiguration;
+        public bool IsBootstrapComplete =>
+            IsSuccess || Status == InputSystemLoadStatus.NotConfigured;
+        public bool IsPersistenceComplete =>
+            PersistenceStatus == InputSystemPersistenceStatus.NotRequested ||
+            PersistenceStatus == InputSystemPersistenceStatus.Succeeded;
+
+        public InputSystemLoadResult(
+            InputSystemLoadStatus status,
+            InputConfigurationStorageStatus userStorageStatus,
+            string error = null)
+            : this(
+                status,
+                userStorageStatus,
+                error,
+                InputSystemPersistenceStatus.NotRequested,
+                null)
+        {
+        }
+
+        public InputSystemLoadResult(
+            InputSystemLoadStatus status,
+            InputConfigurationStorageStatus userStorageStatus,
+            string error,
+            InputSystemPersistenceStatus persistenceStatus,
+            string persistenceError)
+        {
+            Status = status;
+            UserStorageStatus = userStorageStatus;
+            Error = error;
+            PersistenceStatus = persistenceStatus;
+            PersistenceError = persistenceError;
+        }
+    }
+
+    /// <summary>
+    /// Coordinates bounded configuration loading and commits only a validated configuration to an InputManager.
     /// </summary>
     public static class InputSystemLoader
     {
-        private const string DEBUG_FLAG = "[InputSystemLoader]";
+        private static readonly LogChannel Log = InputSystemLog.Channel;
 
-        /// <summary>
-        /// Loads config from userConfigUri, falls back to defaultConfigUri if not found.
-        /// </summary>
-        public static async UniTask InitializeAsync(string defaultConfigUri, string userConfigUri)
+        private const string LogPrefix = "[InputSystemLoader]";
+
+        public static UniTask<InputSystemLoadResult> LoadAndInitializeAsync(
+            IInputConfigurationSource defaultSource,
+            string defaultKey,
+            IInputConfigurationStore userStore,
+            string userKey,
+            InputManager manager,
+            bool forceReinitialize = false,
+            CancellationToken cancellationToken = default)
         {
-            string yamlContent = null;
-            string defaultYamlContent = null;
-            bool loadedFromUserConfig = false;
-            bool userConfigCorrupted = false;
-
-            // Always load default config first for fallback
-            if (!string.IsNullOrEmpty(defaultConfigUri))
+            if (defaultSource == null)
             {
-                (bool success, string content) = await LoadConfigFromUriAsync(defaultConfigUri);
-                if (success)
-                {
-                    defaultYamlContent = content;
-                    CLogger.LogInfo($"{DEBUG_FLAG} Loaded default config from: {defaultConfigUri}");
-                }
+                throw new ArgumentNullException(nameof(defaultSource));
             }
 
-            // Try loading user config
-            if (!string.IsNullOrEmpty(userConfigUri))
+            return LoadAndInitializeCoreAsync(
+                defaultSource,
+                defaultKey,
+                userStore,
+                userKey,
+                manager,
+                InputSystemBootstrapMode.Required,
+                true,
+                forceReinitialize,
+                cancellationToken);
+        }
+
+        public static UniTask<InputSystemLoadResult> LoadAndInitializeAsync(
+            InputSystemBootstrapOptions options,
+            InputManager manager,
+            bool forceReinitialize = false,
+            CancellationToken cancellationToken = default)
+        {
+            if (options == null)
             {
-                (bool success, string content) = await LoadConfigFromUriAsync(userConfigUri);
-                if (success && !string.IsNullOrEmpty(content))
+                throw new ArgumentNullException(nameof(options));
+            }
+
+            return LoadAndInitializeCoreAsync(
+                options.DefaultSource,
+                options.DefaultKey,
+                options.UserStore,
+                options.UserKey,
+                manager,
+                options.Mode,
+                options.PersistDefaultToUser,
+                forceReinitialize,
+                cancellationToken);
+        }
+
+        private static async UniTask<InputSystemLoadResult> LoadAndInitializeCoreAsync(
+            IInputConfigurationSource defaultSource,
+            string defaultKey,
+            IInputConfigurationStore userStore,
+            string userKey,
+            InputManager manager,
+            InputSystemBootstrapMode bootstrapMode,
+            bool persistDefaultToUser,
+            bool forceReinitialize,
+            CancellationToken cancellationToken)
+        {
+            if (manager == null)
+            {
+                throw new ArgumentNullException(nameof(manager));
+            }
+
+            if (bootstrapMode == InputSystemBootstrapMode.Disabled)
+            {
+                return new InputSystemLoadResult(
+                    InputSystemLoadStatus.NotConfigured,
+                    InputConfigurationStorageStatus.Unsupported);
+            }
+
+            InputConfigurationReadResult userRead = userStore == null || string.IsNullOrEmpty(userKey)
+                ? InputConfigurationReadResult.Failure(InputConfigurationStorageStatus.Unsupported)
+                : await userStore.LoadAsync(userKey, cancellationToken);
+
+            string userValidationError = null;
+            bool useUserConfiguration = userRead.IsSuccess;
+            if (useUserConfiguration && userRead.WasRecoveredFromBackup)
+            {
+                Log.Warning(
+                    $"{LogPrefix} The primary user configuration was unavailable; " +
+                    "the last committed backup is active for this session.");
+            }
+
+            InputConfigurationReadResult defaultRead = default;
+            string selectedContent;
+            if (useUserConfiguration)
+            {
+                selectedContent = userRead.Content;
+            }
+            else
+            {
+                defaultRead = defaultSource == null
+                    ? InputConfigurationReadResult.Failure(
+                        InputConfigurationStorageStatus.NotFound,
+                        "No default configuration source is configured.")
+                    : await defaultSource.LoadAsync(defaultKey, cancellationToken);
+                if (!defaultRead.IsSuccess)
                 {
-                    // Validate user config before use
-                    if (ValidateYamlContent(content))
+                    if (bootstrapMode == InputSystemBootstrapMode.Optional &&
+                        defaultRead.Status == InputConfigurationStorageStatus.NotFound &&
+                        (userRead.Status == InputConfigurationStorageStatus.NotFound ||
+                         userRead.Status == InputConfigurationStorageStatus.Unsupported))
                     {
-                        yamlContent = content;
-                        loadedFromUserConfig = true;
-                        CLogger.LogInfo($"{DEBUG_FLAG} Loaded and validated user config from: {userConfigUri}");
-                    }
-                    else
-                    {
-                        CLogger.LogWarning($"{DEBUG_FLAG} User config is corrupted or invalid, will use default config. Uri: {userConfigUri}");
-                        userConfigCorrupted = true;
-                        
-                        // Delete corrupted user config file
-                        TryDeleteCorruptedUserConfig(userConfigUri);
-                    }
-                }
-            }
-
-            // Fallback to default config
-            if (string.IsNullOrEmpty(yamlContent))
-            {
-                if (string.IsNullOrEmpty(defaultYamlContent))
-                {
-                    CLogger.LogError($"{DEBUG_FLAG} Both config URIs invalid. Initialization failed.");
-                    return;
-                }
-                yamlContent = defaultYamlContent;
-            }
-
-            if (!string.IsNullOrEmpty(yamlContent))
-            {
-                InputManager.Instance.Initialize(yamlContent, userConfigUri);
-                
-                // Save user config if: not loaded from user config OR user config was corrupted
-                if (!loadedFromUserConfig || userConfigCorrupted)
-                {
-                    await InputManager.Instance.SaveUserConfigurationAsync();
-                    CLogger.LogInfo($"{DEBUG_FLAG} Saved fresh user config.");
-                }
-            }
-        }
-
-        /// <summary>
-        /// Validates YAML content by attempting to parse it.
-        /// Returns true if valid, false if corrupted/invalid.
-        /// </summary>
-        private static bool ValidateYamlContent(string yamlContent)
-        {
-            if (string.IsNullOrEmpty(yamlContent)) return false;
-
-            try
-            {
-                // Normalize line endings to handle cross-platform issues (Windows CRLF vs Unix LF)
-                string normalizedContent = NormalizeLineEndings(yamlContent);
-                
-                // Try to parse the YAML
-                var config = YamlSerializer.Deserialize<InputConfiguration>(System.Text.Encoding.UTF8.GetBytes(normalizedContent));
-                if (config == null || config.PlayerSlots == null) return false;
-
-#if UNITY_EDITOR
-                // Schema fingerprint check: editor-only, not needed in shipped builds
-                if (config.SchemaFingerprint != InputSchemaFingerprint.Current)
-                {
-                    CLogger.LogWarning($"{DEBUG_FLAG} Schema fingerprint mismatch: file has [{config.SchemaFingerprint ?? "none"}], current is [{InputSchemaFingerprint.Current}]. " +
-                                       "Some settings may use default values. Re-save in editor to upgrade.");
-                }
-#endif
-
-                return true;
-            }
-            catch (Exception e)
-            {
-                CLogger.LogWarning($"{DEBUG_FLAG} YAML validation failed: {e.Message}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Normalizes line endings to Unix-style (LF only) for cross-platform compatibility.
-        /// </summary>
-        private static string NormalizeLineEndings(string content)
-        {
-            if (string.IsNullOrEmpty(content)) return content;
-            // Replace CRLF with LF, then any remaining CR with LF
-            return content.Replace("\r\n", "\n").Replace("\r", "\n");
-        }
-
-        /// <summary>
-        /// Resets user configuration to default. Deletes user config file and reinitializes with default config.
-        /// Cross-platform compatible: Windows, macOS, Linux, Android, iOS, WebGL.
-        /// </summary>
-        /// <param name="defaultConfigUri">URI to default config (e.g., StreamingAssets)</param>
-        /// <param name="userConfigUri">URI to user config (e.g., PersistentData)</param>
-        /// <returns>True if reset was successful</returns>
-        public static async UniTask<bool> ResetToDefaultAsync(string defaultConfigUri, string userConfigUri)
-        {
-            if (string.IsNullOrEmpty(defaultConfigUri))
-            {
-                CLogger.LogError($"{DEBUG_FLAG} Cannot reset: defaultConfigUri is null or empty.");
-                return false;
-            }
-
-            bool deleteSuccess = TryDeleteUserConfigFile(userConfigUri);
-            if (!deleteSuccess)
-            {
-                CLogger.LogWarning($"{DEBUG_FLAG} Failed to delete user config, but will continue with reset.");
-            }
-
-            await InitializeAsync(defaultConfigUri, userConfigUri);
-            
-            CLogger.LogInfo($"{DEBUG_FLAG} Reset to default configuration completed.");
-            return true;
-        }
-
-        /// <summary>
-        /// Deletes user config file. Cross-platform compatible.
-        /// </summary>
-        /// <param name="userConfigUri">URI to user config file</param>
-        /// <returns>True if deletion was successful or file didn't exist</returns>
-        public static bool TryDeleteUserConfigFile(string userConfigUri)
-        {
-            if (string.IsNullOrEmpty(userConfigUri))
-            {
-                return true; // Nothing to delete
-            }
-
-            try
-            {
-#if UNITY_WEBGL && !UNITY_EDITOR
-                // WebGL: Use PlayerPrefs-based storage or IndexedDB
-                // Since we can't directly delete files in WebGL, we mark it for recreation
-                string key = GetPlayerPrefsKeyFromUri(userConfigUri);
-                if (UnityEngine.PlayerPrefs.HasKey(key))
-                {
-                    UnityEngine.PlayerPrefs.DeleteKey(key);
-                    UnityEngine.PlayerPrefs.Save();
-                    CLogger.LogInfo($"{DEBUG_FLAG} Deleted user config from PlayerPrefs: {key}");
-                }
-                return true;
-#else
-                // All other platforms: Standard file deletion
-                string filePath = GetFilePathFromUri(userConfigUri);
-                if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
-                {
-                    File.Delete(filePath);
-                    CLogger.LogInfo($"{DEBUG_FLAG} Deleted user config file: {filePath}");
-                }
-                return true;
-#endif
-            }
-            catch (Exception e)
-            {
-                CLogger.LogWarning($"{DEBUG_FLAG} Failed to delete user config: {e.Message}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Extracts file path from URI. Handles different URI formats for cross-platform compatibility.
-        /// </summary>
-        private static string GetFilePathFromUri(string uri)
-        {
-            if (string.IsNullOrEmpty(uri)) return null;
-
-            try
-            {
-                // Handle file:// URIs
-                if (uri.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
-                {
-                    return new Uri(uri).LocalPath;
-                }
-                
-                // Handle direct paths (Android, iOS, etc.)
-                if (uri.StartsWith("/") || (uri.Length > 1 && uri[1] == ':'))
-                {
-                    return uri;
-                }
-
-                // Try parsing as URI
-                if (Uri.TryCreate(uri, UriKind.Absolute, out Uri parsedUri))
-                {
-                    return parsedUri.LocalPath;
-                }
-
-                return uri;
-            }
-            catch (Exception e)
-            {
-                CLogger.LogWarning($"{DEBUG_FLAG} Failed to parse URI '{uri}': {e.Message}");
-                return null;
-            }
-        }
-
-#if UNITY_WEBGL && !UNITY_EDITOR
-        /// <summary>
-        /// Generates a deterministic PlayerPrefs key from URI for WebGL storage.
-        /// Uses FNV-1a instead of string.GetHashCode() which is non-deterministic across IL2CPP runs.
-        /// </summary>
-        private static string GetPlayerPrefsKeyFromUri(string uri)
-        {
-            return $"InputConfig_{InputHashUtility.GetDeterministicHashCode(uri):X8}";
-        }
-#endif
-
-        /// <summary>
-        /// Attempts to delete a corrupted user config file.
-        /// </summary>
-        private static void TryDeleteCorruptedUserConfig(string userConfigUri)
-        {
-            TryDeleteUserConfigFile(userConfigUri);
-        }
-
-        private static async UniTask<(bool, string)> LoadConfigFromUriAsync(string uri)
-        {
-            using (UnityWebRequest uwr = UnityWebRequest.Get(uri))
-            {
-                try
-                {
-                    var asyncOperation = uwr.SendWebRequest();
-                    while (!asyncOperation.isDone)
-                    {
-                        await UniTask.Yield();
+                        return new InputSystemLoadResult(
+                            InputSystemLoadStatus.NotConfigured,
+                            userRead.Status);
                     }
 
-                    if (uwr.result == UnityWebRequest.Result.Success)
+                    return new InputSystemLoadResult(
+                        InputSystemLoadStatus.DefaultConfigurationUnavailable,
+                        userRead.Status,
+                        defaultRead.Error);
+                }
+
+                selectedContent = defaultRead.Content;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!PlayerLoopHelper.IsMainThread)
+            {
+                await UniTask.SwitchToMainThread(PlayerLoopTiming.Update, cancellationToken);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!forceReinitialize && manager.IsInitialized)
+            {
+                return new InputSystemLoadResult(
+                    InputSystemLoadStatus.InitializationFailed,
+                    userRead.Status,
+                    "InputManager is already initialized. Set forceReinitialize only after removing active players.");
+            }
+
+            InputManagerInitializationResult initialization = forceReinitialize
+                ? manager.ReinitializeWithResult(selectedContent)
+                : manager.InitializeWithResult(selectedContent);
+            if (!initialization.IsSuccess &&
+                useUserConfiguration &&
+                IsConfigurationContentFailure(initialization.Status))
+            {
+                userValidationError =
+                    $"{initialization.Status}: {initialization.Message}";
+                defaultRead = defaultSource == null
+                    ? InputConfigurationReadResult.Failure(
+                        InputConfigurationStorageStatus.NotFound,
+                        "No default configuration source is configured.")
+                    : await defaultSource.LoadAsync(defaultKey, cancellationToken);
+                if (!defaultRead.IsSuccess)
+                {
+                    return new InputSystemLoadResult(
+                        InputSystemLoadStatus.DefaultConfigurationUnavailable,
+                        userRead.Status,
+                        defaultRead.Error);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!PlayerLoopHelper.IsMainThread)
+                {
+                    await UniTask.SwitchToMainThread(PlayerLoopTiming.Update, cancellationToken);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+
+                selectedContent = defaultRead.Content;
+                useUserConfiguration = false;
+                initialization = forceReinitialize
+                    ? manager.ReinitializeWithResult(selectedContent)
+                    : manager.InitializeWithResult(selectedContent);
+            }
+
+            if (!initialization.IsSuccess)
+            {
+                return new InputSystemLoadResult(
+                    !useUserConfiguration && IsConfigurationContentFailure(initialization.Status)
+                        ? InputSystemLoadStatus.ConfigurationInvalid
+                        : InputSystemLoadStatus.InitializationFailed,
+                    userRead.Status,
+                    $"{initialization.Status}: {initialization.Message}");
+            }
+
+            if (persistDefaultToUser &&
+                !useUserConfiguration &&
+                userRead.Status == InputConfigurationStorageStatus.NotFound &&
+                userStore != null &&
+                !string.IsNullOrEmpty(userKey))
+            {
+                InputSystemPersistenceStatus persistenceStatus;
+                string persistenceError = null;
+                string persistenceContent = defaultRead.Content;
+                if (initialization.Validation?.WasMigrated == true &&
+                    !InputConfigurationYamlCodec.TrySerialize(
+                        initialization.Validation.Configuration,
+                        out persistenceContent,
+                        out string serializationError))
+                {
+                    Log.Warning(
+                        $"{LogPrefix} Initialized from migrated defaults but could not serialize the prepared configuration: " +
+                        serializationError);
+                    persistenceStatus = InputSystemPersistenceStatus.SerializationFailed;
+                    persistenceError = serializationError;
+                    persistenceContent = null;
+                }
+                else
+                {
+                    persistenceStatus = InputSystemPersistenceStatus.NotRequested;
+                }
+
+                if (persistenceContent != null)
+                {
+                    try
                     {
-                        return (true, uwr.downloadHandler.text);
-                    }
-                    else
-                    {
-                        if (uwr.error == null || uwr.error.IndexOf("not found", StringComparison.OrdinalIgnoreCase) < 0)
+                        // Runtime commit is the final caller-cancellation point. Keep the token on the
+                        // storage operation so a custom implementation remains stoppable, but convert
+                        // post-commit cancellation into an explicit persistence status.
+                        InputConfigurationStoreResult saveResult =
+                            await userStore.SaveAsync(userKey, persistenceContent, cancellationToken);
+                        persistenceStatus = saveResult.IsSuccess
+                            ? InputSystemPersistenceStatus.Succeeded
+                            : InputSystemPersistenceStatus.Failed;
+                        persistenceError = saveResult.Error;
+                        if (!saveResult.IsSuccess)
                         {
-                            CLogger.LogWarning($"{DEBUG_FLAG} Failed to load from '{uri}': {uwr.error}");
+                            Log.Warning(
+                                $"{LogPrefix} Runtime initialization succeeded, but user configuration persistence failed: " +
+                                $"{saveResult.Status}. {saveResult.Error}");
                         }
-                        return (false, null);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        persistenceStatus = InputSystemPersistenceStatus.Canceled;
+                        persistenceError = "Persistence was canceled after runtime commit.";
+                        Log.Warning(
+                            $"{LogPrefix} Runtime initialization succeeded, but user configuration persistence was canceled.");
+                    }
+                    catch (Exception exception) when (IsRecoverableException(exception))
+                    {
+                        persistenceStatus = InputSystemPersistenceStatus.Failed;
+                        persistenceError = $"Persistence provider failed ({exception.GetType().Name}).";
+                        Log.Error(
+                            exception,
+                            $"{LogPrefix} Runtime initialization succeeded, but the persistence provider failed.");
                     }
                 }
-                catch (System.Exception e)
-                {
-                    CLogger.LogError($"{DEBUG_FLAG} Exception loading from '{uri}': {e.Message}");
-                    return (false, null);
-                }
+
+                return new InputSystemLoadResult(
+                    InputSystemLoadStatus.SuccessFromDefaultConfiguration,
+                    userRead.Status,
+                    null,
+                    persistenceStatus,
+                    persistenceError);
             }
+            else if (userRead.IsSuccess && !useUserConfiguration)
+            {
+                Log.Warning(
+                    $"{LogPrefix} User configuration is invalid and was preserved. " +
+                    $"Defaults were used for this session. {userValidationError}");
+            }
+
+            return new InputSystemLoadResult(
+                useUserConfiguration
+                    ? InputSystemLoadStatus.SuccessFromUserConfiguration
+                    : InputSystemLoadStatus.SuccessFromDefaultConfiguration,
+                userRead.Status);
         }
+
+        private static bool IsConfigurationContentFailure(InputManagerInitializationStatus status)
+        {
+            return status == InputManagerInitializationStatus.EmptyContent ||
+                   status == InputManagerInitializationStatus.ParseFailed ||
+                   status == InputManagerInitializationStatus.ValidationFailed ||
+                   status == InputManagerInitializationStatus.InputSystemPreflightFailed;
+        }
+
+        private static bool IsRecoverableException(Exception exception)
+        {
+            return exception is not OutOfMemoryException &&
+                   exception is not AccessViolationException &&
+                   exception is not StackOverflowException;
+        }
+
     }
 }

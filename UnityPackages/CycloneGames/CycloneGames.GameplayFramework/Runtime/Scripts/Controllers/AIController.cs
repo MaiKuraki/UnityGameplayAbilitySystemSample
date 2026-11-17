@@ -1,5 +1,4 @@
 using UnityEngine;
-using CycloneGames.Logger;
 
 namespace CycloneGames.GameplayFramework.Runtime
 {
@@ -14,29 +13,48 @@ namespace CycloneGames.GameplayFramework.Runtime
         private Vector3? focalPoint;
         private bool bIsRunningAI;
 
-        #region Focus
-        public void SetFocus(Actor NewFocus)
+        protected override void Awake()
         {
-            focusActor = NewFocus;
+            base.Awake();
+            EnsureActorTickConfiguration();
+        }
+
+        #region Focus
+        public void SetFocus(Actor newFocus)
+        {
+            AssertActorOwnerThread();
+            if (newFocus != null && World != null && !ReferenceEquals(newFocus.World, World))
+            {
+                throw new System.InvalidOperationException("AI focus must belong to the same World.");
+            }
+
+            focusActor = newFocus;
             focalPoint = null;
         }
 
-        public void SetFocalPoint(Vector3 Point)
+        public void SetFocalPoint(Vector3 point)
         {
-            focalPoint = Point;
+            AssertActorOwnerThread();
+            focalPoint = point;
             focusActor = null;
         }
 
-        public Actor GetFocusActor() => focusActor;
+        public Actor GetFocusActor()
+        {
+            AssertActorOwnerThread();
+            return focusActor;
+        }
 
         public Vector3 GetFocalPoint()
         {
+            AssertActorOwnerThread();
             if (focusActor != null) return focusActor.GetActorLocation();
             return focalPoint ?? GetActorLocation();
         }
 
         public void ClearFocus()
         {
+            AssertActorOwnerThread();
             focusActor = null;
             focalPoint = null;
         }
@@ -49,21 +67,37 @@ namespace CycloneGames.GameplayFramework.Runtime
         /// </summary>
         public virtual void RunAI()
         {
+            AssertActorOwnerThread();
+            EnsureActorTickConfiguration();
             bIsRunningAI = true;
+            SetActorTickEnabled(true);
         }
 
         public virtual void StopAI()
         {
+            AssertActorOwnerThread();
             bIsRunningAI = false;
+            SetActorTickEnabled(false);
         }
 
-        public bool IsRunningAI() => bIsRunningAI;
+        public bool IsRunningAI()
+        {
+            AssertActorOwnerThread();
+            return bIsRunningAI;
+        }
+
+        private void EnsureActorTickConfiguration()
+        {
+            if (TickPhase == ActorTickPhase.None)
+            {
+                ConfigureActorTick(ActorTickPhase.Update, startWithTickEnabled: false);
+            }
+        }
         #endregion
 
         protected override void OnPossess(Pawn InPawn)
         {
             base.OnPossess(InPawn);
-            InitPlayerState();
             if (bStartAILogicOnPossess) RunAI();
         }
 
@@ -74,9 +108,51 @@ namespace CycloneGames.GameplayFramework.Runtime
             base.OnUnPossess();
         }
 
-        protected override void Update()
+        protected override void OnWorldUnbound(EndPlayReason reason)
         {
-            base.Update();
+            var terminalExceptions = new TerminalExceptionAccumulator();
+            try
+            {
+                base.OnWorldUnbound(reason);
+            }
+            catch (System.Exception exception)
+            {
+                terminalExceptions.HandleAndLog(
+                    exception,
+                    "AIController base Controller cleanup failed while unbinding from its World.");
+            }
+
+            try
+            {
+                StopAI();
+            }
+            catch (System.Exception exception)
+            {
+                terminalExceptions.HandleAndLog(
+                    exception,
+                    "AIController StopAI callback failed while unbinding from its World.");
+            }
+
+            bIsRunningAI = false;
+            try
+            {
+                SetActorTickEnabled(false);
+            }
+            catch (System.Exception exception)
+            {
+                terminalExceptions.HandleAndLog(
+                    exception,
+                    "AIController failed to disable Actor Tick while unbinding from its World.");
+            }
+
+            focusActor = null;
+            focalPoint = null;
+            terminalExceptions.ThrowIfCaptured();
+        }
+
+        protected override void Tick(float deltaSeconds)
+        {
+            _ = deltaSeconds;
             if (!bIsRunningAI || GetPawn() == null) return;
 
             // Auto-rotate toward focus target

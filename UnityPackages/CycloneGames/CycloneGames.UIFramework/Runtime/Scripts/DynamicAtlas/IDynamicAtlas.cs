@@ -1,56 +1,69 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace CycloneGames.UIFramework.DynamicAtlas
 {
+    /// <summary>
+    /// Owner-thread contract for a bounded runtime sprite atlas. All members must be called
+    /// on the Unity main thread that created the implementation; off-thread calls throw.
+    /// Acquire members return a status code because callers need the failure reason;
+    /// cached lookup members return bool because only presence matters.
+    /// </summary>
     public interface IDynamicAtlas : IDisposable
     {
-        /// <summary>
-        /// Get or load a sprite by path. Increments reference count.
-        /// </summary>
-        Sprite GetSprite(string path);
+        /// <summary>Acquires a sprite lease for the whole source texture, copying pixels on a cache miss.</summary>
+        DynamicAtlasInsertStatus TryAcquire(
+            string key,
+            Texture2D source,
+            out DynamicAtlasSpriteLease lease);
+
+        /// <summary>Acquires a sprite lease for a sub-region of the source texture.</summary>
+        DynamicAtlasInsertStatus TryAcquireRegion(
+            string key,
+            Texture2D source,
+            RectInt sourceRect,
+            out DynamicAtlasSpriteLease lease);
+
+        /// <summary>Acquires a sprite lease for the rect of an existing sprite.</summary>
+        DynamicAtlasInsertStatus TryAcquireSprite(
+            string key,
+            Sprite source,
+            out DynamicAtlasSpriteLease lease);
+
+        /// <summary>Acquires a sprite lease by resolving the key through the configured loader.</summary>
+        DynamicAtlasInsertStatus TryAcquireLocation(
+            string location,
+            out DynamicAtlasSpriteLease lease);
+
+        /// <summary>Retains an existing entry without copying pixels; false when the key is unknown.</summary>
+        bool TryAcquireCached(string key, out DynamicAtlasSpriteLease lease);
+
+        /// <summary>Reads the cached sprite without retaining a reference; false when the key is unknown.</summary>
+        bool TryGetSprite(string key, out Sprite sprite);
+
+        /// <summary>Removes up to <paramref name="maximumEntriesToRemove"/> zero-reference retained entries.</summary>
+        int TrimUnused(int maximumEntriesToRemove = int.MaxValue);
+
+        /// <summary>Returns a bounded snapshot of counters and capacity usage.</summary>
+        DynamicAtlasStats GetStats();
+
+        /// <summary>Writes per-page snapshots into the caller-owned buffer; returns the written count.</summary>
+        int CopyPageSnapshots(List<DynamicAtlasPageSnapshot> destination);
+
+        /// <summary>Writes per-entry snapshots into the caller-owned buffer; returns the written count.</summary>
+        int CopyEntrySnapshots(List<DynamicAtlasEntrySnapshot> destination);
+
+        /// <summary>Pre-allocates pages so later acquisitions avoid page creation; returns the created count.</summary>
+        int PrewarmPages(int pageCount, DynamicAtlasPageMode mode);
 
         /// <summary>
-        /// Get or create a sprite from an existing Sprite (e.g., from a SpriteAtlas).
-        /// Copies the sprite's pixels into the dynamic atlas. Increments reference count.
+        /// Defers texture uploads until the returned batch is disposed. Batches nest on the
+        /// owner thread; disposing a stale batch after Clear is a no-op.
         /// </summary>
-        /// <param name="sourceSprite">The source sprite to copy from (can be from SpriteAtlas)</param>
-        /// <param name="cacheKey">Optional cache key. If null, uses sourceSprite.name</param>
-        /// <returns>A new sprite referencing the dynamic atlas</returns>
-        Sprite GetSpriteFromSprite(Sprite sourceSprite, string cacheKey = null);
+        DynamicAtlasWriteBatch BeginBatch();
 
-        /// <summary>
-        /// Get or create a sprite from a Texture2D region.
-        /// Useful for extracting specific regions from larger textures.
-        /// </summary>
-        /// <param name="sourceTexture">The source texture</param>
-        /// <param name="sourceRect">The region to extract (in pixels)</param>
-        /// <param name="cacheKey">Cache key for this region</param>
-        /// <returns>A new sprite referencing the dynamic atlas</returns>
-        Sprite GetSpriteFromRegion(Texture2D sourceTexture, Rect sourceRect, string cacheKey);
-
-        /// <summary>
-        /// Fires when a heavily fragmented page is repacked and a new Sprite replaces the old one.
-        /// UI Frameworks or Image components should subscribe to this to hot-swap their sprite reference seamlessly.
-        /// </summary>
-        event Action<string, Sprite> OnSpriteRepacked;
-
-        /// <summary>
-        /// Performs a double-buffering defragmentation of heavily fragmented atlas pages.
-        /// </summary>
-        /// <param name="fragmentationThreshold">The minimum ratio of wasted space (0.0 to 1.0) to trigger a repack on a page. default is 0.5 (50% wasted).</param>
-        /// <returns>The number of pages successfully destroyed and reclaimed.</returns>
-        int Defragment(float fragmentationThreshold = 0.5f);
-
-        /// <summary>
-        /// Release a sprite by cache key. Decrements reference count.
-        /// If count reaches 0, the sprite might be freed immediately.
-        /// </summary>
-        void ReleaseSprite(string cacheKey);
-
-        /// <summary>
-        /// Clear all pages and cache.
-        /// </summary>
-        void Reset();
+        /// <summary>Evicts every entry and page; outstanding leases become stale no-ops.</summary>
+        void Clear();
     }
 }

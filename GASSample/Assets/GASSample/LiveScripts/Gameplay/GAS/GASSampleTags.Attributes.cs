@@ -1,5 +1,3 @@
-[assembly: CycloneGames.GameplayTags.Core.RegisterGameplayTagsFrom(typeof(GASSample.Gameplay.GASSampleTags))]
-
 namespace GASSample.Gameplay
 {
     public static partial class GASSampleTags

@@ -1,0 +1,345 @@
+using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
+using CycloneGames.GameplayAbilities.Runtime;
+using NUnit.Framework;
+using UnityEngine;
+using UnityEngine.TestTools;
+
+namespace CycloneGames.GameplayAbilities.Tests.PlayMode
+{
+    public sealed class GASDebugOverlayPlayModeTests
+    {
+        private readonly List<AbilitySystemComponent> createdASCs = new List<AbilitySystemComponent>(40);
+        private readonly List<GameObject> createdOwners = new List<GameObject>(4);
+
+        [UnitySetUp]
+        public IEnumerator SetUp()
+        {
+            GASDebugOverlay.ActiveConfiguration = null;
+            GASDebugOverlay.Cleanup();
+            yield return null;
+            createdASCs.Clear();
+            createdOwners.Clear();
+        }
+
+        [UnityTearDown]
+        public IEnumerator TearDown()
+        {
+            GASDebugOverlay.ClearTargets();
+            GASDebugOverlay.SetEnabled(false);
+            GASDebugOverlay.Cleanup();
+
+            for (int i = 0; i < createdASCs.Count; i++)
+            {
+                AbilitySystemComponent asc = createdASCs[i];
+                if (asc != null && !asc.IsDisposed)
+                {
+                    asc.Dispose();
+                }
+            }
+
+            for (int i = 0; i < createdOwners.Count; i++)
+            {
+                GameObject owner = createdOwners[i];
+                if (owner != null)
+                {
+                    Object.Destroy(owner);
+                }
+            }
+
+            createdASCs.Clear();
+            createdOwners.Clear();
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator Initialize_WithoutConfiguration_UsesDefaultCapacity()
+        {
+            GASDebugOverlay.Initialize(enableAtStart: false);
+
+            Assert.That(GASDebugOverlay.IsInitialized, Is.True);
+            Assert.That(GASDebugOverlay.TargetCapacity, Is.EqualTo(8));
+
+            GASDebugOverlay.Cleanup();
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator Initialize_WithExplicitConfiguration_UsesConfiguredCapacity()
+        {
+            var config = ScriptableObject.CreateInstance<GASOverlayConfig>();
+            config.MaxPanels = 3;
+
+            try
+            {
+                GASDebugOverlay.Initialize(enableAtStart: false, configuration: config);
+                Assert.That(GASDebugOverlay.TargetCapacity, Is.EqualTo(3));
+            }
+            finally
+            {
+                GASDebugOverlay.Cleanup();
+                Object.DestroyImmediate(config);
+            }
+
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator Initialize_WithActiveConfiguration_UsesConfiguredCapacity()
+        {
+            var config = ScriptableObject.CreateInstance<GASOverlayConfig>();
+            config.MaxPanels = 5;
+            GASDebugOverlay.ActiveConfiguration = config;
+
+            try
+            {
+                GASDebugOverlay.Initialize(enableAtStart: false);
+                Assert.That(GASDebugOverlay.TargetCapacity, Is.EqualTo(5));
+            }
+            finally
+            {
+                GASDebugOverlay.Cleanup();
+                GASDebugOverlay.ActiveConfiguration = null;
+                Object.DestroyImmediate(config);
+            }
+
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator CreateDefault_ProducesIndependentInstances()
+        {
+            GASOverlayConfig first = GASOverlayConfig.CreateDefault();
+            GASOverlayConfig second = GASOverlayConfig.CreateDefault();
+
+            try
+            {
+                Assert.That(first, Is.Not.Null);
+                Assert.That(second, Is.Not.SameAs(first));
+                first.MaxPanels = 2;
+                Assert.That(second.MaxPanels, Is.EqualTo(8));
+            }
+            finally
+            {
+                Object.DestroyImmediate(first);
+                Object.DestroyImmediate(second);
+            }
+
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator TryAddTarget_TwoDistinctTargetsCoexistWithoutChangingVisibility()
+        {
+            AbilitySystemComponent player = CreateASC();
+            AbilitySystemComponent enemy = CreateASC();
+            GameObject playerOwner = CreateOwner("Player");
+            GameObject enemyOwner = CreateOwner("Enemy");
+
+            Assert.That(GASDebugOverlay.TryAddTarget(player, playerOwner), Is.True);
+            Assert.That(GASDebugOverlay.IsInitialized, Is.True);
+            Assert.That(GASDebugOverlay.IsActive, Is.False);
+            Assert.That(GASDebugOverlay.TryAddTarget(enemy, enemyOwner), Is.True);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.EqualTo(2));
+            Assert.That(GASDebugOverlay.IsActive, Is.False);
+
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator TryAddTarget_DuplicateAndCapacityRemainBounded()
+        {
+            AbilitySystemComponent first = CreateASC();
+            Assert.That(GASDebugOverlay.TryAddTarget(first, displayName: "First"), Is.True);
+            Assert.That(GASDebugOverlay.TryAddTarget(first, displayName: "Updated First"), Is.True);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.EqualTo(1));
+
+            int capacity = GASDebugOverlay.TargetCapacity;
+            Assert.That(capacity, Is.InRange(1, 32));
+            for (int i = 1; i < capacity; i++)
+            {
+                Assert.That(GASDebugOverlay.TryAddTarget(CreateASC(), displayName: "Target " + i), Is.True);
+            }
+
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.EqualTo(capacity));
+            Assert.That(GASDebugOverlay.TryAddTarget(first, displayName: "Updated At Capacity"), Is.True);
+            Assert.That(GASDebugOverlay.TryAddTarget(CreateASC(), displayName: "Rejected"), Is.False);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.EqualTo(capacity));
+
+            first.Dispose();
+            Assert.That(GASDebugOverlay.TryAddTarget(CreateASC(), displayName: "Replacement"), Is.True);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.EqualTo(capacity));
+
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator RemoveTargetAndClearTargets_AreIdempotentAndPreserveVisibility()
+        {
+            AbilitySystemComponent first = CreateASC();
+            AbilitySystemComponent second = CreateASC();
+            Assert.That(GASDebugOverlay.TryAddTarget(first), Is.True);
+            Assert.That(GASDebugOverlay.TryAddTarget(second), Is.True);
+            GASDebugOverlay.SetEnabled(true);
+
+            Assert.That(GASDebugOverlay.RemoveTarget(first), Is.True);
+            Assert.That(GASDebugOverlay.RemoveTarget(first), Is.False);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.EqualTo(1));
+            Assert.That(GASDebugOverlay.IsActive, Is.True);
+
+            GASDebugOverlay.ClearTargets();
+            GASDebugOverlay.ClearTargets();
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.Zero);
+            Assert.That(GASDebugOverlay.IsInitialized, Is.True);
+            Assert.That(GASDebugOverlay.IsActive, Is.True);
+
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator IsTargetRegistered_TracksAddRemoveDisposalAndCleanup()
+        {
+            AbilitySystemComponent first = CreateASC();
+            AbilitySystemComponent second = CreateASC();
+
+            Assert.That(GASDebugOverlay.IsInitialized, Is.False);
+            Assert.That(GASDebugOverlay.IsTargetRegistered(null), Is.False);
+            Assert.That(GASDebugOverlay.IsTargetRegistered(first), Is.False);
+            Assert.That(GASDebugOverlay.IsInitialized, Is.False);
+            Assert.That(GASDebugOverlay.TryAddTarget(first), Is.True);
+            Assert.That(GASDebugOverlay.IsTargetRegistered(first), Is.True);
+            Assert.That(GASDebugOverlay.IsTargetRegistered(second), Is.False);
+
+            Assert.That(GASDebugOverlay.RemoveTarget(first), Is.True);
+            Assert.That(GASDebugOverlay.IsTargetRegistered(first), Is.False);
+
+            Assert.That(GASDebugOverlay.TryAddTarget(second), Is.True);
+            second.Dispose();
+            Assert.That(GASDebugOverlay.IsTargetRegistered(second), Is.False);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.Zero);
+
+            AbilitySystemComponent replacement = CreateASC();
+            Assert.That(GASDebugOverlay.TryAddTarget(replacement), Is.True);
+            GASDebugOverlay.Cleanup();
+            Assert.That(GASDebugOverlay.IsTargetRegistered(replacement), Is.False);
+
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator Toggle_ReplacesTargetSetAndKeepsSingleTargetSemantics()
+        {
+            AbilitySystemComponent player = CreateASC();
+            AbilitySystemComponent enemy = CreateASC();
+            Assert.That(GASDebugOverlay.TryAddTarget(player), Is.True);
+            Assert.That(GASDebugOverlay.TryAddTarget(enemy), Is.True);
+
+            Assert.That(GASDebugOverlay.Toggle(player), Is.True);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.EqualTo(1));
+            Assert.That(GASDebugOverlay.RemoveTarget(enemy), Is.False);
+
+            Assert.That(GASDebugOverlay.TryAddTarget(enemy), Is.True);
+            Assert.That(GASDebugOverlay.Toggle(enemy), Is.False);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.EqualTo(1));
+            Assert.That(GASDebugOverlay.RemoveTarget(player), Is.False);
+
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator InvalidTargets_DoNotInitializeOrMutate()
+        {
+            Assert.That(GASDebugOverlay.TryAddTarget(null), Is.False);
+            Assert.That(GASDebugOverlay.IsInitialized, Is.False);
+
+            AbilitySystemComponent disposed = CreateASC();
+            disposed.Dispose();
+            Assert.That(GASDebugOverlay.TryAddTarget(disposed), Is.False);
+            Assert.That(GASDebugOverlay.IsInitialized, Is.False);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.Zero);
+
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator Cleanup_IsIdempotentAndReinitializable()
+        {
+            Assert.That(GASDebugOverlay.TryAddTarget(CreateASC()), Is.True);
+            GASDebugOverlay.SetEnabled(true);
+            GASDebugOverlay.Cleanup();
+
+            Assert.That(GASDebugOverlay.IsInitialized, Is.False);
+            Assert.That(GASDebugOverlay.IsActive, Is.False);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.Zero);
+            yield return null;
+
+            GASDebugOverlay.Cleanup();
+            Assert.That(GASDebugOverlay.TryAddTarget(CreateASC()), Is.True);
+            Assert.That(GASDebugOverlay.IsInitialized, Is.True);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.EqualTo(1));
+        }
+
+        [UnityTest]
+        public IEnumerator CleanupThenInitializeInSameFrame_OldOnDestroyDoesNotClearNewAuthority()
+        {
+            Assert.That(GASDebugOverlay.TryAddTarget(CreateASC(), displayName: "Old"), Is.True);
+            GASDebugOverlay.Cleanup();
+            Assert.That(GASDebugOverlay.TryAddTarget(CreateASC(), displayName: "New"), Is.True);
+
+            yield return null;
+
+            Assert.That(GASDebugOverlay.IsInitialized, Is.True);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.EqualTo(1));
+        }
+
+        [UnityTest]
+        public IEnumerator ExternalDestruction_ResetsLifecycleAndAllowsRecreation()
+        {
+            Assert.That(GASDebugOverlay.TryAddTarget(CreateASC()), Is.True);
+            // The overlay under test is created by TryAddTarget in the same test body; there is no
+            // serialized reference to reach it from, and a per-test registry would only restate the
+            // scene search this performs.
+#pragma warning disable CG0011
+            GASDebugOverlay overlay = Object.FindAnyObjectByType<GASDebugOverlay>();
+#pragma warning restore CG0011
+            Assert.That(overlay, Is.Not.Null);
+
+            Object.Destroy(overlay.gameObject);
+            yield return null;
+
+            Assert.That(GASDebugOverlay.IsInitialized, Is.False);
+            Assert.That(GASDebugOverlay.IsActive, Is.False);
+            Assert.That(GASDebugOverlay.BoundTargetCount, Is.Zero);
+            Assert.That(GASDebugOverlay.TryAddTarget(CreateASC()), Is.True);
+            Assert.That(GASDebugOverlay.IsInitialized, Is.True);
+        }
+
+        [Test]
+        public void StaticLifecycle_HasSubsystemRegistrationReset()
+        {
+            MethodInfo resetMethod = typeof(GASDebugOverlay).GetMethod(
+                "ResetStaticState",
+                BindingFlags.Static | BindingFlags.NonPublic);
+
+            Assert.That(resetMethod, Is.Not.Null);
+            Assert.That(
+                resetMethod.GetCustomAttributes(typeof(RuntimeInitializeOnLoadMethodAttribute), false),
+                Has.Length.EqualTo(1));
+        }
+
+        private AbilitySystemComponent CreateASC()
+        {
+            var asc = new AbilitySystemComponent();
+            createdASCs.Add(asc);
+            return asc;
+        }
+
+        private GameObject CreateOwner(string name)
+        {
+            var owner = new GameObject(name);
+            createdOwners.Add(owner);
+            return owner;
+        }
+    }
+}

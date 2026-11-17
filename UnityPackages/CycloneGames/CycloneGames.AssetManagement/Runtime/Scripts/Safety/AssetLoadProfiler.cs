@@ -1,7 +1,7 @@
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if DEBUG
 using System.Diagnostics;
 using Cysharp.Threading.Tasks;
-using CycloneGames.Logger;
+using CycloneGames.Logging;
 
 namespace CycloneGames.AssetManagement.Runtime
 {
@@ -13,9 +13,11 @@ namespace CycloneGames.AssetManagement.Runtime
     /// </summary>
     public static class AssetLoadProfiler
     {
+        private static readonly LogChannel Log = AssetManagementLog.Channel;
+
         /// <summary>
         /// Loads exceeding this threshold (in milliseconds) will emit a warning log.
-        /// Default 100ms (~6 frames at 60fps). Adjust per project as needed.
+        /// Default 300ms (~18 frames at 60fps). Adjust per project as needed.
         /// </summary>
         public static long SlowLoadThresholdMs = 300;
 
@@ -27,7 +29,7 @@ namespace CycloneGames.AssetManagement.Runtime
         /// <summary>
         /// Attaches a fire-and-forget continuation to an async handle.
         /// Measures time from now until handle.Task completes.
-        /// Zero allocation on the fast path (non-slow loads only log).
+        /// Uses the operation's broadcast completion task and does not poll once per frame.
         /// </summary>
         public static void TrackAsync(IOperation handle, string location)
         {
@@ -51,27 +53,43 @@ namespace CycloneGames.AssetManagement.Runtime
             long elapsedMs = (Stopwatch.GetTimestamp() - startTicks) * 1000 / Stopwatch.Frequency;
             if (elapsedMs > SlowLoadThresholdMs)
             {
-                CLogger.LogWarning($"[AssetLoadProfiler] Slow SYNC load ({elapsedMs}ms): {location}");
+                Log.Warning(
+                    (ElapsedMs: elapsedMs, Location: location),
+                    static (state, builder) => builder
+                        .Append("[AssetLoadProfiler] Slow SYNC load (")
+                        .Append(state.ElapsedMs)
+                        .Append("ms): ")
+                        .Append(state.Location));
             }
         }
 
         private static async UniTaskVoid AwaitAndReport(IOperation handle, string location, long startTicks)
         {
-            // Poll IsDone instead of awaiting handle.Task directly.
-            // ResourcesAssetHandle and YooAssetHandle both use single-slot continuations
-            // (Preserve/MemoizeSource or YooAsset's internal TCS). Awaiting the same Task
-            // from two callers simultaneously causes "Already continuation registered" crashes.
-            // Polling never occupies the continuation slot, so callers that do await handle.Task
-            // remain unaffected.
-            while (!handle.IsDone)
+            try
             {
-                await UniTask.Yield(PlayerLoopTiming.Update);
+                await handle.Task;
+            }
+            catch (System.OperationCanceledException)
+            {
+                return;
+            }
+            catch (System.Exception exception) when (AssetRuntimeGuard.IsRecoverableException(exception))
+            {
+                Log.Error(
+                    exception,
+                    $"[AssetLoadProfiler] ASYNC load failed: {location}");
             }
 
             long elapsedMs = (Stopwatch.GetTimestamp() - startTicks) * 1000 / Stopwatch.Frequency;
             if (elapsedMs > SlowLoadThresholdMs)
             {
-                CLogger.LogWarning($"[AssetLoadProfiler] Slow ASYNC load ({elapsedMs}ms): {location}");
+                Log.Warning(
+                    (ElapsedMs: elapsedMs, Location: location),
+                    static (state, builder) => builder
+                        .Append("[AssetLoadProfiler] Slow ASYNC load (")
+                        .Append(state.ElapsedMs)
+                        .Append("ms): ")
+                        .Append(state.Location));
             }
         }
     }

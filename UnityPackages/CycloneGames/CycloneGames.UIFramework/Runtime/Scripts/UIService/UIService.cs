@@ -1,367 +1,2370 @@
 using System;
+using System.Collections.Generic;
+using System.Threading;
 using Cysharp.Threading.Tasks;
-using CycloneGames.Factory.Runtime;             // For IUnityObjectSpawner
-using CycloneGames.Service.Runtime;             // For IMainCameraService
-using CycloneGames.AssetManagement.Runtime;     // For IAssetPathBuilderFactory
-using CycloneGames.Logger;
+using CycloneGames.Logging;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+
+namespace CycloneGames.UIFramework
+{
+}
 
 namespace CycloneGames.UIFramework.Runtime
 {
-    public interface IUIService
+    public enum UIShutdownMode
     {
-        /// <summary>
-        /// Opens a UI by its registered name.
-        /// </summary>
-        /// <param name="windowName">The name of the UI window to open.</param>
-        /// <param name="onWindowCreated">Optional callback invoked when the window is created.</param>
-        void OpenUI(string windowName, System.Action<UIWindow> onWindowCreated = null, bool? isSceneBoundOverride = null, UIAssetLoadContext assetLoadContext = default);
-        UniTask<UIWindow> OpenUIAsync(string windowName, System.Threading.CancellationToken cancellationToken = default, bool? isSceneBoundOverride = null, UIAssetLoadContext assetLoadContext = default);
-
-        /// <summary>
-        /// Closes a UI by its registered name.
-        /// </summary>
-        /// <param name="windowName">The name of the UI window to close.</param>
-        void CloseUI(string windowName);
-        UniTask CloseUIAsync(string windowName, System.Threading.CancellationToken cancellationToken = default);
-
-        /// <summary>
-        /// Checks if a UI window is currently considered valid (e.g., open and active).
-        /// </summary>
-        /// <param name="windowName">The name of the UI window.</param>
-        /// <returns>True if the window is valid, false otherwise.</returns>
-        bool IsUIWindowValid(string windowName);
-
-        /// <summary>
-        /// Gets a reference to an open UI window by its name.
-        /// </summary>
-        /// <param name="windowName">The name of the UI window.</param>
-        /// <returns>The UIWindow instance if found and active, otherwise null.</returns>
-        UIWindow GetUIWindow(string windowName); // Renamed from GetUIWindow for consistency
-
-        // Optional: Methods to manage UI camera stacking if not handled internally by UIManager
-        // void AddUICameraToMainCameraStack();
-        // void RemoveUICameraFromMainCameraStack();
-
-        (float, float) GetRootCanvasSize();
-
-        /// <summary>
-        /// Gets the UI Camera from the UIRoot.
-        /// </summary>
-        /// <returns>The UI Camera if available, otherwise null.</returns>
-        UnityEngine.Camera GetUICamera();
-
-        void Initialize(IAssetPathBuilderFactory factory, IUnityObjectSpawner spawner, IMainCameraService cameraService);
-        void Initialize(IAssetPathBuilderFactory factory, IUnityObjectSpawner spawner, IMainCameraService cameraService, IAssetPackage package);
-
-        /// <summary>
-        /// Returns the active navigation service, or null if none has been set.
-        /// </summary>
-        IUINavigationService NavigationService { get; }
-
-        /// <summary>
-        /// Attaches an IUINavigationService. The service will be notified automatically
-        /// when any window opens or closes through this UIService.
-        /// </summary>
-        void SetNavigationService(IUINavigationService nav);
-
-        /// <summary>Returns the active transition coordinator, or null if none.</summary>
-        IUITransitionCoordinator TransitionCoordinator { get; }
-
-        /// <summary>
-        /// Attaches a coordinator for simultaneous two-window transitions.
-        /// Pass null to fall back to sequential (independent) animations.
-        /// </summary>
-        void SetTransitionCoordinator(IUITransitionCoordinator coordinator);
-
-        /// <summary>
-        /// Sets the strategy for handling rapid sequential coordinated navigations.
-        /// <see cref="CoordinatedNavStrategy.DirectJump"/>: skip intermediate pages.
-        /// <see cref="CoordinatedNavStrategy.CardStack"/>: overlapping cascading transitions.
-        /// </summary>
-        void SetCoordinatedNavStrategy(CoordinatedNavStrategy strategy);
-
-        /// <summary>
-        /// Navigates from <paramref name="fromWindow"/> to <paramref name="toWindow"/> using the
-        /// active IUITransitionCoordinator. Falls back to sequential OpenUI when no coordinator is set.
-        /// </summary>
-        Cysharp.Threading.Tasks.UniTask CoordinatedNavigateAsync(
-            string fromWindow, string toWindow,
-            NavigationDirection direction = NavigationDirection.Forward,
-            System.Threading.CancellationToken ct = default);
+        Immediate = 0,
+        Animated = 1,
     }
 
-    public class UIService : IDisposable, IUIService
+    public readonly struct UIOpenOptions
     {
-        private const string DEBUG_FLAG = "[UIService]";
-        private UIManager uiManagerInstance;
-        private bool _ownsUIManager; // true when UIService created the UIManager (DontDestroyOnLoad)
+        public UIOpenOptions(
+            string openerId = null,
+            object context = null,
+            bool? sceneBoundOverride = null,
+            UIAssetLoadContext assetLoadContext = default,
+            IUIWindowTransitionDriver transitionDriver = null,
+            bool suppressWindowTransition = false)
+        {
+            OpenerId = openerId;
+            Context = context;
+            SceneBoundOverride = sceneBoundOverride;
+            AssetLoadContext = assetLoadContext;
+            TransitionDriver = transitionDriver;
+            SuppressWindowTransition = suppressWindowTransition;
+        }
 
-        // Dependencies
-        private IAssetPathBuilderFactory assetPathBuilderFactory;
-        private IUnityObjectSpawner objectSpawner;
-        private IMainCameraService mainCameraService;
+        public string OpenerId { get; }
+        public object Context { get; }
+        public bool? SceneBoundOverride { get; }
+        public UIAssetLoadContext AssetLoadContext { get; }
+        public IUIWindowTransitionDriver TransitionDriver { get; }
+        public bool SuppressWindowTransition { get; }
+    }
 
-        private bool isInitialized = false;
+    public sealed class UIServiceOptions
+    {
+        public int InitialWindowCapacity { get; set; } = 16;
+        public int MaxActiveWindows { get; set; } = 64;
+        public int MaxInstantiatesPerFrame { get; set; } = 2;
 
         /// <summary>
-        /// Default constructor. Call Initialize() to complete setup.
+        /// Upper bound in seconds for draining in-flight provider acquisitions during shutdown.
+        /// Zero waits indefinitely. Keeps a non-cooperative provider from hanging teardown.
         /// </summary>
-        public UIService()
+        public int MaxProviderDrainSeconds { get; set; } = 5;
+        public UIAssetLoadContext DefaultAssetLoadContext { get; set; }
+        public IUIWindowTransitionDriver DefaultTransitionDriver { get; set; }
+        public IUINavigationService NavigationService { get; set; }
+
+        internal void Validate()
         {
-            isInitialized = false;
+            if (InitialWindowCapacity < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(InitialWindowCapacity));
+            }
+
+            if (MaxActiveWindows < InitialWindowCapacity)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(MaxActiveWindows),
+                    "MaxActiveWindows must be greater than or equal to InitialWindowCapacity.");
+            }
+
+            if (MaxInstantiatesPerFrame < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(MaxInstantiatesPerFrame));
+            }
+
+            if (MaxProviderDrainSeconds < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(MaxProviderDrainSeconds),
+                    "MaxProviderDrainSeconds must be zero (wait indefinitely) or a positive bound.");
+            }
+        }
+    }
+
+    public interface IUIService : IDisposable
+    {
+        bool IsDisposed { get; }
+        bool IsShuttingDown { get; }
+        int ActiveWindowCount { get; }
+        IUINavigationService NavigationService { get; }
+
+        UniTask<UIWindow> OpenAsync(
+            string windowId,
+            UIOpenOptions options = default,
+            CancellationToken cancellationToken = default);
+
+        UniTask<UIWindow> OpenAsync(
+            UIWindowConfiguration configuration,
+            UIOpenOptions options = default,
+            CancellationToken cancellationToken = default);
+
+        UniTask<bool> CloseAsync(
+            string windowId,
+            ChildClosePolicy childPolicy = ChildClosePolicy.Reparent,
+            CancellationToken cancellationToken = default);
+
+        UniTask<UIWindow> NavigateAsync(
+            string leavingWindowId,
+            string enteringWindowId,
+            IUITransitionCoordinator coordinator,
+            NavigationDirection direction = NavigationDirection.Forward,
+            UIOpenOptions enteringOptions = default,
+            CancellationToken cancellationToken = default);
+
+        bool TryGetWindow(string windowId, out UIWindow window);
+        int CopyActiveWindows(List<UIWindow> destination);
+        void RegisterBinder(IUIWindowBinder binder);
+        bool UnregisterBinder(IUIWindowBinder binder);
+        Vector2 GetRootCanvasSize();
+        Camera GetUICamera();
+        UIPerformanceStats GetPerformanceStats();
+        int CopyLayerRuntimeStats(List<UILayerRuntimeStats> destination);
+        UniTask ShutdownAsync(
+            UIShutdownMode mode = UIShutdownMode.Immediate,
+            CancellationToken cancellationToken = default);
+    }
+
+    /// <summary>
+    /// Main-thread-confined owner of UI window sessions and their resources.
+    /// </summary>
+    public sealed class UIService : IUIService, IUIWindowLifetimeObserver
+    {
+        private static readonly LogChannel Log = UIFrameworkLog.Channel;
+
+        private sealed class WindowSession
+        {
+            public readonly string WindowId;
+            public readonly UIOpenOptions OpenOptions;
+            public readonly int RequestedSceneHandle;
+            public readonly CancellationTokenSource OpenCancellation;
+            public readonly CancellationTokenSource TargetLifetimeCancellation;
+            public readonly UniTaskCompletionSource<UIWindow> OpenCompletion =
+                new UniTaskCompletionSource<UIWindow>();
+            public readonly UniTaskCompletionSource CleanupCompletion =
+                new UniTaskCompletionSource();
+
+            public UIWindowConfiguration Configuration;
+            public IUIAssetLease<UIWindowConfiguration> ConfigurationLease;
+            public IUIAssetLease<GameObject> PrefabLease;
+            public UIWindow Window;
+            public UILayer Layer;
+            public IUIWindowBinding[] Bindings;
+            public int BindingCount;
+            public IUIWindowTransitionDriver TransitionDriver;
+            public UniTaskCompletionSource<bool> CloseCompletion;
+            public bool NavigationCommitted;
+            public bool IsCommitted;
+            public bool HasIsolatedCanvas;
+            public bool CloseRequested;
+            public bool CloseExecutionDeferred;
+            public bool CloseExecutionStarted;
+            public bool CleanupStarted;
+            public bool CleanupCompleted;
+            public int LifecycleDispatchDepth;
+            public Exception DeferredCloseRequestException;
+            public Exception TerminalException;
+            public UniTaskCompletionSource ProviderAcquisitionCompletion;
+
+            public WindowSession(
+                string windowId,
+                UIOpenOptions openOptions,
+                int requestedSceneHandle,
+                CancellationToken serviceToken)
+            {
+                WindowId = windowId;
+                OpenOptions = openOptions;
+                RequestedSceneHandle = requestedSceneHandle;
+                OpenCancellation = CancellationTokenSource.CreateLinkedTokenSource(serviceToken);
+                TargetLifetimeCancellation = CancellationTokenSource.CreateLinkedTokenSource(serviceToken);
+            }
+        }
+
+        private readonly UIRoot _root;
+        private readonly IUIWindowAssetProvider _assetProvider;
+        private readonly Dictionary<string, WindowSession> _sessions;
+        private readonly List<WindowSession> _sessionOrder;
+        private readonly List<IUIWindowBinder> _binders = new List<IUIWindowBinder>(4);
+        private readonly List<UILayer> _layerScratch = new List<UILayer>(8);
+        private readonly List<string> _closeScratch = new List<string>(4);
+
+        // Window ids whose lifecycle callbacks are currently dispatching. Entry points query
+        // this stack to reject re-entrant open/close requests synchronously instead of
+        // deferring them into a self-referential state.
+        private readonly List<string> _lifecycleDispatchStack = new List<string>(4);
+        // Window ids inside an asynchronous binding callback. Separate from _lifecycleDispatchStack
+        // because the guard must span the await to reject a self-referential open or close.
+        private readonly List<string> _asyncLifecycleDispatchStack = new List<string>(4);
+        private readonly CancellationTokenSource _lifetimeCancellation = new CancellationTokenSource();
+        private readonly int _ownerThreadId;
+        private readonly int _maxActiveWindows;
+        private readonly int _maxInstantiatesPerFrame;
+        private readonly int _maxProviderDrainSeconds;
+        private readonly UIAssetLoadContext _defaultAssetLoadContext;
+        private readonly IUIWindowTransitionDriver _defaultTransitionDriver;
+        private readonly IUINavigationService _navigationService;
+
+        private int _instantiateFrame = -1;
+        private int _instantiatesThisFrame;
+        private int _activeWindowCount;
+        private int _cleanupInProgressCount;
+        private UniTaskCompletionSource _shutdownCompletion;
+        private UniTaskCompletionSource _disposeCompletion;
+        private WindowSession[] _disposeSessions;
+        private bool _isDisposed;
+        private bool _isShuttingDown;
+        private bool _isNavigating;
+        private bool _disposePhasesCompleted;
+        private bool _closeScratchInUse;
+
+        public UIService(
+            UIRoot root,
+            IUIWindowAssetProvider assetProvider = null,
+            UIServiceOptions options = null,
+            IReadOnlyList<IUIWindowBinder> binders = null)
+        {
+            if (!PlayerLoopHelper.IsMainThread)
+            {
+                throw new InvalidOperationException(
+                    "UIService must be constructed on the Unity main thread.");
+            }
+
+            _ownerThreadId = Thread.CurrentThread.ManagedThreadId;
+            _root = root != null ? root : throw new ArgumentNullException(nameof(root));
+            _assetProvider = assetProvider;
+
+            options ??= new UIServiceOptions();
+            options.Validate();
+            _maxActiveWindows = options.MaxActiveWindows;
+            _maxInstantiatesPerFrame = options.MaxInstantiatesPerFrame;
+            _maxProviderDrainSeconds = options.MaxProviderDrainSeconds;
+            _defaultAssetLoadContext = options.DefaultAssetLoadContext;
+            _defaultTransitionDriver = options.DefaultTransitionDriver;
+            _navigationService = options.NavigationService;
+            _sessions = new Dictionary<string, WindowSession>(
+                options.InitialWindowCapacity,
+                StringComparer.Ordinal);
+            _sessionOrder = new List<WindowSession>(options.InitialWindowCapacity);
+
+            _root.EnsureInitialized();
+            if (binders != null)
+            {
+                for (int i = 0; i < binders.Count; i++)
+                {
+                    IUIWindowBinder binder = binders[i];
+                    if (binder != null && !_binders.Contains(binder))
+                    {
+                        _binders.Add(binder);
+                    }
+                }
+            }
+
+            SceneManager.activeSceneChanged += OnActiveSceneChanged;
+        }
+
+        public bool IsDisposed => _isDisposed;
+        public bool IsShuttingDown => _isShuttingDown;
+
+        /// <summary>Number of committed windows, after reconciling externally destroyed ones.</summary>
+        public int ActiveWindowCount
+        {
+            get
+            {
+                EnsureMainThread();
+                ReconcileDestroyedSessions();
+                return _activeWindowCount;
+            }
+        }
+
+        public IUINavigationService NavigationService => _navigationService;
+
+        public UniTask<UIWindow> OpenAsync(
+            string windowId,
+            UIOpenOptions options = default,
+            CancellationToken cancellationToken = default)
+        {
+            EnsureUsable();
+            if (string.IsNullOrWhiteSpace(windowId))
+            {
+                throw new ArgumentException("Window id cannot be empty.", nameof(windowId));
+            }
+
+            ThrowIfWindowInLifecycleDispatch(windowId);
+            return StartOrJoinOpen(windowId, null, options, cancellationToken);
+        }
+
+        public UniTask<UIWindow> OpenAsync(
+            UIWindowConfiguration configuration,
+            UIOpenOptions options = default,
+            CancellationToken cancellationToken = default)
+        {
+            EnsureUsable();
+            if (configuration == null)
+            {
+                throw new ArgumentNullException(nameof(configuration));
+            }
+
+            if (string.IsNullOrWhiteSpace(configuration.WindowId))
+            {
+                throw new ArgumentException("Window configuration requires a stable WindowId.", nameof(configuration));
+            }
+
+            ThrowIfWindowInLifecycleDispatch(configuration.WindowId);
+            return StartOrJoinOpen(configuration.WindowId, configuration, options, cancellationToken);
+        }
+
+        public UniTask<bool> CloseAsync(
+            string windowId,
+            ChildClosePolicy childPolicy = ChildClosePolicy.Reparent,
+            CancellationToken cancellationToken = default)
+        {
+            EnsureMainThread();
+            if (_isDisposed || string.IsNullOrEmpty(windowId))
+            {
+                return UniTask.FromResult(false);
+            }
+
+            ThrowIfWindowInLifecycleDispatch(windowId);
+
+            if (_sessions.TryGetValue(windowId, out WindowSession closingSession) &&
+                closingSession.CloseCompletion != null)
+            {
+                // A joined close cannot apply its policy: the first request already removed the
+                // navigation node and owns the lifecycle.
+                Log.Warning(
+                    windowId,
+                    static (id, builder) => builder
+                        .Append("[UIService] CloseAsync for '")
+                        .Append(id)
+                        .Append("' joined an in-flight close; the supplied ChildClosePolicy was ignored."));
+            }
+
+            UniTask<bool> operation = CloseWithPolicyAsync(windowId, childPolicy);
+            return cancellationToken.CanBeCanceled
+                ? operation.AttachExternalCancellation(cancellationToken)
+                : operation;
+        }
+
+        public UniTask<UIWindow> NavigateAsync(
+            string leavingWindowId,
+            string enteringWindowId,
+            IUITransitionCoordinator coordinator,
+            NavigationDirection direction = NavigationDirection.Forward,
+            UIOpenOptions enteringOptions = default,
+            CancellationToken cancellationToken = default)
+        {
+            EnsureUsable();
+            if (string.IsNullOrWhiteSpace(leavingWindowId))
+            {
+                throw new ArgumentException("Leaving window id cannot be empty.", nameof(leavingWindowId));
+            }
+
+            if (string.IsNullOrWhiteSpace(enteringWindowId))
+            {
+                throw new ArgumentException("Entering window id cannot be empty.", nameof(enteringWindowId));
+            }
+
+            if (string.Equals(leavingWindowId, enteringWindowId, StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "Leaving and entering window ids must be different.",
+                    nameof(enteringWindowId));
+            }
+
+            if (coordinator == null)
+            {
+                throw new ArgumentNullException(nameof(coordinator));
+            }
+
+            if (_isNavigating)
+            {
+                throw new InvalidOperationException("A coordinated navigation is already in progress.");
+            }
+
+            if (!cancellationToken.CanBeCanceled)
+            {
+                return NavigateCoreAsync(
+                    leavingWindowId,
+                    enteringWindowId,
+                    coordinator,
+                    direction,
+                    enteringOptions,
+                    _lifetimeCancellation.Token);
+            }
+
+            return NavigateWithLinkedCancellationAsync(
+                leavingWindowId,
+                enteringWindowId,
+                coordinator,
+                direction,
+                enteringOptions,
+                cancellationToken);
+        }
+
+        public bool TryGetWindow(string windowId, out UIWindow window)
+        {
+            EnsureMainThread();
+            if (!_isDisposed && !string.IsNullOrEmpty(windowId) &&
+                _sessions.TryGetValue(windowId, out WindowSession session))
+            {
+                if (ReconcileIfDestroyed(session))
+                {
+                    window = null;
+                    return false;
+                }
+
+                if (session.IsCommitted && session.Window != null)
+                {
+                    window = session.Window;
+                    return true;
+                }
+            }
+
+            window = null;
+            return false;
         }
 
         /// <summary>
-        /// Initializes the UIService for projects using Unity's built-in Resources.Load for asset management.
-        /// This method does not require an explicit IAssetPackage parameter, as it will use the default package
-        /// from AssetManagementLocator (typically a ResourcesAssetPackage implementation).
-        /// 
-        /// Use this method when:
-        /// - Your project uses Unity's Resources.Load to manage UI assets
-        /// - You don't need hot-update capabilities for UI assets
-        /// - All UI resources are bundled with the application at build time
-        /// 
-        /// Note: If your project uses AssetBundle-based systems (Addressables, YooAsset, etc.) for hot-update
-        /// capabilities, use the overload that accepts an IAssetPackage parameter instead.
+        /// Reclaims sessions whose window GameObject was destroyed outside the service.
+        /// Unity does not guarantee <c>OnDestroy</c> on every destruction path, so this is also
+        /// detected lazily; every public read reconciles on its own.
         /// </summary>
-        /// <param name="factory">Factory for creating asset path builders to resolve UI asset paths.</param>
-        /// <param name="spawner">Service for instantiating UI prefabs with optional pooling support.</param>
-        /// <param name="cameraService">Service for managing main camera and UI camera stacking (can be null).</param>
-        /// <exception cref="ArgumentNullException">Thrown when factory or spawner is null.</exception>
-        public virtual void Initialize(IAssetPathBuilderFactory factory, IUnityObjectSpawner spawner, IMainCameraService cameraService)
+        public void ReconcileDestroyedWindows()
         {
-            if (isInitialized)
+            EnsureMainThread();
+            ReconcileDestroyedSessions();
+        }
+
+        private void ReconcileDestroyedSessions()
+        {
+            if (_isDisposed)
             {
-                CLogger.LogWarning($"{DEBUG_FLAG} UIService already initialized. Operation aborted.");
                 return;
             }
-            if (factory == null) throw new ArgumentNullException(nameof(factory));
-            if (spawner == null) throw new ArgumentNullException(nameof(spawner));
-            // cameraService can be optional depending on requirements
-            // if (cameraService == null) throw new ArgumentNullException(nameof(cameraService));
 
-            this.assetPathBuilderFactory = factory;
-            this.objectSpawner = spawner;
-            this.mainCameraService = cameraService;
-
-            InitializeUIManager(null);
-            isInitialized = true;
+            for (int i = _sessionOrder.Count - 1; i >= 0; i--)
+            {
+                ReconcileIfDestroyed(_sessionOrder[i]);
+            }
         }
 
-        /// <summary>
-        /// Initializes the UIService for projects using AssetBundle-based asset management systems (Addressables, YooAsset, etc.)
-        /// that support hot-update capabilities.
-        /// 
-        /// Use this method when:
-        /// - Your project uses AssetBundle-based systems for asset management
-        /// - You need hot-update capabilities for UI assets
-        /// - UI resources are loaded from remote servers or downloaded dynamically
-        /// 
-        /// Important Design Limitation:
-        /// Currently, the UIService supports only a single IAssetPackage instance. This means all UI resources
-        /// (including UIWindowConfiguration assets and UI prefabs) must be managed within the same package.
-        /// If you have multiple packages in your project, ensure all UI-related assets are organized within
-        /// the single package passed to this method.
-        /// 
-        /// The package is used by UIManager to:
-        /// - Load UIWindowConfiguration ScriptableObject assets
-        /// - Load UI prefab GameObjects when using PrefabSource.Location mode
-        /// - Manage asset lifecycle and handle disposal
-        /// </summary>
-        /// <param name="factory">Factory for creating asset path builders to resolve UI asset paths.</param>
-        /// <param name="spawner">Service for instantiating UI prefabs with optional pooling support.</param>
-        /// <param name="cameraService">Service for managing main camera and UI camera stacking (can be null).</param>
-        /// <param name="package">The asset package that contains all UI resources. Must not be null.</param>
-        /// <exception cref="ArgumentNullException">Thrown when factory, spawner, or package is null.</exception>
-        public virtual void Initialize(IAssetPathBuilderFactory factory, IUnityObjectSpawner spawner, IMainCameraService cameraService, IAssetPackage package)
+        private bool ReconcileIfDestroyed(WindowSession session)
         {
-            if (isInitialized)
+            if (session == null || session.CleanupStarted)
             {
-                CLogger.LogWarning($"{DEBUG_FLAG} UIService already initialized. Operation aborted.");
-                return;
-            }
-            if (factory == null) throw new ArgumentNullException(nameof(factory));
-            if (spawner == null) throw new ArgumentNullException(nameof(spawner));
-            if (package == null) throw new ArgumentNullException(nameof(package));
-
-            this.assetPathBuilderFactory = factory;
-            this.objectSpawner = spawner;
-            this.mainCameraService = cameraService;
-
-            InitializeUIManager(package);
-            isInitialized = true;
-        }
-
-        // This method could also be an explicit Init if dependencies aren't constructor-injected.
-        private void InitializeUIManager(IAssetPackage package)
-        {
-            // Try to find an existing UIManager in the scene.
-            uiManagerInstance = UnityEngine.GameObject.FindFirstObjectByType<UIManager>();
-
-            if (uiManagerInstance == null)
-            {
-                // If not found, create one. This UIManager GameObject should persist.
-                UnityEngine.GameObject managerObject = new UnityEngine.GameObject("UIManager_RuntimeInstance");
-                uiManagerInstance = managerObject.AddComponent<UIManager>();
-                UnityEngine.Object.DontDestroyOnLoad(managerObject); // Make it persist across scene loads
-                _ownsUIManager = true;
-                CLogger.LogInfo($"{DEBUG_FLAG} UIManager instance created and marked DontDestroyOnLoad.");
-            }
-            else
-            {
-                CLogger.LogInfo($"{DEBUG_FLAG} Found existing UIManager instance in the scene.");
-            }
-
-            // Initialize the UIManager instance with the provided dependencies.
-            var pkg = package ?? AssetManagementLocator.DefaultPackage;
-            uiManagerInstance.Initialize(assetPathBuilderFactory, objectSpawner, mainCameraService, pkg);
-        }
-
-        private bool CheckInitialization()
-        {
-            if (!isInitialized || uiManagerInstance == null)
-            {
-                CLogger.LogError($"{DEBUG_FLAG} UIService or UIManager is not initialized. Operation aborted.");
                 return false;
             }
+
+            UIWindow window = session.Window;
+            if (ReferenceEquals(window, null))
+            {
+                // The session has not instantiated its window yet: nothing to reconcile.
+                return false;
+            }
+
+            if (window != null)
+            {
+                // Unity's overloaded operator is true only while the object is still alive.
+                return false;
+            }
+
+            CleanupExternallyDestroyed(session);
             return true;
         }
 
-        public bool IsUIWindowValid(string windowName)
+        /// <summary>
+        /// Cleans a session whose window object is gone. Used by the explicit destruction
+        /// notification (object may still report alive) and by lazy reconciliation (fake-null).
+        /// </summary>
+        private void CleanupExternallyDestroyed(WindowSession session)
         {
-            if (!CheckInitialization()) return false;
-            return uiManagerInstance.IsUIWindowValid(windowName);
-        }
-
-        public void OpenUI(string windowName, Action<UIWindow> onWindowCreated = null, bool? isSceneBoundOverride = null, UIAssetLoadContext assetLoadContext = default)
-        {
-            if (!CheckInitialization())
+            InvalidOperationException exception = new InvalidOperationException(
+                $"Window '{session.WindowId}' was destroyed outside UIService ownership.");
+            session.TerminalException = exception;
+            Exception cleanupException = CleanupSession(session, true);
+            session.OpenCompletion.TrySetException(exception);
+            if (cleanupException != null)
             {
-                onWindowCreated?.Invoke(null); // Notify failure
+                session.CloseCompletion?.TrySetException(
+                    new AggregateException(
+                        "Window was destroyed outside UIService ownership and cleanup failed.",
+                        exception,
+                        cleanupException));
+                Log.Error(
+                    cleanupException,
+                    "[UIService] Cleanup failed after a managed window was destroyed externally.");
                 return;
             }
-            uiManagerInstance.OpenUI(windowName, onWindowCreated, isSceneBoundOverride, assetLoadContext);
+
+            // A pending close converges to closed: the object is gone, which is what the caller
+            // asked for. The skipped OnClosing/OnClosed is reported as a warning rather than by
+            // changing the return contract.
+            Log.Warning(
+                session.WindowId,
+                static (windowId, builder) => builder
+                    .Append("[UIService] Window '")
+                    .Append(windowId)
+                    .Append("' was destroyed outside UIService ownership; the pending close ")
+                    .Append("completed without delivering OnClosing/OnClosed."));
+            session.CloseCompletion?.TrySetResult(true);
         }
 
-        public UniTask<UIWindow> OpenUIAsync(string windowName, System.Threading.CancellationToken cancellationToken = default, bool? isSceneBoundOverride = null, UIAssetLoadContext assetLoadContext = default)
+        public int CopyActiveWindows(List<UIWindow> destination)
         {
-            if (!CheckInitialization()) return UniTask.FromResult<UIWindow>(null);
-            return uiManagerInstance.OpenUIAndWait(windowName, cancellationToken, isSceneBoundOverride, assetLoadContext);
+            EnsureMainThread();
+            if (destination == null)
+            {
+                throw new ArgumentNullException(nameof(destination));
+            }
+
+            ReconcileDestroyedSessions();
+            destination.Clear();
+            for (int i = 0; i < _sessionOrder.Count; i++)
+            {
+                WindowSession session = _sessionOrder[i];
+                if (session.IsCommitted && session.Window != null)
+                {
+                    destination.Add(session.Window);
+                }
+            }
+
+            return destination.Count;
         }
 
-        public void CloseUI(string windowName)
+        public void RegisterBinder(IUIWindowBinder binder)
         {
-            if (!CheckInitialization()) return;
-            uiManagerInstance.CloseUI(windowName);
+            EnsureUsable();
+            if (binder == null)
+            {
+                throw new ArgumentNullException(nameof(binder));
+            }
+
+            EnsureBinderSetCanChange();
+            if (!_binders.Contains(binder))
+            {
+                _binders.Add(binder);
+            }
         }
 
-        public async UniTask CloseUIAsync(string windowName, System.Threading.CancellationToken cancellationToken = default)
+        public bool UnregisterBinder(IUIWindowBinder binder)
         {
-            if (!CheckInitialization()) return;
-            await uiManagerInstance.CloseUIAsync(windowName, cancellationToken);
+            EnsureUsable();
+            EnsureBinderSetCanChange();
+            return binder != null && _binders.Remove(binder);
         }
 
-        /// <summary>
-        /// Optionally open and await until the window reports Opened (strict sequencing use-cases).
-        /// </summary>
-        public UniTask<UIWindow> OpenUIAndWait(string windowName, System.Threading.CancellationToken cancellationToken = default, bool? isSceneBoundOverride = null, UIAssetLoadContext assetLoadContext = default)
+        public Vector2 GetRootCanvasSize()
         {
-            if (!CheckInitialization()) return UniTask.FromResult<UIWindow>(null);
-            // This method is now just a wrapper for OpenUIAsync.
-            // The original implementation with UniTaskCompletionSource is redundant if OpenUIAsync is already awaitable.
-            return uiManagerInstance.OpenUIAndWait(windowName, cancellationToken, isSceneBoundOverride, assetLoadContext);
+            EnsureUsable();
+            return _root.GetRootCanvasSize();
         }
 
-        public UIWindow GetUIWindow(string windowName)
+        public Camera GetUICamera()
         {
-            if (!CheckInitialization()) return null;
-            return uiManagerInstance.GetUIWindow(windowName);
+            EnsureUsable();
+            return _root.UICamera;
         }
 
-        // These methods are wrappers if UIManager provides them.
-        // If UIService should have its own logic, implement here.
-        public void AddUICameraToMainCameraStack()
+        public UIPerformanceStats GetPerformanceStats()
         {
-            if (!CheckInitialization()) return;
-            uiManagerInstance.AddUICameraToMainCameraStack();
+            EnsureMainThread();
+            ReconcileDestroyedSessions();
+            int opening = 0;
+            int open = 0;
+            int closing = 0;
+            int sceneBound = 0;
+            int isolatedCanvas = 0;
+
+            for (int i = 0; i < _sessionOrder.Count; i++)
+            {
+                WindowSession session = _sessionOrder[i];
+                UIWindow window = session.Window;
+                if (!session.IsCommitted)
+                {
+                    opening++;
+                }
+                else if (window == null)
+                {
+                    // Committed, but the window reference was already cleared by cleanup while the
+                    // session entry is still in the list: report it as closing, not as open.
+                    closing++;
+                }
+                else if (window.State == UIWindowState.Closing)
+                {
+                    closing++;
+                }
+                else
+                {
+                    open++;
+                }
+
+                if (window != null)
+                {
+                    if (window.IsSceneBound) sceneBound++;
+                    if (session.HasIsolatedCanvas) isolatedCanvas++;
+                }
+            }
+
+            return new UIPerformanceStats(
+                _sessions.Count,
+                opening,
+                open,
+                closing,
+                sceneBound,
+                _binders.Count,
+                isolatedCanvas,
+                _root.LayerCount,
+                _maxActiveWindows);
         }
 
-        public void RemoveUICameraFromMainCameraStack()
+        public int CopyLayerRuntimeStats(List<UILayerRuntimeStats> destination)
         {
-            if (!CheckInitialization()) return;
-            uiManagerInstance.RemoveUICameraFromMainCameraStack();
+            EnsureMainThread();
+            if (destination == null)
+            {
+                throw new ArgumentNullException(nameof(destination));
+            }
+
+            destination.Clear();
+            _root.CopyLayers(_layerScratch);
+            for (int i = 0; i < _layerScratch.Count; i++)
+            {
+                UILayer layer = _layerScratch[i];
+                if (layer == null) continue;
+                int sortingOrder = layer.UICanvas != null ? layer.UICanvas.sortingOrder : 0;
+                destination.Add(new UILayerRuntimeStats(layer.LayerName, sortingOrder, layer.WindowCount));
+            }
+
+            return destination.Count;
+        }
+
+        public UniTask ShutdownAsync(
+            UIShutdownMode mode = UIShutdownMode.Immediate,
+            CancellationToken cancellationToken = default)
+        {
+            EnsureMainThread();
+            if (_shutdownCompletion == null && !_isDisposed)
+            {
+                _shutdownCompletion = new UniTaskCompletionSource();
+                ShutdownCoreAsync(mode, _shutdownCompletion).Forget();
+            }
+
+            UniTask operation = _shutdownCompletion != null
+                ? _shutdownCompletion.Task
+                : UniTask.CompletedTask;
+            return cancellationToken.CanBeCanceled
+                ? operation.AttachExternalCancellation(cancellationToken)
+                : operation;
         }
 
         public void Dispose()
         {
-            CLogger.LogInfo($"{DEBUG_FLAG} Disposing UIService.");
-            _navigationService?.Dispose();
-            _navigationService = null;
-            _transitionCoordinator = null;
-            if (uiManagerInstance != null)
+            EnsureMainThread();
+            if (_isDisposed)
             {
-                if (_ownsUIManager)
+                return;
+            }
+
+            _isShuttingDown = true;
+            _isDisposed = true;
+            _disposeCompletion = new UniTaskCompletionSource();
+            SceneManager.activeSceneChanged -= OnActiveSceneChanged;
+            WindowSession[] sessions = _sessionOrder.ToArray();
+            _disposeSessions = sessions;
+            List<Exception> cleanupErrors = null;
+
+            for (int i = sessions.Length - 1; i >= 0; i--)
+            {
+                WindowSession session = sessions[i];
+                if (session.CleanupStarted)
                 {
-                    UnityEngine.Object.Destroy(uiManagerInstance.gameObject);
+                    continue;
                 }
-                uiManagerInstance = null;
+
+                AddCleanupError(ref cleanupErrors, CleanupSession(session, false));
             }
-            isInitialized = false;
+
+            _sessions.Clear();
+            _sessionOrder.Clear();
+            try
+            {
+                _lifetimeCancellation.Cancel();
+            }
+            catch (Exception exception)
+            {
+                AddCleanupError(ref cleanupErrors, exception);
+            }
+
+            if (_navigationService != null)
+            {
+                try
+                {
+                    _navigationService.Clear();
+                }
+                catch (Exception exception)
+                {
+                    AddCleanupError(ref cleanupErrors, exception);
+                }
+            }
+
+            try
+            {
+                _lifetimeCancellation.Dispose();
+            }
+            catch (Exception exception)
+            {
+                AddCleanupError(ref cleanupErrors, exception);
+            }
+
+            _isShuttingDown = false;
+            if (cleanupErrors != null)
+            {
+                Log.Error(
+                    CreateCleanupException(
+                        "UIService disposal completed with cleanup failures.",
+                        cleanupErrors),
+                    "[UIService] Disposal completed with cleanup failures.");
+            }
+
+            _disposePhasesCompleted = true;
+            TryCompleteDisposeBarrier();
         }
 
-        public (float, float) GetRootCanvasSize()
+        void IUIWindowLifetimeObserver.OnWindowDestroyed(UIWindow window)
         {
-            if (!CheckInitialization())
+            EnsureMainThread();
+            if (_isDisposed || ReferenceEquals(window, null) || string.IsNullOrEmpty(window.WindowId))
             {
-                CLogger.LogError($"{DEBUG_FLAG} UIService is not initialized. Operation aborted.");
-                return (0, 0);
+                return;
             }
-            return uiManagerInstance.GetRootCanvasSize();
+
+            if (!_sessions.TryGetValue(window.WindowId, out WindowSession session) ||
+                !ReferenceEquals(session.Window, window) ||
+                session.CleanupStarted)
+            {
+                return;
+            }
+
+            CleanupExternallyDestroyed(session);
         }
 
-        public UnityEngine.Camera GetUICamera()
+        private UniTask<UIWindow> StartOrJoinOpen(
+            string windowId,
+            UIWindowConfiguration configuration,
+            UIOpenOptions options,
+            CancellationToken callerToken)
         {
-            if (!CheckInitialization())
+            if (_sessions.TryGetValue(windowId, out WindowSession existing))
             {
-                CLogger.LogError($"{DEBUG_FLAG} UIService is not initialized. Operation aborted.");
+                if (existing.CloseRequested)
+                {
+                    throw new InvalidOperationException($"Window '{windowId}' is closing.");
+                }
+
+                if (configuration != null && existing.Configuration == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Window '{windowId}' is already opening through the asset provider; " +
+                        "an explicit configuration cannot join that operation.");
+                }
+
+                if (configuration != null &&
+                    !ReferenceEquals(configuration, existing.Configuration))
+                {
+                    throw new InvalidOperationException(
+                        $"Window '{windowId}' is already opening from a different configuration.");
+                }
+
+                if (!OpenOptionsMatch(existing.OpenOptions, options))
+                {
+                    throw new InvalidOperationException(
+                        $"Window '{windowId}' is already opening with different options.");
+                }
+
+                return callerToken.CanBeCanceled
+                    ? existing.OpenCompletion.Task.AttachExternalCancellation(callerToken)
+                    : existing.OpenCompletion.Task;
+            }
+
+            if (_sessions.Count >= _maxActiveWindows)
+            {
+                throw new InvalidOperationException(
+                    $"UI window capacity {_maxActiveWindows} has been reached.");
+            }
+
+            WindowSession session = new WindowSession(
+                windowId,
+                options,
+                ToSceneHandleValue(SceneManager.GetActiveScene()),
+                _lifetimeCancellation.Token)
+            {
+                Configuration = configuration,
+            };
+
+            _sessions.Add(windowId, session);
+            _sessionOrder.Add(session);
+            ExecuteOpenAsync(session).Forget();
+            return callerToken.CanBeCanceled
+                ? session.OpenCompletion.Task.AttachExternalCancellation(callerToken)
+                : session.OpenCompletion.Task;
+        }
+
+        private async UniTask ExecuteOpenAsync(WindowSession session)
+        {
+            CancellationToken cancellationToken;
+            try
+            {
+                cancellationToken = session.OpenCancellation.Token;
+            }
+            catch (ObjectDisposedException)
+            {
+                session.OpenCompletion.TrySetCanceled();
+                return;
+            }
+
+            try
+            {
+                ThrowIfOpenCannotContinue(session, cancellationToken);
+                UIAssetLoadContext loadContext = session.OpenOptions.AssetLoadContext.Merge(
+                    GetDefaultAssetLoadContext());
+
+                if (session.Configuration == null)
+                {
+                    if (_assetProvider == null)
+                    {
+                        throw new InvalidOperationException(
+                            "Opening by id requires an IUIWindowAssetProvider.");
+                    }
+
+                    IUIAssetLease<UIWindowConfiguration> acquiredLease = null;
+                    var acquisitionCompletion = new UniTaskCompletionSource();
+                    session.ProviderAcquisitionCompletion = acquisitionCompletion;
+                    try
+                    {
+                        acquiredLease = await _assetProvider.AcquireConfigurationAsync(
+                            session.WindowId,
+                            loadContext,
+                            cancellationToken);
+                        await UniTask.SwitchToMainThread();
+                        ThrowIfOpenCannotContinue(session, cancellationToken);
+                        session.ConfigurationLease = acquiredLease;
+                        acquiredLease = null;
+                        session.Configuration = session.ConfigurationLease?.Asset;
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            acquiredLease?.Dispose();
+                        }
+                        finally
+                        {
+                            acquisitionCompletion.TrySetResult();
+                        }
+                    }
+                }
+
+                ThrowIfOpenCannotContinue(session, cancellationToken);
+                ValidateConfiguration(session);
+                if (!_root.TryGetLayer(session.Configuration.Layer, out UILayer layer))
+                {
+                    throw new InvalidOperationException(
+                        $"Layer '{session.Configuration.Layer.LayerName}' is not registered in UIRoot.");
+                }
+
+                session.Layer = layer;
+                UIWindow prefabWindow;
+                if (session.Configuration.Source == UIWindowConfiguration.PrefabSource.PrefabReference)
+                {
+                    prefabWindow = session.Configuration.WindowPrefab;
+                }
+                else
+                {
+                    if (_assetProvider == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Window '{session.WindowId}' uses an address but no asset provider is configured.");
+                    }
+
+                    IUIAssetLease<GameObject> acquiredLease = null;
+                    var acquisitionCompletion = new UniTaskCompletionSource();
+                    session.ProviderAcquisitionCompletion = acquisitionCompletion;
+                    try
+                    {
+                        acquiredLease = await _assetProvider.AcquirePrefabAsync(
+                            session.Configuration.EffectiveAssetReference,
+                            loadContext,
+                            cancellationToken);
+                        await UniTask.SwitchToMainThread();
+                        ThrowIfOpenCannotContinue(session, cancellationToken);
+                        session.PrefabLease = acquiredLease;
+                        acquiredLease = null;
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            acquiredLease?.Dispose();
+                        }
+                        finally
+                        {
+                            acquisitionCompletion.TrySetResult();
+                        }
+                    }
+
+                    GameObject prefabObject = session.PrefabLease?.Asset;
+                    prefabWindow = prefabObject != null ? prefabObject.GetComponent<UIWindow>() : null;
+                }
+
+                if (prefabWindow == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Window '{session.WindowId}' prefab does not contain UIWindow.");
+                }
+
+                await WaitForInstantiateBudgetAsync(cancellationToken);
+                ThrowIfOpenCannotContinue(session, cancellationToken);
+                UIWindow unownedWindow = UnityEngine.Object.Instantiate(
+                    prefabWindow,
+                    layer.transform,
+                    false);
+                try
+                {
+                    ThrowIfOpenCannotContinue(session, cancellationToken);
+                    session.Window = unownedWindow;
+                    unownedWindow = null;
+                }
+                finally
+                {
+                    if (unownedWindow != null)
+                    {
+                        DestroyWindow(unownedWindow);
+                    }
+                }
+
+                UIWindow window = session.Window;
+                bool sceneBound = session.OpenOptions.SceneBoundOverride ?? session.Configuration.IsSceneBound;
+                window.InitializeRuntime(
+                    session.WindowId,
+                    session.Configuration,
+                    sceneBound,
+                    session.RequestedSceneHandle,
+                    this);
+                session.TransitionDriver = session.OpenOptions.SuppressWindowTransition
+                    ? null
+                    : session.OpenOptions.TransitionDriver ?? _defaultTransitionDriver;
+                session.HasIsolatedCanvas = ConfigureCanvas(
+                    window,
+                    session.Configuration,
+                    layer);
+                ThrowIfOpenCannotContinue(session, cancellationToken);
+                BindWindow(session, cancellationToken);
+                ThrowIfOpenCannotContinue(session, cancellationToken);
+                layer.Attach(window);
+                ThrowIfOpenCannotContinue(session, cancellationToken);
+
+                if (sceneBound && session.RequestedSceneHandle != ToSceneHandleValue(SceneManager.GetActiveScene()))
+                {
+                    throw new OperationCanceledException(
+                        $"Scene-bound window '{session.WindowId}' completed after its owner scene changed.");
+                }
+
+                ThrowIfBindingCallbackFailed(
+                    await NotifyBindingsAsync(
+                        session,
+                        WindowStateCallbackType.OnStartOpen,
+                        cancellationToken,
+                        continueOnFailure: false));
+                ThrowIfOpenCannotContinue(session, cancellationToken);
+                await window.RunOpenAsync(session.TransitionDriver, cancellationToken);
+                await UniTask.SwitchToMainThread();
+                ThrowIfOpenCannotContinue(session, cancellationToken);
+
+                if (_navigationService != null)
+                {
+                    if (!_navigationService.Register(
+                            session.WindowId,
+                            session.OpenOptions.OpenerId,
+                            session.OpenOptions.Context))
+                    {
+                        throw new InvalidOperationException(
+                            $"Navigation rejected registration for '{session.WindowId}': opener " +
+                            $"'{session.OpenOptions.OpenerId ?? "<root>"}' is not active, the id is " +
+                            "already registered, or the window lists itself as its own opener.");
+                    }
+
+                    session.NavigationCommitted = true;
+                    if (session.CleanupStarted || !IsSessionOwned(session))
+                    {
+                        Exception releaseException = ReleaseNavigationRegistration(session);
+                        if (releaseException != null)
+                        {
+                            throw releaseException;
+                        }
+                    }
+                }
+
+                ThrowIfOpenCannotContinue(session, cancellationToken);
+                session.IsCommitted = true;
+                _activeWindowCount++;
+                ThrowIfBindingCallbackFailed(
+                    await NotifyBindingsAsync(
+                        session,
+                        WindowStateCallbackType.OnFinishedOpen,
+                        cancellationToken,
+                        continueOnFailure: false));
+                if (!IsSessionOwned(session) ||
+                    session.CleanupStarted ||
+                    session.CloseRequested ||
+                    session.Window == null)
+                {
+                    session.OpenCompletion.TrySetCanceled();
+                    return;
+                }
+
+                session.OpenCompletion.TrySetResult(session.Window);
+            }
+            catch (OperationCanceledException cancellationException)
+            {
+                await UniTask.SwitchToMainThread();
+                if (session.CleanupStarted && !session.CleanupCompleted)
+                {
+                    return;
+                }
+
+                Exception cleanupException = CleanupSession(session, false);
+                if (session.TerminalException != null)
+                {
+                    session.OpenCompletion.TrySetException(session.TerminalException);
+                }
+                else if (cleanupException == null)
+                {
+                    session.OpenCompletion.TrySetCanceled();
+                }
+                else
+                {
+                    session.OpenCompletion.TrySetException(new AggregateException(
+                        "UI window opening was canceled and cleanup failed.",
+                        cancellationException,
+                        cleanupException));
+                }
+            }
+            catch (Exception exception)
+            {
+                await UniTask.SwitchToMainThread();
+                if (session.CleanupStarted && !session.CleanupCompleted)
+                {
+                    return;
+                }
+
+                Exception cleanupException = CleanupSession(session, false);
+                if (session.TerminalException != null)
+                {
+                    session.OpenCompletion.TrySetException(session.TerminalException);
+                }
+                else
+                {
+                    session.OpenCompletion.TrySetException(cleanupException == null
+                        ? exception
+                        : new AggregateException(exception, cleanupException));
+                }
+            }
+        }
+
+        private async UniTask<bool> CloseWithPolicyAsync(string windowId, ChildClosePolicy childPolicy)
+        {
+            // The close loop yields while awaiting each window, so the shared scratch buffer is
+            // only safe when no other close is in flight; otherwise allocate a local list.
+            bool ownsScratch = !_closeScratchInUse;
+            List<string> affected;
+            if (ownsScratch)
+            {
+                _closeScratchInUse = true;
+                affected = _closeScratch;
+                affected.Clear();
+            }
+            else
+            {
+                affected = new List<string>(4);
+            }
+
+            try
+            {
+                List<Exception> errors = null;
+                bool navigationRemoved = false;
+                if (_navigationService != null)
+                {
+                    try
+                    {
+                        navigationRemoved = _navigationService.Unregister(
+                            windowId,
+                            childPolicy,
+                            affected);
+                    }
+                    catch (Exception exception)
+                    {
+                        AddCleanupError(ref errors, exception);
+                        affected.Clear();
+                    }
+                }
+
+                if (!navigationRemoved || affected.Count == 0)
+                {
+                    affected.Add(windowId);
+                }
+                else
+                {
+                    for (int i = 0; i < affected.Count; i++)
+                    {
+                        if (_sessions.TryGetValue(affected[i], out WindowSession affectedSession))
+                        {
+                            affectedSession.NavigationCommitted = false;
+                        }
+                    }
+                }
+
+                bool closedAny = false;
+                for (int i = affected.Count - 1; i >= 0; i--)
+                {
+                    try
+                    {
+                        closedAny |= await CloseSingleAsync(affected[i]);
+                    }
+                    catch (Exception exception)
+                    {
+                        AddCleanupError(ref errors, exception);
+                    }
+                }
+
+                if (errors != null)
+                {
+                    throw CreateCleanupException(
+                        $"Closing UI window '{windowId}' completed with failures.",
+                        errors);
+                }
+
+                return closedAny;
+            }
+            finally
+            {
+                if (ownsScratch)
+                {
+                    _closeScratch.Clear();
+                    _closeScratchInUse = false;
+                }
+            }
+        }
+
+        private async UniTask<UIWindow> NavigateWithLinkedCancellationAsync(
+            string leavingWindowId,
+            string enteringWindowId,
+            IUITransitionCoordinator coordinator,
+            NavigationDirection direction,
+            UIOpenOptions enteringOptions,
+            CancellationToken callerToken)
+        {
+            using (CancellationTokenSource linkedCancellation =
+                   CancellationTokenSource.CreateLinkedTokenSource(
+                       _lifetimeCancellation.Token,
+                       callerToken))
+            {
+                return await NavigateCoreAsync(
+                    leavingWindowId,
+                    enteringWindowId,
+                    coordinator,
+                    direction,
+                    enteringOptions,
+                    linkedCancellation.Token);
+            }
+        }
+
+        private async UniTask<UIWindow> NavigateCoreAsync(
+            string leavingWindowId,
+            string enteringWindowId,
+            IUITransitionCoordinator coordinator,
+            NavigationDirection direction,
+            UIOpenOptions enteringOptions,
+            CancellationToken cancellationToken)
+        {
+            _isNavigating = true;
+            bool enteringAlreadyActive = TryGetWindow(enteringWindowId, out UIWindow entering);
+            bool irreversibleCloseStarted = false;
+            WindowSession leavingOwner = null;
+            WindowSession enteringOwner = null;
+            try
+            {
+                if (!TryGetWindow(leavingWindowId, out UIWindow leaving))
+                {
+                    throw new InvalidOperationException(
+                        $"Leaving window '{leavingWindowId}' is not active.");
+                }
+
+                if (!enteringAlreadyActive)
+                {
+                    UIOpenOptions coordinatedOptions = new UIOpenOptions(
+                        leavingWindowId,
+                        enteringOptions.Context,
+                        enteringOptions.SceneBoundOverride,
+                        enteringOptions.AssetLoadContext,
+                        enteringOptions.TransitionDriver,
+                        true);
+                    entering = await OpenAsync(
+                        enteringWindowId,
+                        coordinatedOptions,
+                        cancellationToken);
+                }
+
+                if (!_sessions.TryGetValue(leavingWindowId, out leavingOwner) ||
+                    !_sessions.TryGetValue(enteringWindowId, out enteringOwner))
+                {
+                    throw new InvalidOperationException(
+                        "Coordinated navigation lost a window session before transition.");
+                }
+
+                using (CancellationTokenSource transitionCancellation =
+                       CancellationTokenSource.CreateLinkedTokenSource(
+                           cancellationToken,
+                           leavingOwner.TargetLifetimeCancellation.Token,
+                           enteringOwner.TargetLifetimeCancellation.Token))
+                {
+                    await coordinator.TransitionAsync(
+                        leaving,
+                        entering,
+                        direction,
+                        transitionCancellation.Token);
+                    await UniTask.SwitchToMainThread();
+                    transitionCancellation.Token.ThrowIfCancellationRequested();
+                }
+
+                ThrowIfNavigationCannotCommit(
+                    leavingWindowId,
+                    leaving,
+                    enteringWindowId,
+                    entering,
+                    cancellationToken);
+
+                // Closing the leaving window is the irreversible navigation commit point.
+                // Caller cancellation after this boundary cannot roll back the entering window.
+                irreversibleCloseStarted = true;
+                if (_sessions.TryGetValue(leavingWindowId, out WindowSession leavingSession))
+                {
+                    leavingSession.TransitionDriver = null;
+                }
+
+                await CloseWithPolicyAsync(leavingWindowId, ChildClosePolicy.Reparent);
+                if (_isDisposed ||
+                    !TryGetWindow(enteringWindowId, out UIWindow activeEntering) ||
+                    !ReferenceEquals(activeEntering, entering))
+                {
+                    throw new OperationCanceledException(
+                        "Coordinated navigation lost ownership before commit.",
+                        cancellationToken);
+                }
+
+                return entering;
+            }
+            catch
+            {
+                await UniTask.SwitchToMainThread();
+                await WaitForDisposePublicationBarrierAsync();
+                await WaitForCleanupPublicationBarrierAsync(leavingOwner);
+                await WaitForCleanupPublicationBarrierAsync(enteringOwner);
+                if (!irreversibleCloseStarted && !enteringAlreadyActive)
+                {
+                    try
+                    {
+                        await CloseWithPolicyAsync(enteringWindowId, ChildClosePolicy.Detach);
+                    }
+                    catch (Exception cleanupException)
+                    {
+                        Log.Error(
+                            cleanupException,
+                            "[UIService] Navigation rollback could not close the entering window.");
+                    }
+                }
+
+                throw;
+            }
+            finally
+            {
+                _isNavigating = false;
+            }
+        }
+
+        private UniTask<bool> CloseSingleAsync(string windowId)
+        {
+            if (!_sessions.TryGetValue(windowId, out WindowSession session))
+            {
+                return UniTask.FromResult(false);
+            }
+
+            if (session.CloseCompletion != null)
+            {
+                return session.CloseCompletion.Task;
+            }
+
+            session.CloseRequested = true;
+            session.CloseCompletion = new UniTaskCompletionSource<bool>();
+            if (session.LifecycleDispatchDepth > 0)
+            {
+                session.CloseExecutionDeferred = true;
+                try
+                {
+                    if (!session.OpenCancellation.IsCancellationRequested)
+                    {
+                        session.OpenCancellation.Cancel();
+                    }
+                }
+                catch (Exception exception)
+                {
+                    session.DeferredCloseRequestException = exception;
+                }
+            }
+            else
+            {
+                StartCloseExecution(session);
+            }
+
+            return session.CloseCompletion.Task;
+        }
+
+        private async UniTask ExecuteCloseAsync(WindowSession session)
+        {
+            List<Exception> errors = null;
+            AddCleanupError(ref errors, session.DeferredCloseRequestException);
+            session.DeferredCloseRequestException = null;
+            if (!session.IsCommitted)
+            {
+                try
+                {
+                    if (!session.OpenCancellation.IsCancellationRequested)
+                    {
+                        session.OpenCancellation.Cancel();
+                    }
+                }
+                catch (Exception exception)
+                {
+                    AddCleanupError(ref errors, exception);
+                }
+
+                try
+                {
+                    await session.OpenCompletion.Task.SuppressCancellationThrow();
+                }
+                catch (Exception exception)
+                {
+                    AddCleanupError(ref errors, exception);
+                }
+
+                await UniTask.SwitchToMainThread();
+                if (session.CleanupStarted || !IsSessionOwned(session))
+                {
+                    if (session.CleanupCompleted)
+                    {
+                        CompleteClose(session, errors);
+                    }
+
+                    return;
+                }
+
+                if (!session.IsCommitted)
+                {
+                    AddCleanupError(ref errors, CleanupSession(session, false));
+                    CompleteClose(session, errors);
+                    return;
+                }
+            }
+
+            UIWindow window = session.Window;
+            if (window != null)
+            {
+                CancellationToken targetLifetimeToken;
+                try
+                {
+                    targetLifetimeToken = session.TargetLifetimeCancellation.Token;
+                }
+                catch (ObjectDisposedException)
+                {
+                    if (session.CleanupCompleted)
+                    {
+                        CompleteClose(session, errors);
+                    }
+
+                    return;
+                }
+
+                AddCleanupError(
+                    ref errors,
+                    await NotifyBindingsAsync(
+                        session,
+                        WindowStateCallbackType.OnStartClose,
+                        targetLifetimeToken,
+                        continueOnFailure: true));
+                if (session.CleanupStarted || !IsSessionOwned(session) || window == null)
+                {
+                    if (session.CleanupCompleted)
+                    {
+                        CompleteClose(session, errors);
+                    }
+
+                    return;
+                }
+
+                try
+                {
+                    await window.RunCloseAsync(
+                        session.TransitionDriver,
+                        targetLifetimeToken);
+                    await UniTask.SwitchToMainThread();
+                }
+                catch (OperationCanceledException) when (
+                    _isShuttingDown ||
+                    _isDisposed ||
+                    session.CleanupStarted ||
+                    session.TargetLifetimeCancellation.IsCancellationRequested)
+                {
+                    try
+                    {
+                        window.ForceClosed();
+                    }
+                    catch (Exception exception)
+                    {
+                        AddCleanupError(ref errors, exception);
+                    }
+                }
+                catch (Exception exception)
+                {
+                    await UniTask.SwitchToMainThread();
+                    AddCleanupError(ref errors, exception);
+                }
+
+                if (!session.CleanupStarted && window != null && window.State != UIWindowState.Closed)
+                {
+                    try
+                    {
+                        window.ForceClosed();
+                    }
+                    catch (Exception exception)
+                    {
+                        AddCleanupError(ref errors, exception);
+                    }
+                }
+
+                if (!session.CleanupStarted && window != null && window.State == UIWindowState.Closed)
+                {
+                    AddCleanupError(
+                        ref errors,
+                        await NotifyBindingsAsync(
+                            session,
+                            WindowStateCallbackType.OnFinishedClose,
+                            targetLifetimeToken,
+                            continueOnFailure: true));
+                }
+            }
+
+            if (session.CleanupStarted && !session.CleanupCompleted)
+            {
+                return;
+            }
+
+            AddCleanupError(ref errors, CleanupSession(session, false));
+            CompleteClose(session, errors);
+        }
+
+        private async UniTask ShutdownCoreAsync(
+            UIShutdownMode mode,
+            UniTaskCompletionSource completion)
+        {
+            _isShuttingDown = true;
+            WindowSession[] sessionsToDrain = null;
+            List<Exception> errors = null;
+            try
+            {
+                sessionsToDrain = _sessionOrder.ToArray();
+                if (mode == UIShutdownMode.Animated)
+                {
+                    while (_sessionOrder.Count > 0)
+                    {
+                        WindowSession session = _sessionOrder[_sessionOrder.Count - 1];
+                        try
+                        {
+                            await CloseSingleAsync(session.WindowId);
+                        }
+                        catch (Exception exception)
+                        {
+                            errors ??= new List<Exception>(2);
+                            errors.Add(exception);
+                        }
+                    }
+                }
+
+                Dispose();
+                await WaitForDisposePublicationBarrierAsync();
+                await WaitForProviderAcquisitionDrainAsync(sessionsToDrain);
+                if (errors != null)
+                {
+                    throw new AggregateException("One or more UI windows failed during shutdown.", errors);
+                }
+
+                completion.TrySetResult();
+            }
+            catch (Exception exception)
+            {
+                if (!_isDisposed)
+                {
+                    Dispose();
+                }
+
+                completion.TrySetException(exception);
+            }
+            finally
+            {
+                if (!_isDisposed)
+                {
+                    _isShuttingDown = false;
+                }
+            }
+        }
+
+        private async UniTask WaitForProviderAcquisitionDrainAsync(
+            WindowSession[] sessions)
+        {
+            if (sessions == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < sessions.Length; i++)
+            {
+                WindowSession session = sessions[i];
+                while (true)
+                {
+                    UniTaskCompletionSource acquisition = session.ProviderAcquisitionCompletion;
+                    if (acquisition == null)
+                    {
+                        break;
+                    }
+
+                    if (_maxProviderDrainSeconds <= 0)
+                    {
+                        await acquisition.Task;
+                    }
+                    else
+                    {
+                        int completed = await UniTask.WhenAny(
+                            acquisition.Task,
+                            UniTask.Delay(
+                                TimeSpan.FromSeconds(_maxProviderDrainSeconds),
+                                DelayType.Realtime));
+                        if (completed == 1)
+                        {
+                            Log.Error(
+                                session.WindowId,
+                                static (windowId, builder) => builder
+                                    .Append("[UIService] Provider acquisition for '")
+                                    .Append(windowId)
+                                    .Append("' did not complete within the shutdown drain bound; ")
+                                    .Append("abandoning the wait. The provider must honour cancellation."));
+                            break;
+                        }
+                    }
+
+                    await UniTask.SwitchToMainThread();
+                    if (ReferenceEquals(acquisition, session.ProviderAcquisitionCompletion))
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        private void ValidateConfiguration(WindowSession session)
+        {
+            UIWindowConfiguration configuration = session.Configuration;
+            if (configuration == null)
+            {
+                throw new InvalidOperationException(
+                    $"Asset provider returned no configuration for '{session.WindowId}'.");
+            }
+
+            if (!configuration.IsConfigured)
+            {
+                throw new InvalidOperationException(
+                    $"Configuration for '{session.WindowId}' is incomplete.");
+            }
+
+            if (!string.Equals(configuration.WindowId, session.WindowId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Requested id '{session.WindowId}' does not match configuration id '{configuration.WindowId}'.");
+            }
+        }
+
+        private UIAssetLoadContext GetDefaultAssetLoadContext()
+        {
+            UIAssetContextProvider provider = _root.AssetContextProvider;
+            return provider != null
+                ? provider.LoadContext.Merge(_defaultAssetLoadContext)
+                : _defaultAssetLoadContext;
+        }
+
+        private void BindWindow(WindowSession session, CancellationToken cancellationToken)
+        {
+            int binderCount = _binders.Count;
+            if (binderCount == 0)
+            {
+                return;
+            }
+
+            session.Bindings = new IUIWindowBinding[binderCount];
+            UIWindowBindingContext context = new UIWindowBindingContext(
+                session.Window,
+                this,
+                session.OpenOptions.OpenerId,
+                session.OpenOptions.Context,
+                session.TargetLifetimeCancellation.Token);
+            for (int i = 0; i < binderCount; i++)
+            {
+                ThrowIfOpenCannotContinue(session, cancellationToken);
+                IUIWindowBinding unownedBinding = _binders[i].Bind(context);
+                try
+                {
+                    ThrowIfOpenCannotContinue(session, cancellationToken);
+                    if (unownedBinding != null)
+                    {
+                        session.Bindings[session.BindingCount++] = unownedBinding;
+                        unownedBinding = null;
+                    }
+                }
+                finally
+                {
+                    unownedBinding?.Dispose();
+                }
+            }
+        }
+
+        private async UniTask<Exception> NotifyBindingsAsync(
+            WindowSession session,
+            WindowStateCallbackType callback,
+            CancellationToken cancellationToken,
+            bool continueOnFailure)
+        {
+            List<Exception> errors = null;
+            session.LifecycleDispatchDepth++;
+            // Open-stage binding callbacks deliberately keep the deferred-close behaviour
+            // (CloseFromFinishedOpenBinding). Closing-stage callbacks must instead reject a
+            // re-entrant open/close of the same window synchronously, so the guard is armed
+            // only for the duration of each synchronous callback.
+            bool guardSelfDispatch = !IsOpeningCallback(callback);
+
+            try
+            {
+                for (int i = 0; ; i++)
+                {
+                    if (session.CleanupStarted ||
+                        session.Bindings == null ||
+                        i >= session.BindingCount ||
+                        IsOpeningCallback(callback) && session.CloseRequested)
+                    {
+                        break;
+                    }
+
+                    try
+                    {
+                        IUIWindowBinding binding = session.Bindings[i];
+                        if (binding == null)
+                        {
+                            continue;
+                        }
+
+                        if (binding is IAsyncUIWindowBinding asyncBinding)
+                        {
+                            PushAsyncLifecycleDispatch(session.WindowId);
+                            try
+                            {
+                                await asyncBinding.OnWindowStateChangedAsync(
+                                    callback,
+                                    cancellationToken);
+                            }
+                            finally
+                            {
+                                PopAsyncLifecycleDispatch();
+                            }
+
+                            await UniTask.SwitchToMainThread();
+                        }
+                        else if (guardSelfDispatch)
+                        {
+                            PushLifecycleDispatch(session.WindowId);
+                            try
+                            {
+                                binding.OnWindowStateChanged(callback);
+                            }
+                            finally
+                            {
+                                PopLifecycleDispatch();
+                            }
+                        }
+                        else
+                        {
+                            binding.OnWindowStateChanged(callback);
+                        }
+
+                        if (session.CleanupStarted ||
+                            IsOpeningCallback(callback) && session.CloseRequested)
+                        {
+                            break;
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        await UniTask.SwitchToMainThread();
+                        if (exception is OperationCanceledException &&
+                            IsOpeningCallback(callback) &&
+                            session.CloseRequested)
+                        {
+                            break;
+                        }
+
+                        if (!continueOnFailure)
+                        {
+                            return exception;
+                        }
+
+                        AddCleanupError(ref errors, exception);
+                        if (session.CleanupStarted ||
+                            IsOpeningCallback(callback) && session.CloseRequested)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                session.LifecycleDispatchDepth--;
+                if (session.LifecycleDispatchDepth == 0 && session.CloseExecutionDeferred)
+                {
+                    StartCloseExecution(session);
+                }
+            }
+
+            return errors == null
+                ? null
+                : CreateCleanupException(
+                    $"One or more UI bindings failed during '{callback}'.",
+                    errors);
+        }
+
+        private void StartCloseExecution(WindowSession session)
+        {
+            session.CloseExecutionDeferred = false;
+            if (session.CloseExecutionStarted || session.CleanupStarted)
+            {
+                return;
+            }
+
+            session.CloseExecutionStarted = true;
+            ExecuteCloseAsync(session).Forget();
+        }
+
+        private static bool IsOpeningCallback(WindowStateCallbackType callback)
+        {
+            return callback == WindowStateCallbackType.OnStartOpen ||
+                   callback == WindowStateCallbackType.OnFinishedOpen;
+        }
+
+        private void PushLifecycleDispatch(string windowId)
+        {
+            _lifecycleDispatchStack.Add(windowId);
+        }
+
+        private void PopLifecycleDispatch()
+        {
+            int lastIndex = _lifecycleDispatchStack.Count - 1;
+            if (lastIndex >= 0)
+            {
+                _lifecycleDispatchStack.RemoveAt(lastIndex);
+            }
+        }
+
+        private void ThrowIfWindowInLifecycleDispatch(string windowId)
+        {
+            if (IsWindowInLifecycleDispatch(windowId) ||
+                IsWindowInAsyncCloseDispatch(windowId) ||
+                IsWindowDispatchingOwnCallbacks(windowId))
+            {
+                throw new InvalidOperationException(
+                    "Cannot open or close a window from within its own lifecycle callbacks.");
+            }
+        }
+
+        /// <summary>
+        /// True while the window is inside one of its own asynchronous close-stage callbacks.
+        /// A close requested there would await the completion source the current close owns.
+        /// The open stage is excluded: closing during an asynchronous open is deferred.
+        /// </summary>
+        private bool IsWindowInAsyncCloseDispatch(string windowId)
+        {
+            if (!IsWindowInAsyncLifecycleDispatch(windowId))
+            {
+                return false;
+            }
+
+            return _sessions.TryGetValue(windowId, out WindowSession session) &&
+                   (session.CloseExecutionStarted || session.CleanupStarted);
+        }
+
+        private void PushAsyncLifecycleDispatch(string windowId)
+        {
+            _asyncLifecycleDispatchStack.Add(windowId);
+        }
+
+        private void PopAsyncLifecycleDispatch()
+        {
+            int lastIndex = _asyncLifecycleDispatchStack.Count - 1;
+            if (lastIndex >= 0)
+            {
+                _asyncLifecycleDispatchStack.RemoveAt(lastIndex);
+            }
+        }
+
+        private bool IsWindowInAsyncLifecycleDispatch(string windowId)
+        {
+            for (int i = 0; i < _asyncLifecycleDispatchStack.Count; i++)
+            {
+                if (string.Equals(_asyncLifecycleDispatchStack[i], windowId, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool IsWindowInLifecycleDispatch(string windowId)
+        {
+            for (int i = 0; i < _lifecycleDispatchStack.Count; i++)
+            {
+                if (string.Equals(_lifecycleDispatchStack[i], windowId, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool IsWindowDispatchingOwnCallbacks(string windowId)
+        {
+            return _sessions.TryGetValue(windowId, out WindowSession session) &&
+                   session.Window != null &&
+                   session.Window.IsDispatchingLifecycleCallback;
+        }
+
+        private Exception CleanupSession(WindowSession session, bool windowAlreadyDestroyed)
+        {
+            if (session == null || session.CleanupStarted)
+            {
                 return null;
             }
-            return uiManagerInstance.GetUICamera();
+
+            session.CleanupStarted = true;
+            _cleanupInProgressCount++;
+            if (session.IsCommitted)
+            {
+                session.IsCommitted = false;
+                if (_activeWindowCount > 0)
+                {
+                    _activeWindowCount--;
+                }
+            }
+
+            _sessions.Remove(session.WindowId);
+            _sessionOrder.Remove(session);
+
+            List<Exception> errors = null;
+            AddCleanupError(ref errors, ReleaseNavigationRegistration(session));
+
+            try
+            {
+                if (!session.OpenCancellation.IsCancellationRequested)
+                {
+                    session.OpenCancellation.Cancel();
+                }
+            }
+            catch (Exception exception)
+            {
+                AddCleanupError(ref errors, exception);
+            }
+
+            try
+            {
+                if (!session.TargetLifetimeCancellation.IsCancellationRequested)
+                {
+                    session.TargetLifetimeCancellation.Cancel();
+                }
+            }
+            catch (Exception exception)
+            {
+                AddCleanupError(ref errors, exception);
+            }
+
+            UILayer layer = session.Layer;
+            session.Layer = null;
+            if (layer != null && !ReferenceEquals(session.Window, null))
+            {
+                try
+                {
+                    layer.Detach(session.Window);
+                }
+                catch (Exception exception)
+                {
+                    AddCleanupError(ref errors, exception);
+                }
+            }
+
+            for (int i = session.BindingCount - 1; i >= 0; i--)
+            {
+                try
+                {
+                    session.Bindings[i]?.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    AddCleanupError(ref errors, exception);
+                }
+            }
+
+            session.BindingCount = 0;
+            session.Bindings = null;
+
+            UIWindow window = session.Window;
+            session.Window = null;
+            if (!windowAlreadyDestroyed && !ReferenceEquals(window, null))
+            {
+                try
+                {
+                    // A rollback that happens before the open stage must not deliver close
+                    // callbacks to a view that never received the matching open callbacks.
+                    window.ForceClosed(window.State != UIWindowState.Created);
+                }
+                catch (Exception exception)
+                {
+                    AddCleanupError(ref errors, exception);
+                }
+
+                try
+                {
+                    DestroyWindow(window);
+                }
+                catch (Exception exception)
+                {
+                    AddCleanupError(ref errors, exception);
+                }
+            }
+
+            IUIAssetLease<GameObject> prefabLease = session.PrefabLease;
+            session.PrefabLease = null;
+            try
+            {
+                prefabLease?.Dispose();
+            }
+            catch (Exception exception)
+            {
+                AddCleanupError(ref errors, exception);
+            }
+
+            IUIAssetLease<UIWindowConfiguration> configurationLease = session.ConfigurationLease;
+            session.ConfigurationLease = null;
+            try
+            {
+                configurationLease?.Dispose();
+            }
+            catch (Exception exception)
+            {
+                AddCleanupError(ref errors, exception);
+            }
+
+            try
+            {
+                session.OpenCancellation.Dispose();
+            }
+            catch (Exception exception)
+            {
+                AddCleanupError(ref errors, exception);
+            }
+
+            try
+            {
+                session.TargetLifetimeCancellation.Dispose();
+            }
+            catch (Exception exception)
+            {
+                AddCleanupError(ref errors, exception);
+            }
+
+            session.CleanupCompleted = true;
+            _cleanupInProgressCount--;
+            session.CleanupCompletion.TrySetResult();
+            TryCompleteDisposeBarrier();
+            return errors == null
+                ? null
+                : CreateCleanupException(
+                    $"UI window '{session.WindowId}' cleanup completed with failures.",
+                    errors);
         }
 
-        public IUINavigationService NavigationService => _navigationService;
-        private IUINavigationService _navigationService;
-
-        public void SetNavigationService(IUINavigationService nav)
+        private bool IsSessionOwned(WindowSession session)
         {
-            _navigationService = nav;
-            if (uiManagerInstance != null)
-                uiManagerInstance.SetNavigationService(nav);
+            return session != null &&
+                   _sessions.TryGetValue(session.WindowId, out WindowSession current) &&
+                   ReferenceEquals(current, session);
         }
 
-        public IUITransitionCoordinator TransitionCoordinator => _transitionCoordinator;
-        private IUITransitionCoordinator _transitionCoordinator;
-
-        public void SetTransitionCoordinator(IUITransitionCoordinator coordinator)
+        private void ThrowIfOpenCannotContinue(
+            WindowSession session,
+            CancellationToken cancellationToken)
         {
-            _transitionCoordinator = coordinator;
-            if (uiManagerInstance != null)
-                uiManagerInstance.SetTransitionCoordinator(coordinator);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_isDisposed ||
+                _isShuttingDown ||
+                session.CloseRequested ||
+                session.CleanupStarted ||
+                !IsSessionOwned(session))
+            {
+                throw new OperationCanceledException(
+                    $"Opening UI window '{session.WindowId}' lost service ownership.",
+                    cancellationToken);
+            }
         }
 
-        public void SetCoordinatedNavStrategy(CoordinatedNavStrategy strategy)
+        private Exception ReleaseNavigationRegistration(WindowSession session)
         {
-            if (uiManagerInstance != null)
-                uiManagerInstance.SetCoordinatedNavStrategy(strategy);
+            if (session == null || !session.NavigationCommitted)
+            {
+                return null;
+            }
+
+            session.NavigationCommitted = false;
+            if (_navigationService == null)
+            {
+                return null;
+            }
+
+            // Local buffer: cleanup can be re-entered from user callbacks, so a shared scratch
+            // list could be overwritten mid-iteration.
+            var released = new List<string>(4);
+            try
+            {
+                _navigationService.Unregister(
+                    session.WindowId,
+                    ChildClosePolicy.Reparent,
+                    released);
+                return null;
+            }
+            catch (Exception exception)
+            {
+                return exception;
+            }
         }
 
-        public async Cysharp.Threading.Tasks.UniTask CoordinatedNavigateAsync(
-            string fromWindow, string toWindow,
-            NavigationDirection direction = NavigationDirection.Forward,
-            System.Threading.CancellationToken ct = default)
+        private void ThrowIfNavigationCannotCommit(
+            string leavingWindowId,
+            UIWindow leaving,
+            string enteringWindowId,
+            UIWindow entering,
+            CancellationToken cancellationToken)
         {
-            if (!CheckInitialization()) return;
-            await uiManagerInstance.CoordinatedNavigateAsync(fromWindow, toWindow, direction, _transitionCoordinator, ct);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_isDisposed || _isShuttingDown)
+            {
+                throw new OperationCanceledException(
+                    "UIService stopped during coordinated navigation.",
+                    cancellationToken);
+            }
+
+            if (!_sessions.TryGetValue(leavingWindowId, out WindowSession leavingSession) ||
+                !leavingSession.IsCommitted ||
+                !ReferenceEquals(leavingSession.Window, leaving) ||
+                !_sessions.TryGetValue(enteringWindowId, out WindowSession enteringSession) ||
+                !enteringSession.IsCommitted ||
+                !ReferenceEquals(enteringSession.Window, entering))
+            {
+                throw new InvalidOperationException(
+                    "A coordinated navigation window changed before commit.");
+            }
+        }
+
+        private static async UniTask WaitForCleanupPublicationBarrierAsync(
+            WindowSession session)
+        {
+            if (session != null && session.CleanupStarted && !session.CleanupCompleted)
+            {
+                await session.CleanupCompletion.Task;
+            }
+        }
+
+        private async UniTask WaitForDisposePublicationBarrierAsync()
+        {
+            UniTaskCompletionSource completion = _disposeCompletion;
+            if (_isDisposed && completion != null)
+            {
+                await completion.Task;
+            }
+        }
+
+        private void TryCompleteDisposeBarrier()
+        {
+            if (!_isDisposed ||
+                !_disposePhasesCompleted ||
+                _cleanupInProgressCount != 0 ||
+                _disposeCompletion == null)
+            {
+                return;
+            }
+
+            WindowSession[] sessions = _disposeSessions;
+            _disposeSessions = null;
+            if (sessions != null)
+            {
+                for (int i = sessions.Length - 1; i >= 0; i--)
+                {
+                    sessions[i].OpenCompletion.TrySetCanceled();
+                    sessions[i].CloseCompletion?.TrySetCanceled();
+                }
+            }
+
+            _disposeCompletion.TrySetResult();
+        }
+
+        private static bool OpenOptionsMatch(in UIOpenOptions left, in UIOpenOptions right)
+        {
+            return string.Equals(left.OpenerId, right.OpenerId, StringComparison.Ordinal) &&
+                   ReferenceEquals(left.Context, right.Context) &&
+                   left.SceneBoundOverride == right.SceneBoundOverride &&
+                   AssetLoadContextsMatch(left.AssetLoadContext, right.AssetLoadContext) &&
+                   ReferenceEquals(left.TransitionDriver, right.TransitionDriver) &&
+                   left.SuppressWindowTransition == right.SuppressWindowTransition;
+        }
+
+        private static bool AssetLoadContextsMatch(
+            in UIAssetLoadContext left,
+            in UIAssetLoadContext right)
+        {
+            return string.Equals(left.ConfigBucket, right.ConfigBucket, StringComparison.Ordinal) &&
+                   string.Equals(left.ConfigTag, right.ConfigTag, StringComparison.Ordinal) &&
+                   string.Equals(left.ConfigOwner, right.ConfigOwner, StringComparison.Ordinal) &&
+                   string.Equals(left.PrefabBucket, right.PrefabBucket, StringComparison.Ordinal) &&
+                   string.Equals(left.PrefabTag, right.PrefabTag, StringComparison.Ordinal) &&
+                   string.Equals(left.PrefabOwner, right.PrefabOwner, StringComparison.Ordinal);
+        }
+
+        private static void ThrowIfBindingCallbackFailed(Exception exception)
+        {
+            if (exception != null)
+            {
+                throw exception;
+            }
+        }
+
+        private static void CompleteClose(WindowSession session, List<Exception> errors)
+        {
+            if (errors == null)
+            {
+                session.CloseCompletion?.TrySetResult(true);
+                return;
+            }
+
+            session.CloseCompletion?.TrySetException(CreateCleanupException(
+                $"Closing UI window '{session.WindowId}' completed with failures.",
+                errors));
+        }
+
+        private static void AddCleanupError(
+            ref List<Exception> errors,
+            Exception exception)
+        {
+            if (exception == null)
+            {
+                return;
+            }
+
+            errors ??= new List<Exception>(2);
+            errors.Add(exception);
+        }
+
+        private static Exception CreateCleanupException(
+            string message,
+            List<Exception> errors)
+        {
+            return errors.Count == 1
+                ? errors[0]
+                : new AggregateException(message, errors);
+        }
+
+        private async UniTask WaitForInstantiateBudgetAsync(CancellationToken cancellationToken)
+        {
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return;
+            }
+#endif
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int frame = Time.frameCount;
+                if (frame != _instantiateFrame)
+                {
+                    _instantiateFrame = frame;
+                    _instantiatesThisFrame = 0;
+                }
+
+                if (_instantiatesThisFrame < _maxInstantiatesPerFrame)
+                {
+                    _instantiatesThisFrame++;
+                    return;
+                }
+
+                await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
+            }
+        }
+
+        private static bool ConfigureCanvas(
+            UIWindow window,
+            UIWindowConfiguration configuration,
+            UILayer layer)
+        {
+            if (configuration.CanvasIsolationPolicy !=
+                UIWindowConfiguration.SubCanvasPolicy.IsolatedCanvas)
+            {
+                return false;
+            }
+
+            Canvas canvas = window.GetComponent<Canvas>();
+            if (canvas == null)
+            {
+                canvas = window.gameObject.AddComponent<Canvas>();
+            }
+
+            canvas.overrideSorting = false;
+            Canvas parent = layer.UICanvas;
+            if (parent != null)
+            {
+                canvas.additionalShaderChannels = parent.additionalShaderChannels;
+                canvas.pixelPerfect = parent.pixelPerfect;
+            }
+
+            if (window.GetComponent<UnityEngine.UI.GraphicRaycaster>() == null)
+            {
+                window.gameObject.AddComponent<UnityEngine.UI.GraphicRaycaster>();
+            }
+
+            return true;
+        }
+
+        private void OnActiveSceneChanged(Scene previousScene, Scene nextScene)
+        {
+            if (_isDisposed || _isShuttingDown)
+            {
+                return;
+            }
+
+            // UIService is not a UnityEngine.Object: a destroyed UIRoot means no owner is left,
+            // so release the service instead of leaking through the static scene event.
+            if (_root == null)
+            {
+                Dispose();
+                return;
+            }
+
+            CloseSceneBoundWindowsAsync(ToSceneHandleValue(nextScene)).Forget();
+        }
+
+        // Scene handles are stored as plain integers because the window model uses -1 as an explicit
+        // "unbound" sentinel and the value is only ever compared for equality. Unity 6.7 replaced the
+        // int handle with a 64-bit SceneHandle, so the native value is narrowed at this boundary.
+        private static int ToSceneHandleValue(Scene scene)
+        {
+#if UNITY_6000_6_OR_NEWER
+            return unchecked((int)scene.handle.GetRawData());
+#else
+            return scene.handle;
+#endif
+        }
+
+        private async UniTask CloseSceneBoundWindowsAsync(int activeSceneHandle)
+        {
+            List<string> windowIds = new List<string>(4);
+            for (int i = 0; i < _sessionOrder.Count; i++)
+            {
+                UIWindow window = _sessionOrder[i].Window;
+                if (window != null && window.IsSceneBound && window.BoundSceneHandle != activeSceneHandle)
+                {
+                    windowIds.Add(window.WindowId);
+                }
+            }
+
+            for (int i = windowIds.Count - 1; i >= 0; i--)
+            {
+                await CloseSingleAsync(windowIds[i]);
+            }
+        }
+
+        private void EnsureBinderSetCanChange()
+        {
+            if (_sessions.Count != 0)
+            {
+                throw new InvalidOperationException(
+                    "Binder registration can only change while no window session is active.");
+            }
+        }
+
+        private void EnsureUsable()
+        {
+            EnsureMainThread();
+            if (_isDisposed)
+            {
+                throw new ObjectDisposedException(nameof(UIService));
+            }
+
+            if (_isShuttingDown)
+            {
+                throw new InvalidOperationException("UIService is shutting down.");
+            }
+
+            if (_root == null)
+            {
+                throw new InvalidOperationException("UIRoot has been destroyed.");
+            }
+        }
+
+        private void EnsureMainThread()
+        {
+            if (Thread.CurrentThread.ManagedThreadId != _ownerThreadId)
+            {
+                throw new InvalidOperationException(
+                    "UIService may only be used from its owning Unity main thread.");
+            }
+        }
+
+        private static void DestroyWindow(UIWindow window)
+        {
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+            {
+                UnityEngine.Object.DestroyImmediate(window.gameObject);
+                return;
+            }
+#endif
+            UnityEngine.Object.Destroy(window.gameObject);
         }
     }
 }

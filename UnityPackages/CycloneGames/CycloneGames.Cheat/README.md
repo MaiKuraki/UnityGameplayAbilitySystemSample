@@ -1,287 +1,479 @@
 # CycloneGames.Cheat
 
-<div align="left">English | <a href="./README.SCH.md">简体中文</a></div>
+[English | 简体中文](README.SCH.md)
 
-A lightweight, type-safe runtime cheat system for Unity, built on VitalRouter. Optimized for zero/minimal GC allocation, cross-platform compatibility, and maximum performance. Enables debugging/GM commands and developer tooling with struct/class arguments, async execution, and built-in de-duplication and cancellation.
+CycloneGames.Cheat is an internal command layer for debug, QA, GM, automation, and live-ops tooling. It routes typed commands through VitalRouter, isolates package-neutral contracts in a `Core` assembly from Unity-facing runtime services, and gates every dispatch behind an `ENABLE_CHEAT` build symbol so production builds ship with a no-op runtime.
 
-## Features
+## Table of Contents
 
-- **Type-safe command carriers:** `CheatCommand` family for no-arg, struct-generic, class-generic, and multi-struct-arg variants.
-- **Decoupled routing:** Attribute-based routing with VitalRouter `[Route]` so publishers and subscribers are not tightly coupled.
-- **Async execution:** Built on Cysharp UniTask to avoid blocking the main thread.
-- **Compile-gated stripping:** Entire implementation is gated by `ENABLE_CHEAT`. In release builds without the define, all calls become zero-cost no-ops — no `#if` needed at call sites.
-- **Multi-router isolation:** Route commands through domain-specific routers (UI, Gameplay, etc.) for scoped handling.
-- **Flexible integration:** Optional logger interface for custom logging integration.
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Core Concepts](#core-concepts)
+- [Usage Guide](#usage-guide)
+- [Advanced Topics](#advanced-topics)
+- [Common Scenarios](#common-scenarios)
+- [Performance and Memory](#performance-and-memory)
+- [Troubleshooting](#troubleshooting)
 
-## Installation & Dependencies
+## Overview
 
-- Unity: `2022.3`+
-- Dependencies:
-  - `com.cysharp.unitask` ≥ `2.0.0`
-  - `jp.hadashikick.vitalrouter` ≥ `2.0.0`
+A cheat command answers one question: which internal operation should run, on which router, with which payload? CycloneGames.Cheat answers that with small `ICheatCommand` structs dispatched through a `CheatCommandRuntime`. The runtime tracks in-flight commands per `Router`, applies a duplicate policy, supports cancellation, and exposes counters that QA panels and live-ops dashboards can read.
 
-Install via UPM or place the package under `Packages`/`Assets`. See `package.json` in this folder for details.
+The module is split into two runtime assemblies plus an optional VContainer integration. `Core` carries command payloads, duplicate policy, and metrics. `Runtime` adds `CheatCommandRuntime`, `CheatCommandExecutionOptions`, and the engine-independent `CycloneGames.Logging` integration. When `ENABLE_CHEAT` is undefined, the runtime compiles to a no-op that completes every publish without dispatch, without incrementing metrics, and without logging on the hot path.
 
-### Enable the System
+Use this module to give debug consoles, test runners, GM tools, and automation a single typed entry point into the game. Multiplayer projects must still validate authority on the server, restrict high-privilege commands by environment and identity, audit use, and never trust client-side debug commands as gameplay truth.
 
-Add `ENABLE_CHEAT` to **Player Settings → Scripting Define Symbols** for configurations where cheats should be active (typically Debug / Development builds). When absent, `CheatCommandUtility` compiles to empty stubs — IL2CPP inlines them to zero cost.
+### Key Features
+
+- **`ICheatCommand` payloads** — `CheatCommand`, `CheatCommand<T>`, `CheatCommand<T1,T2>`, `CheatCommand<T1,T2,T3>`, plus the class variants `CheatCommandClass<T>` (reference-type payload) and `CheatCommandIdClass` (ID only) for callers that must hold the command instance by reference.
+- **`CheatCommandRuntime`** — explicit-owner runtime with per-router tracking, duplicate policy, cancellation, and metrics.
+- **`ICheatCommandAdmissionPublisher`** — optional capability for callers that must distinguish accepted publishes from duplicate, capacity, validation, or build-gate rejection.
+- **`CheatCommandExecutionOptions`** — value-type options for `Router`, `DuplicatePolicy`, and `Source` at the call site.
+- **`ENABLE_CHEAT` build gate** — when undefined, the runtime becomes a no-op with zero dispatch overhead.
+- **Unified logging** — defaults to the process `ILogWriter`, supports explicit writer injection and live replacement through `ICheatLogWriterConfigurable`.
+- **Optional VContainer installer** — registers `ICheatCommandRuntime`, `ICheatCommandPublisher`, and `ICheatCommandControl` as singletons.
+
+## Architecture
+
+| Assembly | Path | Purpose |
+| --- | --- | --- |
+| `CycloneGames.Cheat.Core` | `Core/` | Command payloads, `CheatDuplicatePolicy`, and `CheatRuntimeMetrics`. `noEngineReferences: true`; references only `VitalRouter.dll`. |
+| `CycloneGames.Cheat.Runtime` | `Runtime/` | `CheatCommandRuntime`, stable publisher/control/runtime contracts, optional admission and logging capabilities, and `CheatCommandExecutionOptions`. References `UniTask`, `VitalRouter.Unity`, Core, and Logging. |
+| `CycloneGames.Cheat.Runtime.Integrations.VContainer` | `Runtime/Integrations/DI/VContainer/` | `CheatVContainerInstaller`. Compiled only when `VCONTAINER_PRESENT` is defined. |
+| `CycloneGames.Cheat.Tests.Editor` | `Tests/Editor/` | Core and Runtime contract tests. |
+| `CycloneGames.Cheat.Sample` | `Samples/` | Opt-in samples and benchmarks. |
+
+```mermaid
+flowchart LR
+    Caller["Caller\nGM console, test runner, automation"] --> Publisher["ICheatCommandPublisher"]
+    Publisher --> Runtime["CheatCommandRuntime"]
+    Runtime --> Policy{"DuplicatePolicy"}
+    Policy -->|Drop| Register["Register state\nkeyed by CommandId+Router+Type"]
+    Policy -->|AllowParallel| Sequence["Allocate per-call sequence"]
+    Sequence --> Register
+    Register --> Router["VitalRouter Router\n(default or scoped)"]
+    Router --> Handler["Handler\n[Routes] + [Route]"]
+    Handler --> Metrics["CheatRuntimeMetrics"]
+    Register --> Metrics
+
+    classDef core fill:#dbeafe,stroke:#1d4ed8,color:#111827;
+    classDef adapter fill:#fef3c7,stroke:#b45309,color:#111827;
+    classDef external fill:#dcfce7,stroke:#15803d,color:#111827;
+    class Runtime,Register,Metrics core;
+    class Publisher,Handler adapter;
+    class Router external;
+```
+
+The caller decides which `Router` receives the command; the runtime tracks state keyed by `(CommandId, Router, CommandTypeHandle, Sequence)`; VitalRouter dispatches to source-generated handlers; the runtime records metrics and disposes state when the handler unwinds.
 
 ## Quick Start
 
-A minimal end-to-end example — publish a command and handle it.
-
-### Step 1: Define a Handler
+Reference `CycloneGames.Cheat.Runtime` from your asmdef and import the namespaces:
 
 ```csharp
+using CycloneGames.Cheat.Core;
 using CycloneGames.Cheat.Runtime;
+using CycloneGames.Logging;
+using Cysharp.Threading.Tasks;
+```
+
+### Create the runtime and publish a command
+
+```csharp
+// The application composition root installs its ILogWriter once.
+LogRuntime.TryInstallWriter(applicationLogWriter);
+var runtime = new CheatCommandRuntime();
+await runtime.PublishAsync("World_ReloadConfig");
+runtime.Dispose();
+```
+
+### Define a handler with VitalRouter source generation
+
+```csharp
+using System.Threading;
+using Cysharp.Threading.Tasks;
 using UnityEngine;
 using VitalRouter;
 
 [Routes]
-public partial class MyCheatHandler : MonoBehaviour
+public partial class DebugWorldCheatHandler : MonoBehaviour
 {
-    void Awake() => MapTo(Router.Default);
-    void OnDestroy() => UnmapRoutes();
+    private void Awake() => MapTo(Router.Default);
+    private void OnDestroy() => UnmapRoutes();
 
     [Route]
-    void OnCheat(CheatCommand cmd)
+    private async UniTask OnReload(CheatCommand command, CancellationToken cancellationToken)
     {
-        Debug.Log($"Received: {cmd.CommandID}");
+        if (command.CommandId != "World_ReloadConfig")
+        {
+            return;
+        }
+
+        await UniTask.Yield(cancellationToken);
     }
 }
 ```
 
-### Step 2: Publish a Command
+When `ENABLE_CHEAT` is defined, the runtime publishes the command through `Router.Default`, the handler receives it, and metrics reflect the dispatch. When `ENABLE_CHEAT` is undefined, the same call returns `UniTask.CompletedTask` without dispatch.
 
-```csharp
-using CycloneGames.Cheat.Runtime;
-using Cysharp.Threading.Tasks;
+## Core Concepts
 
-// Anywhere in your code:
-CheatCommandUtility.PublishCheatCommand("Hello_Cheat").Forget();
-```
+### Commands
 
-Attach `MyCheatHandler` to any GameObject, enter Play — pressing the publish code logs `Received: Hello_Cheat`.
+Every payload implements `ICheatCommand`, which in turn implements `VitalRouter.ICommand`:
+
+| Type | Use |
+| --- | --- |
+| `CheatCommand` | Command ID only. |
+| `CheatCommand<T>` | One struct payload. |
+| `CheatCommand<T1, T2>` | Two struct payloads. |
+| `CheatCommand<T1, T2, T3>` | Three struct payloads. |
+| `CheatCommandClass<T>` | One reference-type payload. Prefer struct payloads on hot paths. |
+| `CheatCommandIdClass` | Class variant of `CheatCommand`. Prefer `CheatCommand` on hot paths. |
+
+For stable production workflows, prefer dedicated command structs implementing `ICheatCommand` over string-heavy catch-all handlers. Dedicated types give VitalRouter stronger routing and reduce handler-side branching.
+
+Struct and class variants are distinct VitalRouter command types. A subscriber mapped to one variant only receives that exact type, and duplicate admission treats `CheatCommand("X")` and `CheatCommandIdClass("X")` as different commands because the command type is part of the duplicate identity. Pick one variant per command ID and stay consistent across publisher and subscriber.
+
+### Runtime ownership
+
+`CheatCommandRuntime` is explicitly owned. Create it directly for non-DI projects, or register `ICheatCommandRuntime`, `ICheatCommandPublisher`, and `ICheatCommandControl` in a DI container. Disposing the runtime stops new publishes, atomically detaches its in-flight registry, requests cancellation, and leaves each command state to be disposed by its publishing operation when the handler unwinds. Cancellation callbacks and token-source disposal never execute while the admission lock is held.
+
+The package does not expose a global static facade. Long-lived projects keep ownership explicit at a scene root, tool owner, service composition root, or DI lifetime scope.
+
+### Duplicate policy
+
+`CheatDuplicatePolicy` controls how a second publish of the same command identity on the same `Router` is handled while the first is still running. Duplicate identity includes the command ID, the target `Router`, the concrete `ICheatCommand` type, and the sequence number for `AllowParallel` publishes:
+
+| Policy | Behavior |
+| --- | --- |
+| `Drop` (default) | The second publish is dropped and counted in `DroppedDuplicateCount`. |
+| `AllowParallel` | The second publish gets a fresh sequence number and runs in parallel with the first. |
+
+`Drop` is the right default for stateful operations like "reload config" or "reset inventory". `AllowParallel` is appropriate for stateless triggers like "spawn enemy at point" where parallel executions are independent.
+
+Every runtime also enforces a constructor-defined concurrent-command ceiling. The default is `256` and the absolute supported maximum is `4096`. A narrow admission critical section evaluates duplicate identity first, then capacity, then registers state and commits the running counter as one operation. A duplicate therefore never consumes the last slot or degrades into a capacity rejection, and concurrent publishers cannot exceed the configured limit. A capacity-rejected publish increments `CapacityRejectedCommandCount` and never reaches VitalRouter. Handler dispatch, asynchronous waiting, cancellation callbacks, writer callbacks, and token-source disposal always run outside the admission critical section.
+
+The historical `PublishAsync` contract remains available and completes without a result when duplicate or capacity admission rejects a command. It does not emit a log for each admission rejection. Callers that must make a deterministic product decision should request the optional `ICheatCommandAdmissionPublisher` capability and inspect its `CheatCommandPublishResult`. Capacity diagnostics were deliberately not added to `ICheatCommandRuntime` or `ICheatCommandControl`, so existing external implementations of those interfaces remain source compatible.
+
+### Build gate
+
+`ENABLE_CHEAT` controls whether `CheatCommandRuntime` is functional:
+
+| State | Behavior |
+| --- | --- |
+| Defined | Publish dispatches through VitalRouter, metrics increment, the runtime logs errors and exceptions. |
+| Undefined | Publish returns `UniTask.CompletedTask` immediately, metrics stay at zero, no dispatch, no logging on the hot path. |
+
+The disabled path keeps the same public API and assembly references, so callers do not need `#if` guards. Samples and tool UIs that need to explain a disabled runtime should show their own startup diagnostics.
 
 ## Usage Guide
 
-### No-Arg Commands
-
-The simplest form — just a command ID, zero allocation:
+### Publish with arguments
 
 ```csharp
-CheatCommandUtility.PublishCheatCommand("Protocol_ReloadConfig").Forget();
+await runtime.PublishAsync("Player_SetHealth", 50);
+await runtime.PublishAsync("Player_SetPosition", 12.5f, 7.0f);
+await runtime.PublishAsync("Inventory_AddItem", itemId: 42, count: 1, rarity: 3);
 ```
 
-### Struct-Argument Commands
+Each overload wraps the arguments in the matching `CheatCommand<T>`, `CheatCommand<T1, T2>`, or `CheatCommand<T1, T2, T3>` struct.
 
-Pass value-type data with zero allocation:
+### Publish a reference-type payload
 
 ```csharp
-public struct SpawnData
+public sealed class InventoryBatch
 {
-    public Vector3 Position;
-    public int Count;
+    public int[] ItemIds;
 }
 
-var data = new SpawnData { Position = Vector3.zero, Count = 5 };
-CheatCommandUtility.PublishCheatCommand("Enemy_Spawn", data).Forget();
+await runtime.PublishClassAsync("Inventory_AddBatch", new InventoryBatch { ItemIds = new[] { 1, 2, 3 } });
 ```
 
-Handler side:
+`PublishClassAsync` rejects a null argument and logs an error before dispatch.
+
+### Publish a custom command struct
 
 ```csharp
-[Route]
-void OnSpawn(CheatCommand<SpawnData> cmd)
+public readonly struct ReloadConfigCommand : ICheatCommand
 {
-    Debug.Log($"Spawn {cmd.Arg.Count} enemies at {cmd.Arg.Position}");
+    public string CommandId => "World_ReloadConfig";
+    public readonly string Profile;
+    public ReloadConfigCommand(string profile) => Profile = profile;
 }
+
+await runtime.PublishAsync(new ReloadConfigCommand(profile: "Live"));
 ```
 
-### Multi-Arg Struct Commands
+Custom commands flow through the same routing, duplicate, and cancellation pipeline as the built-in variants, and VitalRouter can dispatch them to dedicated handler methods.
 
-Up to 3 struct arguments, still zero allocation:
+### Observe admission results
 
-```csharp
-CheatCommandUtility.PublishCheatCommand("Set_Transform", position, rotation).Forget();
-
-// Handler
-[Route]
-void OnSetTransform(CheatCommand<Vector3, Quaternion> cmd)
-{
-    transform.SetPositionAndRotation(cmd.Arg1, cmd.Arg2);
-}
-```
-
-### Class-Argument Commands
-
-For reference types (strings, complex objects). Allocates on heap — use when struct is not feasible:
+Use the optional admission capability when a console, automation runner, or GM workflow must distinguish dispatch from rejection:
 
 ```csharp
-CheatCommandUtility.PublishCheatCommandWithClass("Log_Message", "Hello from cheat!").Forget();
+ICheatCommandAdmissionPublisher admission = runtime;
+CheatCommandPublishResult result = await admission.TryPublishAsync(
+    new CheatCommand("World_ReloadConfig"));
 
-// Handler
-[Route]
-void OnLogMessage(CheatCommandClass<string> cmd)
+if (result == CheatCommandPublishResult.CapacityRejected)
 {
-    Debug.Log(cmd.Arg);
+    ShowCapacityWarning(admission.MaximumConcurrentCommandCount);
 }
 ```
 
-### Cancellation
+`Published` means the command passed admission and reached VitalRouter; handler completion, cancellation, and faults remain visible through `CheatRuntimeMetrics`. `DuplicateRejected`, `CapacityRejected`, `InvalidCommand`, and `Disabled` identify the non-dispatch reason without parsing logs or comparing counters before and after a call.
 
-Long-running commands support cooperative cancellation:
+### Use execution options
 
 ```csharp
-// Start a long task
-CheatCommandUtility.PublishCheatCommand("Protocol_LongTask").Forget();
+var options = new CheatCommandExecutionOptions(
+    router: myRouter,
+    duplicatePolicy: CheatDuplicatePolicy.AllowParallel,
+    source: "AutomationSuite");
 
-// Cancel it later
-CheatCommandUtility.CancelCheatCommand("Protocol_LongTask");
+await runtime.PublishAsync(new ReloadConfigCommand("Live"), options);
+
+// Or build incrementally:
+var options2 = default(CheatCommandExecutionOptions)
+    .WithRouter(myRouter)
+    .WithDuplicatePolicy(CheatDuplicatePolicy.AllowParallel)
+    .WithSource("GMConsole");
 ```
 
-Handler honors the token:
+`Router` defaults to `Router.Default` when null. `Source` is opaque to the runtime — it is a tag the owning product can use for audit trails or UI grouping.
+
+### Inspect and cancel running commands
 
 ```csharp
-[Route]
-async UniTask OnLongTask(CheatCommand cmd, CancellationToken ct)
+CheatRuntimeMetrics metrics = runtime.Metrics;
+Console.WriteLine($"running={metrics.RunningCommandCount}");
+Console.WriteLine($"published={metrics.PublishedCommandCount}");
+Console.WriteLine($"dropped={metrics.DroppedDuplicateCount}");
+Console.WriteLine($"faulted={metrics.FaultedCommandCount}");
+
+if (runtime.IsCommandRunning("World_ReloadConfig"))
 {
-    await UniTask.Delay(TimeSpan.FromSeconds(10), cancellationToken: ct);
-    Debug.Log("Task completed");
+    runtime.CancelCommand("World_ReloadConfig");
+}
+
+runtime.ClearAll();
+```
+
+`CancelCommand` requests cancellation through the `CancellationTokenSource` owned by the matching state. Handlers receive the token via the VitalRouter route parameter and are expected to unwind promptly.
+
+## Advanced Topics
+
+### Scoped routers
+
+Use a dedicated `Router` per tool, scene, world, or authority boundary when commands should not leak across systems:
+
+```csharp
+private readonly Router _sceneRouter = new Router();
+
+void Awake()
+{
+    var runtime = new CheatCommandRuntime();
+    var options = new CheatCommandExecutionOptions(_sceneRouter);
+    await runtime.PublishAsync("Scene_SkipIntro", options);
 }
 ```
 
-### Query Running State
+`CancelCommand` and `IsCommandRunning` accept an optional `Router` argument to scope the lookup:
 
 ```csharp
-bool running = CheatCommandUtility.IsCommandRunning("Protocol_LongTask");
-int total = CheatCommandUtility.RunningCommandCount;
+runtime.CancelCommand("World_ReloadConfig", _sceneRouter);
 ```
 
-### Multi-Router Isolation
+### VContainer integration
 
-Route commands through domain-specific routers to isolate handling:
-
-```csharp
-// Create dedicated routers
-var uiRouter = new Router();
-var gameplayRouter = new Router();
-
-// Publish to a specific router — only handlers mapped to that router receive it
-CheatCommandUtility.PublishCheatCommand("UI_ShowPopup", uiRouter).Forget();
-CheatCommandUtility.PublishCheatCommand("Player_Jump", jumpData, gameplayRouter).Forget();
-```
-
-Handler registration:
+The optional `CheatVContainerInstaller` lives in an assembly constrained by `VCONTAINER_PRESENT`. Projects without VContainer can remove or ignore that folder without affecting the core runtime.
 
 ```csharp
-[Routes]
-public partial class UICheatHandler
+using CycloneGames.Cheat.Runtime.Integrations.VContainer;
+using CycloneGames.Logging;
+using VContainer;
+using VContainer.Unity;
+
+public sealed class GameLifetimeScope : LifetimeScope
 {
-    public UICheatHandler(Router uiRouter) => MapTo(uiRouter);
-
-    [Route]
-    void OnUICommand(CheatCommand cmd)
+    protected override void Configure(IContainerBuilder builder)
     {
-        Debug.Log($"UI: {cmd.CommandID}");
+        var installer = new CheatVContainerInstaller(
+            logWriterFactory: resolver => resolver.Resolve<ILogWriter>());
+        installer.Install(builder);
+
+        builder.Register<DebugWorldCheatHandler>(Lifetime.Singleton);
     }
 }
 ```
 
-### Logger Integration
+The installer registers `ICheatCommandRuntime`, `ICheatCommandPublisher`, `ICheatCommandControl`, `ICheatCommandAdmissionPublisher`, and `ICheatLogWriterConfigurable` as singletons, and hooks a dispose callback so the runtime is torn down with the lifetime scope.
 
-By default, `CheatCommandUtility` uses `UnityDebugCheatLogger` which logs to Unity's Debug API. No setup required.
+### Logging configuration
+
+Cheat logs use category `CycloneGames.Cheat`. Most hosts install an application `ILogWriter` through `LogRuntime`; services that require isolation can inject a writer directly and replace it later through the concrete property or optional capability:
+
+Runtime channel construction is centralized in the internal `Runtime/Diagnostics/CheatRuntimeLog.cs` facade. Package code uses its `Channel` member for ambient logging and `Create(ILogWriter)` for an explicitly supplied non-null writer; call sites do not repeat category strings or construct `LogChannel` directly. `Create` rejects `null`; the separately named compatibility helper preserves the runtime's atomic nullable-writer fallback. This internal organization does not change the public injection or replacement API.
+
+The opt-in sample asmdef follows the same boundary through `Samples/Diagnostics/CheatSampleLog.cs`. Its standard `Category` and `Channel` preserve `CycloneGames.Cheat.Sample`; the separately named `BenchmarkCategory`, `BenchmarkChannel`, and `CreateBenchmark(ILogWriter logWriter)` members preserve `CycloneGames.Cheat.Sample.Benchmark` without duplicating category literals at call sites.
 
 ```csharp
-// Custom logger
-public class CustomCheatLogger : ICheatLogger
-{
-    public void LogError(string message) { /* ... */ }
-    public void LogException(Exception exception) { /* ... */ }
-}
+var runtime = new CheatCommandRuntime(
+    CheatCommandRuntime.DefaultMaximumConcurrentCommandCount,
+    telemetryWriter);
 
-CheatCommandUtility.Logger = new CustomCheatLogger();
-
-// Disable logging entirely
-CheatCommandUtility.Logger = null;
+ICheatLogWriterConfigurable logging = runtime;
+logging.LogWriter = replacementWriter;
 ```
 
-## API Reference
+Historical package-specific logger contracts, adapters, constructors, and properties are no longer part of the public API. Integrations use only `CycloneGames.Logging.ILogWriter`: inject one with `CheatCommandRuntime(int, ILogWriter)`, set `ICheatLogWriterConfigurable.LogWriter`, or supply an `ILogWriter` factory to `CheatVContainerInstaller`. `LogWriter` is read and written with `Volatile.Read` / `Volatile.Write`, so it can be replaced from another thread; writer ownership and disposal remain with the composition root.
 
-### Command Types
+### Build and CI
 
-| Type | Allocation | Description |
-|------|-----------|-------------|
-| `CheatCommand` | Zero | No-arg command |
-| `CheatCommand<T>` | Zero | Single struct arg |
-| `CheatCommand<T1, T2>` | Zero | Two struct args |
-| `CheatCommand<T1, T2, T3>` | Zero | Three struct args |
-| `CheatCommandClass<T>` | Heap | Single class arg |
+`BuildData` exposes `Cheat Build Mode`:
 
-All implement `ICheatCommand : VitalRouter.ICommand` with a `string CommandID` property.
+| Mode | Behavior |
+| --- | --- |
+| `Disabled` | Keeps `ENABLE_CHEAT` disabled during canonical pipeline Player builds. |
+| `DevelopmentBuilds` | Enables `ENABLE_CHEAT` only for debug/development builds. |
+| `Enabled` | Enables `ENABLE_CHEAT` for all canonical pipeline Player builds. Use only for protected internal builds. |
 
-### `CheatCommandUtility` (Static)
+CI can override the asset setting with `-pipelineEnableCheat` or `-pipelineDisableCheat`. Build support is implemented outside this package: the Build module detects the `CycloneGames.Cheat.Runtime` assembly contract through string symbols, reflection, and Unity compilation metadata, not by package path. The module can live under `Assets`, an embedded UPM package, the package cache, or another Unity-supported source location. If the runtime assembly is absent and Cheat is not requested, normal builds continue without applying `ENABLE_CHEAT`. If the profile or command line requests Cheat, preflight fails instead of producing a mislabeled build.
 
-| Method | Description |
-|--------|-------------|
-| `UniTask PublishCheatCommand(string, Router?)` | Publish no-arg command |
-| `UniTask PublishCheatCommand<T>(string, T, Router?)` | Publish with struct arg |
-| `UniTask PublishCheatCommand<T1,T2>(string, T1, T2, Router?)` | Publish with 2 struct args |
-| `UniTask PublishCheatCommand<T1,T2,T3>(string, T1, T2, T3, Router?)` | Publish with 3 struct args |
-| `UniTask PublishCheatCommandWithClass<T>(string, T, Router?)` | Publish with class arg |
-| `void CancelCheatCommand(string)` | Cancel across all routers |
-| `void CancelCheatCommand(string, Router)` | Cancel on specific router |
-| `bool IsCommandRunning(string)` | Check if command is in-flight |
-| `void ClearAll()` | Cancel and dispose all commands |
-| `ICheatLogger Logger { get; set; }` | Custom logger (default: Unity Debug) |
-| `int RunningCommandCount { get; }` | Number of in-flight commands |
+The Cheat build mode belongs to `BuildData`, not `HybridCLRBuildConfig`, and a Player recipe does not need the `hot-update` step merely to enable Cheat. An ordinary Player build supplies `ENABLE_CHEAT` through `BuildPlayerOptions.extraScriptingDefines` without mutating global PlayerSettings defines. HybridCLR 8.12 does not expose an equivalent per-invocation define input, so a Player recipe combining HybridCLR with effective Cheat support fails preflight; a hot-update or content-only recipe that does not build a Player remains independent.
 
-### `ICheatLogger`
+## Common Scenarios
 
-| Method | Description |
-|--------|-------------|
-| `void LogError(string)` | Log error message |
-| `void LogException(Exception)` | Log exception |
+### GM console with per-scene router
 
-## Execution & Concurrency
+A GM console panel publishes commands to the active scene's router so handlers from other scenes do not interfere:
 
-- **De-duplication:** Key is `(commandId, command type, router instance)`. Subsequent publishes with the same key are ignored until the previous completes.
-- **Thread safety:** Uses `ConcurrentDictionary` on native platforms, `Dictionary + lock` on WebGL (single-threaded). Logger access uses `Volatile.Read/Write`.
-- **Cancellation:** `CancelCheatCommand` triggers `CancellationTokenSource.Cancel()` → handlers receive cancellation through their `CancellationToken` parameter.
+```csharp
+public sealed class GMConsolePanel : MonoBehaviour
+{
+    private readonly Router _router = new Router();
+    private ICheatCommandRuntime _runtime;
 
-## Compile-Gate: `ENABLE_CHEAT`
+    void Awake()
+    {
+        _runtime = new CheatCommandRuntime();
+    }
 
-| Define | Behavior |
-|--------|----------|
-| `ENABLE_CHEAT` defined | Full implementation — de-duplication, routing, cancellation |
-| `ENABLE_CHEAT` absent | All methods are no-op stubs returning `UniTask.CompletedTask` / `false` / `0`. IL2CPP inlines to zero instructions. No runtime cost. |
+    public void OnReloadConfigButton() =>
+        _runtime.PublishAsync(
+            "World_ReloadConfig",
+            new CheatCommandExecutionOptions(_router)).Forget();
 
-Call sites never need `#if` guards — the API surface is identical in both paths.
+    public void OnGiveItemButton(int itemId, int count) =>
+        _runtime.PublishAsync(
+            "Inventory_AddItem",
+            itemId,
+            count,
+            new CheatCommandExecutionOptions(_router)).Forget();
 
-**Recommended setup:** Add `ENABLE_CHEAT` in **Player Settings → Scripting Define Symbols** only for Debug/Development configurations.
+    void OnDestroy()
+    {
+        _runtime.CancelCommand("World_ReloadConfig", _router);
+        _runtime.Dispose();
+    }
+}
+```
 
-## Best Practices
+Handlers map to `_router` instead of `Router.Default`, so the GM console's commands only reach the scene's handlers.
 
-- **Prefer struct commands** for zero allocation. Use `CheatCommandClass<T>` only when reference semantics are required.
-- **Cache command IDs** as `static readonly string` fields to avoid repeated string allocations.
-- **Keep handlers light.** Return quickly; use UniTask for long-running work.
-- **Honor `CancellationToken`** in async handlers for long-running or interruptible commands.
-- **Type matching is exact.** `CheatCommand<int>` and `CheatCommand<float>` are distinct — handler parameter type must match the published command type exactly.
-- **Use domain-specific routers** (UI, Gameplay, etc.) for better code organization and isolation.
-- **Handle errors in subscribers.** The publisher side swallows exceptions (except cancellation). Log and handle errors in your `[Route]` methods.
+### Test runner with cancellation
 
-## FAQ
+A test runner publishes a long-running cheat and cancels it when the test completes:
 
-- **Handler not triggered?**
-  - Check command type match (e.g., `CheatCommand` vs `CheatCommand<GameData>`).
-  - Ensure `[Routes]` partial class and `MapTo(router)` are set up.
-  - Ensure `ENABLE_CHEAT` is defined in Scripting Define Symbols.
+```csharp
+[UnityTest]
+public IEnumerator ReloadConfig_CompletesWithinFrame()
+{
+    var runtime = new CheatCommandRuntime();
+    UniTask publishTask = runtime.PublishAsync("World_ReloadConfig");
 
-- **Repeated calls do nothing?**
-  - Same `(commandId, type, router)` is de-duplicated while running. Wait for previous completion.
+    yield return publishTask.ToCoroutine();
 
-- **How to stop a running command?**
-  - `CheatCommandUtility.CancelCheatCommand(commandId)`. Handler must honor `CancellationToken`.
+    Assert.AreEqual(0, runtime.Metrics.RunningCommandCount);
+    Assert.Greater(runtime.Metrics.CompletedCommandCount, 0);
 
-- **How to strip cheats in release builds?**
-  - Remove `ENABLE_CHEAT` from Scripting Define Symbols. All calls become no-ops at zero cost.
+    runtime.Dispose();
+}
+```
+
+`Dispose` cancels any in-flight commands, so test teardown is deterministic.
+
+### Automation with parallel triggers
+
+An automation suite fires parallel "spawn enemy" triggers without dropping any:
+
+```csharp
+var options = new CheatCommandExecutionOptions(
+    router: automationRouter,
+    duplicatePolicy: CheatDuplicatePolicy.AllowParallel,
+    source: "NightlyAutomation");
+
+for (int i = 0; i < 16; i++)
+{
+    runtime.PublishAsync("Enemy_SpawnAt", i * 1.0f, i * 0.5f, options).Forget();
+}
+```
+
+`AllowParallel` gives each publish a distinct sequence number, so all 16 commands register and run concurrently.
+
+## Performance and Memory
+
+| Path | Behavior | Allocation |
+| --- | --- | --- |
+| Disabled publish (`ENABLE_CHEAT` undefined) | Returns `UniTask.CompletedTask` | 0 bytes |
+| Enabled publish, no handler | Returns completed task after dispatch | One `CancellationTokenSource` per command, bounded by `MaximumConcurrentCommandCount` |
+| Enabled publish with handler | Awaits handler, then disposes state | One `CancellationTokenSource` per command, bounded by `MaximumConcurrentCommandCount` |
+| `CancelCommand` / `ClearAll` / `Dispose` | Snapshots or detaches at most `MaximumConcurrentCommandCount` states, then cancels outside the lock | One bounded control-path list per call |
+| `Metrics` read | Constructs `CheatRuntimeMetrics` readonly struct | 0 bytes |
+| `IsCommandRunning` | Linear scan of in-flight states | 0 bytes |
+
+State is keyed by a struct (`CommandStateKey`) so dictionary lookups avoid boxing. Admission serializes duplicate detection, capacity validation, state registration, and running-count commitment without allocating on rejected paths. Long-lived metrics use `Interlocked` operations. The runtime holds one `CancellationTokenSource` per admitted command and disposes it when the handler unwinds. Scalar metrics are available to caller-owned diagnostics only when the existing `ENABLE_CHEAT` capability is defined; Release configurations without that capability contain no Cheat runtime.
+
+### Threading
+
+- `CheatCommandRuntime` is safe to call from any thread.
+- A single narrow lock coordinates admission, release, lookup, and stable cancellation snapshots over a bounded `Dictionary` on every platform.
+- No VitalRouter publish, handler execution, `await`, cancellation callback, writer callback, or `CancellationTokenSource.Cancel` / `Dispose` call occurs while that lock is held. Cancellation callbacks may safely re-enter runtime control or admission APIs.
+- `ClearAll` marks its complete snapshot before delivering the first cancellation, so synchronous handler completion cannot invalidate enumeration or prevent later snapshot members from receiving cancellation.
+- Exceptions from cancellation callbacks and from the optional writer are isolated per state, so one faulty callback cannot prevent later members of the bounded snapshot from receiving cancellation.
+- `PublishAsync` awaits VitalRouter's dispatch, which respects the `Router`'s scheduling configuration.
+- The `LogWriter` property is read and written with `Volatile.Read` / `Volatile.Write`, so it can be swapped from another thread without external synchronization.
+
+### Persistence
+
+The Cheat module does not write runtime files, save data, preferences, caches, or assets. It owns only in-memory command state and an unowned writer reference. GM console history, audit trails, remote authorization, and cross-device synchronization are the owning product's responsibility and should be implemented with explicit storage, schema versioning, access control, and migration.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Resolution |
+| --- | --- | --- |
+| `Publishing` log appears but no `Received` follows | `ENABLE_CHEAT` is undefined, the wrong `Router` is targeted, the listener was unmapped, or VitalRouter source generation failed | Verify the compile symbol, the target `Router`, the command payload type, listener lifetime, and VitalRouter build output |
+| A second publish is dropped | `CheatDuplicatePolicy.Drop` is set and a previous command is still running | Switch to `AllowParallel`, await the previous command, or cancel it first |
+| A publish completes but no handler runs while the runtime is enabled | Duplicate or capacity admission rejected the command | Use `ICheatCommandAdmissionPublisher.TryPublishAsync` for a per-call result and inspect `DroppedDuplicateCount` / `CapacityRejectedCommandCount` for aggregate diagnostics |
+| Metrics show `FaultedCommandCount > 0` | A handler threw an exception other than `OperationCanceledException` | Inspect the `CycloneGames.Cheat` category output; guard the handler |
+| `IsCommandRunning` returns `false` immediately after publish | The handler completed synchronously before the check | Inspect `Metrics.CompletedCommandCount` instead |
+| `CancelCommand` does not stop the handler | The handler does not observe the `CancellationToken` | Pass the token to `UniTask.Yield`, network calls, and async primitives |
+| VContainer installer does not compile | `VCONTAINER_PRESENT` is undefined | Install VContainer or remove the integration folder |
+| `ObjectDisposedException` on publish | `Dispose` was called before the publish completed | Await outstanding publishes before disposing, or let the runtime cancel them |
+
+## Validation
+
+Run focused tests from Unity Test Runner:
+
+```text
+<UnityEditor> -batchmode -nographics -projectPath <repo-root>/UnityStarter -runTests -testPlatform EditMode -assemblyNames CycloneGames.Cheat.Tests.Editor -testResults <result-path> -quit
+```
+
+The Editor test suite covers command dispatch, duplicate policy, cancellation, metrics, disabled-runtime no-op behavior, the public `ILogWriter` constructor shape, optional admission-result contracts, blocked-handler concurrency at the capacity boundary, cancellation callback re-entry, disposal detachment, stable cancellation snapshots while handlers complete, and continued batch delivery when both a callback and the installed writer fail. Build-mode gating must be validated in a Player build with the target `ENABLE_CHEAT` configuration.
+
+## References
+
+- [VitalRouter](https://github.com/hadashiA/VitalRouter)
+- [UniTask](https://github.com/Cysharp/UniTask)

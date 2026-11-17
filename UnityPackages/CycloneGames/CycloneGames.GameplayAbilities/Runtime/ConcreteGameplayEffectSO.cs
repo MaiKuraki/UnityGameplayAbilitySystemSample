@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using CycloneGames.Logging;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Runtime
@@ -7,20 +8,30 @@ namespace CycloneGames.GameplayAbilities.Runtime
     /// A concrete, creatable ScriptableObject definition for a GameplayEffect.
     /// Use this to create new Gameplay Effect assets in the editor via 'Assets/Create/...'.
     /// </summary>
-    [CreateAssetMenu(fileName = "GE_", menuName = "CycloneGames/GameplayAbilitySystem/GameplayEffect Definition")]
+    [CreateAssetMenu(fileName = "GE_", menuName = GameplayAbilitiesAssetMenuPaths.GameplayEffectDefinition, order = 0)]
     public class ConcreteGameplayEffectSO : GameplayEffectSO
     {
+        private static readonly LogChannel Log = GameplayAbilitiesLog.Channel;
+
         /// <summary>
         /// Creates a runtime instance of the GameplayEffect based on the data defined in this ScriptableObject.
         /// </summary>
         protected override GameplayEffect CreateGameplayEffect()
         {
             var grantedAbilities = new List<GameplayAbility>();
+            var grantedAbilityPolicies = new List<EGameplayEffectGrantedAbilityRemovePolicy>();
             if (GrantedAbilities != null)
             {
-                foreach (var abilitySO in GrantedAbilities)
+                for (int i = 0; i < GrantedAbilities.Count; i++)
                 {
-                    if (abilitySO != null) grantedAbilities.Add(abilitySO.CreateAbility());
+                    var abilitySO = GrantedAbilities[i];
+                    if (abilitySO == null) continue;
+
+                    grantedAbilities.Add(abilitySO.GetGameplayAbility());
+                    grantedAbilityPolicies.Add(
+                        GrantedAbilityRemovalPolicies != null && i < GrantedAbilityRemovalPolicies.Count
+                            ? GrantedAbilityRemovalPolicies[i]
+                            : EGameplayEffectGrantedAbilityRemovePolicy.CancelAbilityImmediately);
                 }
             }
 
@@ -29,7 +40,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
             {
                 foreach (var serializableMod in SerializableModifiers)
                 {
-                    runtimeModifiers.Add(new ModifierInfo(serializableMod.AttributeName, serializableMod.Operation, serializableMod.Magnitude));
+                    runtimeModifiers.Add(CreateRuntimeModifier(serializableMod));
                 }
             }
 
@@ -69,8 +80,67 @@ namespace CycloneGames.GameplayAbilities.Runtime
                 customApplicationRequirements: null,
                 executePeriodicEffectOnApplication: ExecutePeriodicEffectOnApplication,
                 overflowEffects: runtimeOverflowEffects,
-                denyOverflowApplication: DenyOverflowApplication
+                denyOverflowApplication: DenyOverflowApplication,
+                periodicInhibitionPolicy: PeriodicInhibitionPolicy,
+                durationMagnitude: DurationMagnitude?.ToRuntimeInfo(),
+                blockedAbilityTags: BlockedAbilityTags,
+                grantedAbilityRemovalPolicies: grantedAbilityPolicies
             );
+        }
+
+        private static ModifierInfo CreateRuntimeModifier(ModifierInfoSerializable serializableMod)
+        {
+            switch (serializableMod.MagnitudeCalculationType)
+            {
+                case EGameplayEffectMagnitudeCalculation.AttributeBased:
+                    return new ModifierInfo(
+                        serializableMod.AttributeName,
+                        serializableMod.Operation,
+                        new AttributeBasedMagnitude(
+                            serializableMod.BackingAttributeName,
+                            serializableMod.AttributeCaptureSource,
+                            serializableMod.AttributeCalculationType,
+                            serializableMod.AttributeCoefficient,
+                            serializableMod.AttributePreMultiplyAdditiveValue,
+                            serializableMod.AttributePostMultiplyAdditiveValue,
+                            serializableMod.AttributeSnapshotPolicy),
+                        serializableMod.EvaluationChannel);
+                case EGameplayEffectMagnitudeCalculation.SetByCaller:
+                    return new ModifierInfo(
+                        serializableMod.AttributeName,
+                        serializableMod.Operation,
+                        !string.IsNullOrEmpty(serializableMod.SetByCallerDataTag.TagName)
+                            ? new SetByCallerMagnitude(
+                                serializableMod.SetByCallerDataTag.Tag,
+                                serializableMod.SetByCallerDefaultValue,
+                                serializableMod.WarnIfSetByCallerMissing)
+                            : new SetByCallerMagnitude(
+                                serializableMod.SetByCallerDataName,
+                                serializableMod.SetByCallerDefaultValue,
+                                serializableMod.WarnIfSetByCallerMissing),
+                        serializableMod.EvaluationChannel);
+                case EGameplayEffectMagnitudeCalculation.CustomCalculation:
+                    if (serializableMod.CustomCalculation != null)
+                    {
+                        return new ModifierInfo(
+                            serializableMod.AttributeName,
+                            serializableMod.Operation,
+                            serializableMod.CustomCalculation.CreateCalculation(),
+                            serializableMod.AttributeSnapshotPolicy,
+                            serializableMod.EvaluationChannel);
+                    }
+
+                    Log.Warning(serializableMod.AttributeName, static (attributeName, sb) => sb.Append("Modifier on effect asset uses CustomCalculation magnitude ")
+                        .Append("without a calculation asset. Falling back to ScalableFloat for attribute '")
+                        .Append(attributeName).Append("'."));
+                    break;
+            }
+
+            return new ModifierInfo(
+                serializableMod.AttributeName,
+                serializableMod.Operation,
+                serializableMod.Magnitude,
+                serializableMod.EvaluationChannel);
         }
     }
 }

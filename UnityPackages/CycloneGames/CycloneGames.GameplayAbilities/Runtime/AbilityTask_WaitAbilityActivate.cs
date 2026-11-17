@@ -4,7 +4,6 @@ namespace CycloneGames.GameplayAbilities.Runtime
 {
     /// <summary>
     /// AbilityTask that waits for any ability to be activated on the owning ASC.
-    /// UE5: UAbilityTask_WaitAbilityActivate.
     /// </summary>
     public class AbilityTask_WaitAbilityActivate : AbilityTask
     {
@@ -12,7 +11,15 @@ namespace CycloneGames.GameplayAbilities.Runtime
         public Action OnCancelled;
 
         private Action<GameplayAbility> cachedCallback;
+        private AbilitySystemComponent subscriptionOwner;
         private bool triggerOnce;
+        private bool terminalCallbackStarted;
+
+        public override void InitTask(GameplayAbility ability)
+        {
+            base.InitTask(ability);
+            terminalCallbackStarted = false;
+        }
 
         public static AbilityTask_WaitAbilityActivate WaitAbilityActivate(GameplayAbility ability, bool triggerOnce = true)
         {
@@ -23,8 +30,15 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         protected override void OnActivate()
         {
+            subscriptionOwner = Ability?.AbilitySystemComponent;
+            if (subscriptionOwner == null)
+            {
+                EndTask();
+                return;
+            }
+
             cachedCallback = OnAbilityActivatedCallback;
-            Ability.AbilitySystemComponent.OnAbilityActivated += cachedCallback;
+            subscriptionOwner.OnAbilityActivated += cachedCallback;
         }
 
         private void OnAbilityActivatedCallback(GameplayAbility activatedAbility)
@@ -32,36 +46,61 @@ namespace CycloneGames.GameplayAbilities.Runtime
             // Don't trigger for the ability that owns this task
             if (activatedAbility == Ability) return;
 
-            OnAbilityActivated?.Invoke(activatedAbility);
-
             if (triggerOnce)
             {
-                EndTask();
+                if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                        this,
+                        ref terminalCallbackStarted,
+                        out ulong leaseGeneration)) return;
+                try
+                {
+                    OnAbilityActivated?.Invoke(activatedAbility);
+                }
+                finally
+                {
+                    EndTaskIfCurrentLease(leaseGeneration);
+                }
+                return;
             }
+
+            OnAbilityActivated?.Invoke(activatedAbility);
         }
 
         public override void CancelTask()
         {
-            OnCancelled?.Invoke();
-            base.CancelTask();
+            if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                    this,
+                    ref terminalCallbackStarted,
+                    out ulong leaseGeneration)) return;
+            try
+            {
+                OnCancelled?.Invoke();
+            }
+            finally
+            {
+                if (IsCurrentLease(leaseGeneration))
+                {
+                    base.CancelTask();
+                }
+            }
         }
 
         protected override void OnDestroy()
         {
-            if (Ability?.AbilitySystemComponent != null && cachedCallback != null)
+            if (subscriptionOwner != null && cachedCallback != null)
             {
-                Ability.AbilitySystemComponent.OnAbilityActivated -= cachedCallback;
+                subscriptionOwner.OnAbilityActivated -= cachedCallback;
             }
             OnAbilityActivated = null;
             OnCancelled = null;
             cachedCallback = null;
+            subscriptionOwner = null;
             base.OnDestroy();
         }
     }
 
     /// <summary>
     /// AbilityTask that waits for any ability to end on the owning ASC.
-    /// UE5: UAbilityTask_WaitAbilityEnd (subset of WaitGameplayAbilityEnd).
     /// </summary>
     public class AbilityTask_WaitAbilityEnd : AbilityTask
     {
@@ -69,7 +108,15 @@ namespace CycloneGames.GameplayAbilities.Runtime
         public Action OnCancelled;
 
         private Action<GameplayAbility> cachedCallback;
+        private AbilitySystemComponent subscriptionOwner;
         private bool triggerOnce;
+        private bool terminalCallbackStarted;
+
+        public override void InitTask(GameplayAbility ability)
+        {
+            base.InitTask(ability);
+            terminalCallbackStarted = false;
+        }
 
         public static AbilityTask_WaitAbilityEnd WaitAbilityEnd(GameplayAbility ability, bool triggerOnce = true)
         {
@@ -80,37 +127,70 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         protected override void OnActivate()
         {
+            subscriptionOwner = Ability?.AbilitySystemComponent;
+            if (subscriptionOwner == null)
+            {
+                EndTask();
+                return;
+            }
+
             cachedCallback = OnAbilityEndedCallback;
-            Ability.AbilitySystemComponent.OnAbilityEndedEvent += cachedCallback;
+            subscriptionOwner.OnAbilityEndedEvent += cachedCallback;
         }
 
         private void OnAbilityEndedCallback(GameplayAbility endedAbility)
         {
             if (endedAbility == Ability) return;
 
-            OnAbilityEnded?.Invoke(endedAbility);
-
             if (triggerOnce)
             {
-                EndTask();
+                if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                        this,
+                        ref terminalCallbackStarted,
+                        out ulong leaseGeneration)) return;
+                try
+                {
+                    OnAbilityEnded?.Invoke(endedAbility);
+                }
+                finally
+                {
+                    EndTaskIfCurrentLease(leaseGeneration);
+                }
+                return;
             }
+
+            OnAbilityEnded?.Invoke(endedAbility);
         }
 
         public override void CancelTask()
         {
-            OnCancelled?.Invoke();
-            base.CancelTask();
+            if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                    this,
+                    ref terminalCallbackStarted,
+                    out ulong leaseGeneration)) return;
+            try
+            {
+                OnCancelled?.Invoke();
+            }
+            finally
+            {
+                if (IsCurrentLease(leaseGeneration))
+                {
+                    base.CancelTask();
+                }
+            }
         }
 
         protected override void OnDestroy()
         {
-            if (Ability?.AbilitySystemComponent != null && cachedCallback != null)
+            if (subscriptionOwner != null && cachedCallback != null)
             {
-                Ability.AbilitySystemComponent.OnAbilityEndedEvent -= cachedCallback;
+                subscriptionOwner.OnAbilityEndedEvent -= cachedCallback;
             }
             OnAbilityEnded = null;
             OnCancelled = null;
             cachedCallback = null;
+            subscriptionOwner = null;
             base.OnDestroy();
         }
     }

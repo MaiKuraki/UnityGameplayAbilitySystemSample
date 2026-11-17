@@ -3,7 +3,6 @@ using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayFramework;
 using CycloneGames.GameplayFramework.Runtime;
 using CycloneGames.GameplayTags.Core;
-using CycloneGames.Logger;
 using CycloneGames.Utility.Runtime;
 using UnityEngine;
 using UnityEngine.Serialization;
@@ -142,9 +141,11 @@ namespace GASSample.Gameplay
             base.OnRemoveAbility();
         }
 
-        public override GameplayAbility CreatePoolableInstance()
+        public override GameplayAbility CreateRuntimeInstance()
         {
-            var ability = new GA_Attack(
+            // Configuration is copied from the definition by the runtime; only the ability's own
+            // constructor arguments belong here.
+            return new GA_Attack(
                 animCharacter,
                 useRootMotion,
                 animCamera,
@@ -152,27 +153,6 @@ namespace GASSample.Gameplay
                 comboWindowDuration,
                 cameraPolicy,
                 nextComboAbilityTag);
-
-            ability.Initialize(
-                Name,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffectDefinition,
-                CooldownEffectDefinition,
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag,
-                ActivationOwnedTags,
-                ActivateAbilityOnGranted,
-                SourceRequiredTags,
-                SourceBlockedTags,
-                TargetRequiredTags,
-                TargetBlockedTags,
-                AbilityTriggers as System.Collections.Generic.List<AbilityTriggerData>);
-
-            return ability;
         }
 
         private void StartSkillCamera(PlayerController playerController)
@@ -321,12 +301,12 @@ namespace GASSample.Gameplay
                 return;
             }
 
-            AbilitySystemComponent.CombinedTags.AddTag(GASSampleTags.Skill_State_ComboWindow);
+            AbilitySystemComponent.AddLooseGameplayTag(GameplayTagManager.Request(GASSampleTags.Skill_State_ComboWindow));
             comboWindowTagApplied = true;
 
             if (!nextComboAbilityTag.IsNone)
             {
-                AbilitySystemComponent.CombinedTags.AddTag(nextComboAbilityTag);
+                AbilitySystemComponent.AddLooseGameplayTag(nextComboAbilityTag);
                 nextComboTagApplied = true;
             }
         }
@@ -338,12 +318,12 @@ namespace GASSample.Gameplay
                 return;
             }
 
-            AbilitySystemComponent.CombinedTags.RemoveTag(GASSampleTags.Skill_State_ComboWindow);
+            AbilitySystemComponent.RemoveLooseGameplayTag(GameplayTagManager.Request(GASSampleTags.Skill_State_ComboWindow));
             comboWindowTagApplied = false;
 
             if (nextComboTagApplied)
             {
-                AbilitySystemComponent.CombinedTags.RemoveTag(nextComboAbilityTag);
+                AbilitySystemComponent.RemoveLooseGameplayTag(nextComboAbilityTag);
                 nextComboTagApplied = false;
             }
         }
@@ -415,7 +395,7 @@ namespace GASSample.Gameplay
         [SerializeField] private AbilityCameraClip cameraClip;
         [SerializeField] private AttackCameraRuntimePolicySO cameraPolicy;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
             var runtimePolicy = cameraPolicy != null ? cameraPolicy.Value : AttackCameraRuntimePolicy.Default;
             var runtimeDamageEffect = damageEffect ? damageEffect.GetGameplayEffect() : null;

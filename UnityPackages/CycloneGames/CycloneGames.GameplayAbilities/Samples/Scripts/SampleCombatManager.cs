@@ -1,7 +1,6 @@
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayTags.Core;
-using CycloneGames.Logger;
-using Cysharp.Threading.Tasks;
+using CycloneGames.Logging;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -9,6 +8,8 @@ namespace CycloneGames.GameplayAbilities.Sample
 {
     public class SampleCombatManager : MonoBehaviour
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         [Header("Characters")]
         public Character Player;
         public Character Enemy;
@@ -23,18 +24,34 @@ namespace CycloneGames.GameplayAbilities.Sample
         public Text EnemyStatusText;
         public Text LogText;
         private GameObject logTextGORef;
+        private UILogWriter _uiLogWriter;
+        private GASRuntimeContext runtimeContext;
+        private AbilitySystemComponent playerDebugTarget;
+        private AbilitySystemComponent enemyDebugTarget;
+        private bool ownsDebugOverlayLifetime;
 
         private void Awake()
         {
+            runtimeContext = new GASRuntimeContext();
+            InitializeCharacter(Player);
+            InitializeCharacter(Enemy);
+
             DetailBtn.onClick.AddListener(ToggleGASInfoDetail);
             logTextGORef = LogText?.gameObject;
             if (LogText != null)
             {
-                CLogger.Instance.AddLogger(new UILogger(UpdateLog, 7));
+                ILogWriter innerWriter = LogRuntime.Writer;
+                _uiLogWriter = new UILogWriter(innerWriter, UpdateLog, 7);
+                if (!LogRuntime.TryReplaceWriter(innerWriter, _uiLogWriter))
+                {
+                    _uiLogWriter.Dispose();
+                    _uiLogWriter = null;
+                    Log.Warning("SampleCombatManager: The process log writer changed during initialization. UI log capture was not installed.");
+                }
             }
             else
             {
-                Debug.LogWarning("SampleCombatManager: LogText is not assigned in the Inspector. UI logs will not be displayed.");
+                Log.Warning("SampleCombatManager: LogText is not assigned in the Inspector. UI logs will not be displayed.");
             }
         }
 
@@ -62,11 +79,41 @@ namespace CycloneGames.GameplayAbilities.Sample
 
         void ToggleGASInfoDetail()
         {
-            GASDebugOverlay.Toggle();
+            if (GASDebugOverlay.IsActive)
+            {
+                GASDebugOverlay.SetEnabled(false);
+                return;
+            }
+
+            bool overlayWasInitialized = GASDebugOverlay.IsInitialized;
+            bool hasTarget = TryAddDebugTarget(Player, ref playerDebugTarget);
+            hasTarget |= TryAddDebugTarget(Enemy, ref enemyDebugTarget);
+            ownsDebugOverlayLifetime |= !overlayWasInitialized && GASDebugOverlay.IsInitialized;
+            GASDebugOverlay.SetEnabled(hasTarget);
+        }
+
+        private static bool TryAddDebugTarget(
+            Character character,
+            ref AbilitySystemComponent registeredTarget)
+        {
+            if (character == null)
+            {
+                return false;
+            }
+
+            AbilitySystemComponent asc = character.AbilitySystemComponent;
+            if (asc == null || asc.IsDisposed || !GASDebugOverlay.TryAddTarget(asc, character.gameObject))
+            {
+                return false;
+            }
+
+            registeredTarget = asc;
+            return true;
         }
 
         void Update()
         {
+            _uiLogWriter?.Pump();
             HandleInput();
             UpdateUI();
         }
@@ -75,16 +122,16 @@ namespace CycloneGames.GameplayAbilities.Sample
         {
             if (Input.GetKeyDown(KeyCode.F)) ToggleGASInfoDetail();
 
-            if (Input.GetKeyDown(KeyCode.Alpha1)) TryActivateAbilityByTag(Player, GameplayTagManager.RequestTag(GASSampleTags.Ability_Fireball)); // Fireball
-            if (Input.GetKeyDown(KeyCode.Alpha2)) TryActivateAbilityByTag(Player, GameplayTagManager.RequestTag(GASSampleTags.Ability_Purify)); // Purify
+            if (Input.GetKeyDown(KeyCode.Alpha1)) TryActivateAbilityByTag(Player, GameplayTagManager.Request(GASSampleTags.Ability_Fireball)); // Fireball
+            if (Input.GetKeyDown(KeyCode.Alpha2)) TryActivateAbilityByTag(Player, GameplayTagManager.Request(GASSampleTags.Ability_Purify)); // Purify
 
             //  Enemy active PoisonBlade ability
             if (Input.GetKeyDown(KeyCode.E))
             {
                 if (Enemy != null)
                 {
-                    CLogger.LogInfo("DEBUG: Forcing Enemy to cast ability.");
-                    TryActivateAbilityByTag(Enemy, GameplayTagManager.RequestTag(GASSampleTags.Ability_PoisonBlade));
+                    Log.Info("DEBUG: Forcing Enemy to cast ability.");
+                    TryActivateAbilityByTag(Enemy, GameplayTagManager.Request(GASSampleTags.Ability_PoisonBlade));
                 }
             }
 
@@ -96,7 +143,7 @@ namespace CycloneGames.GameplayAbilities.Sample
                     var ge = DebugXpEffect.GetGameplayEffect();
                     var spec = GameplayEffectSpec.Create(ge, Player.AbilitySystemComponent);
                     Player.AbilitySystemComponent.ApplyGameplayEffectSpecToSelf(spec);
-                    CLogger.LogInfo("Granted debug XP to player.");
+                    Log.Info("Granted debug XP to player.");
                 }
             }
         }
@@ -117,7 +164,10 @@ namespace CycloneGames.GameplayAbilities.Sample
                     return;
                 }
             }
-            CLogger.LogWarning($"TryActivateAbilityByTag: No ability found with tag {abilityTag.Name} on character {character.name}");
+            Log.Warning(
+                (TagName: abilityTag.Name, CharacterName: character.name),
+                static (state, sb) => sb.Append("TryActivateAbilityByTag: No ability found with tag ")
+                    .Append(state.TagName).Append(" on character ").Append(state.CharacterName));
         }
 
         void UpdateUI()
@@ -134,15 +184,56 @@ namespace CycloneGames.GameplayAbilities.Sample
 
         void UpdateLog(string message)
         {
-            ForceRefreshLog(message).Forget();
-        }
-
-        async UniTask ForceRefreshLog(string messageStr)
-        {
-            await UniTask.SwitchToMainThread();
             if (LogText != null)
             {
-                LogText.text = messageStr;
+                LogText.text = message;
+            }
+        }
+
+        private void OnDestroy()
+        {
+            if (DetailBtn != null)
+            {
+                DetailBtn.onClick.RemoveListener(ToggleGASInfoDetail);
+            }
+
+            GASDebugOverlay.RemoveTarget(playerDebugTarget);
+            GASDebugOverlay.RemoveTarget(enemyDebugTarget);
+            playerDebugTarget = null;
+            enemyDebugTarget = null;
+            if (ownsDebugOverlayLifetime && GASDebugOverlay.BoundTargetCount == 0)
+            {
+                GASDebugOverlay.Cleanup();
+            }
+            ownsDebugOverlayLifetime = false;
+
+            if (_uiLogWriter != null)
+            {
+                LogRuntime.TryReplaceWriter(_uiLogWriter, _uiLogWriter.InnerWriter);
+                _uiLogWriter.Dispose();
+            }
+
+            _uiLogWriter = null;
+
+            ShutdownCharacter(Player);
+            ShutdownCharacter(Enemy);
+            runtimeContext?.Dispose();
+            runtimeContext = null;
+        }
+
+        private void InitializeCharacter(Character character)
+        {
+            if (character != null && character.TryGetComponent(out AbilitySystemComponentHolder holder))
+            {
+                holder.Initialize(runtimeContext);
+            }
+        }
+
+        private static void ShutdownCharacter(Character character)
+        {
+            if (character != null && character.TryGetComponent(out AbilitySystemComponentHolder holder))
+            {
+                holder.Shutdown();
             }
         }
 
@@ -196,7 +287,7 @@ namespace CycloneGames.GameplayAbilities.Sample
             {
                 foreach (var activeEffect in asc.ActiveEffects)
                 {
-                    if (activeEffect.Spec.Def.GrantedTags.HasTag(GameplayTagManager.RequestTag("Debuff")))
+                    if (activeEffect.Spec.Def.GrantedTags.HasTag(GameplayTagManager.Request("Debuff")))
                     {
                         hasEffects = true;
                         // Display Effect Name, Remaining Duration, and Stack Count

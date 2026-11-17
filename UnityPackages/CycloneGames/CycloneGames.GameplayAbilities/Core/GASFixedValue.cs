@@ -18,7 +18,7 @@ namespace CycloneGames.GameplayAbilities.Core
         }
 
         public static GASFixedValue Zero => default;
-        public static GASFixedValue One => FromRaw(FPInt64.One);
+        public static GASFixedValue One => FromRaw(FPInt64.RAW_ONE);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static GASFixedValue FromRaw(long rawValue)
@@ -119,6 +119,149 @@ namespace CycloneGames.GameplayAbilities.Core
             return FromRaw((left.ToFPInt64() / right.ToFPInt64()).RawValue);
         }
 
+        /// <summary>
+        /// Resolves the effective magnitude of one Multiply/Division modifier for a stack count.
+        /// Stack count 1 returns the magnitude unchanged so single-stack behaviour stays bit-identical.
+        /// Additive and Override modifiers do not use this path.
+        /// </summary>
+        public static long ResolveStackScaledMagnitudeRaw(
+            long magnitudeRaw,
+            int stackCount,
+            GASStackMagnitudePolicy policy)
+        {
+            return ResolveStackScaledMagnitudeRaw(magnitudeRaw, stackCount, policy, out _);
+        }
+
+        /// <summary>
+        /// Resolves the effective magnitude of one Multiply/Division modifier for a stack count and
+        /// reports whether the Q32.32 range was exceeded. An out-of-range result saturates to the
+        /// representable limit in the direction of growth; <paramref name="overflowed"/> reports it.
+        /// </summary>
+        public static long ResolveStackScaledMagnitudeRaw(
+            long magnitudeRaw,
+            int stackCount,
+            GASStackMagnitudePolicy policy,
+            out bool overflowed)
+        {
+            overflowed = false;
+            if (stackCount <= 1)
+            {
+                return magnitudeRaw;
+            }
+
+            var magnitude = FPInt64.FromRaw(magnitudeRaw);
+            if (policy == GASStackMagnitudePolicy.Exponential)
+            {
+                var product = FPInt64.One;
+                for (int i = 0; i < stackCount; i++)
+                {
+                    if (!FPInt64.TryMultiply(product, magnitude, out FPInt64 next))
+                    {
+                        overflowed = true;
+                        // Sign follows the magnitude's sign and the stack parity, not the failing step.
+                        bool negativeResult = magnitude.RawValue < 0 && (stackCount & 1) != 0;
+                        return negativeResult ? FPInt64.MinValue.RawValue : FPInt64.MaxValue.RawValue;
+                    }
+
+                    product = next;
+                }
+
+                return product.RawValue;
+            }
+
+            // LinearBias: (M - 1) * stackCount + 1, so every stack contributes the same delta.
+            var delta = magnitude - FPInt64.One;
+            var stackMultiplier = FPInt64.FromInt(stackCount);
+            if (!FPInt64.TryMultiply(delta, stackMultiplier, out FPInt64 scaled))
+            {
+                overflowed = true;
+                return SaturateForSign(delta, stackMultiplier).RawValue;
+            }
+
+            if (!FPInt64.TryAdd(scaled, FPInt64.One, out FPInt64 biased))
+            {
+                overflowed = true;
+                return SaturateForSum(scaled).RawValue;
+            }
+
+            return biased.RawValue;
+        }
+
+        /// <summary>
+        /// Finds the first stack count where the running Multiply/Division multiplier stops being
+        /// positive, using the same fixed-point steps as <see cref="ResolveStackScaledMagnitudeRaw"/>.
+        /// Returns -1 when the multiplier stays positive up to <paramref name="stackLimit"/>.
+        /// </summary>
+        public static int FindFirstNonPositiveStack(
+            long magnitudeRaw,
+            int stackLimit,
+            GASStackMagnitudePolicy policy)
+        {
+            if (stackLimit < 1)
+            {
+                return -1;
+            }
+
+            var magnitude = FPInt64.FromRaw(magnitudeRaw);
+            if (policy == GASStackMagnitudePolicy.Exponential)
+            {
+                var product = FPInt64.One;
+                for (int stack = 1; stack <= stackLimit; stack++)
+                {
+                    if (!FPInt64.TryMultiply(product, magnitude, out FPInt64 next))
+                    {
+                        // Saturation moves away from zero, so the multiplier never reaches zero.
+                        return -1;
+                    }
+
+                    product = next;
+                    if (product.RawValue <= 0L)
+                    {
+                        return stack;
+                    }
+                }
+
+                return -1;
+            }
+
+            // LinearBias: recompute (M - 1) * stack + 1 per stack so truncation matches the evaluation
+            // path exactly; accumulating the delta would round differently.
+            var delta = magnitude - FPInt64.One;
+            for (int stack = 1; stack <= stackLimit; stack++)
+            {
+                if (!FPInt64.TryMultiply(delta, FPInt64.FromInt(stack), out FPInt64 scaled) ||
+                    !FPInt64.TryAdd(scaled, FPInt64.One, out FPInt64 biased))
+                {
+                    return -1;
+                }
+
+                if (biased.RawValue <= 0L)
+                {
+                    return stack;
+                }
+            }
+
+            return -1;
+        }
+
+        /// <summary>
+        /// Returns the limit a product or quotient of the two operands exceeds.
+        /// </summary>
+        internal static FPInt64 SaturateForSign(FPInt64 left, FPInt64 right)
+        {
+            bool negative = (left.RawValue ^ right.RawValue) < 0;
+            return negative ? FPInt64.MinValue : FPInt64.MaxValue;
+        }
+
+        /// <summary>
+        /// Returns the limit a sum exceeds. Addition only overflows when both operands share a sign,
+        /// so the operand's own sign is the sign of the result.
+        /// </summary>
+        internal static FPInt64 SaturateForSum(FPInt64 operand)
+        {
+            return operand.RawValue < 0 ? FPInt64.MinValue : FPInt64.MaxValue;
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool operator ==(GASFixedValue left, GASFixedValue right)
         {
@@ -153,6 +296,46 @@ namespace CycloneGames.GameplayAbilities.Core
         public static bool operator >=(GASFixedValue left, GASFixedValue right)
         {
             return left.RawValue >= right.RawValue;
+        }
+
+        /// <summary>
+        /// Returns the smaller of two deterministic values using a raw integer comparison.
+        /// Zero allocation; bit-identical across platforms and backends.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static GASFixedValue Min(GASFixedValue a, GASFixedValue b)
+        {
+            return a.RawValue <= b.RawValue ? a : b;
+        }
+
+        /// <summary>
+        /// Returns the larger of two deterministic values using a raw integer comparison.
+        /// Zero allocation; bit-identical across platforms and backends.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static GASFixedValue Max(GASFixedValue a, GASFixedValue b)
+        {
+            return a.RawValue >= b.RawValue ? a : b;
+        }
+
+        /// <summary>
+        /// Clamps a value into the inclusive range [min, max] using raw integer comparisons only.
+        /// Fully deterministic; no float is involved. If max is less than min the lower bound wins
+        /// (result == min), which avoids throwing on degenerate ranges in hot paths.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static GASFixedValue Clamp(GASFixedValue value, GASFixedValue min, GASFixedValue max)
+        {
+            long raw = value.RawValue;
+            if (raw > max.RawValue)
+            {
+                raw = max.RawValue;
+            }
+            if (raw < min.RawValue)
+            {
+                raw = min.RawValue;
+            }
+            return new GASFixedValue(raw);
         }
     }
 }

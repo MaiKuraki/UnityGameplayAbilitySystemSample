@@ -3,94 +3,206 @@ using UnityEngine;
 
 namespace CycloneGames.GameplayFramework.Runtime
 {
+    /// <summary>
+    /// A physical world representation that can be exclusively possessed by a Controller.
+    /// Pawn does not assume humanoid movement, a physics backend, or a network prediction model.
+    /// </summary>
     public class Pawn : Actor
     {
-        [SerializeField] private bool bUseControllerRotationPitch;
-        [SerializeField] private bool bUseControllerRotationYaw;
-        [SerializeField] private bool bUseControllerRotationRoll;
-        [SerializeField] private float baseEyeHeight = 0.8f;
         [SerializeField] private PawnConfig pawnConfig;
 
         private PlayerState playerState;
         private Controller controller;
-        public Controller Controller => controller;
-
         private Vector3 pendingMovementInput;
         private Vector3 lastMovementInput;
-        private bool bIsTurnedOff;
+        private bool useControllerRotationPitch;
+        private bool useControllerRotationYaw;
+        private bool useControllerRotationRoll;
+        private bool isTurnedOff;
+        private float baseEyeHeight = 0.8f;
+        private float maxLookUpAngle = 89f;
+        private float maxLookDownAngle = 89f;
+        private readonly List<MonoBehaviour> cachedComponents = new List<MonoBehaviour>(16);
 
-        private readonly List<MonoBehaviour> _cachedComponents = new List<MonoBehaviour>(16);
-
-        #region Controller Rotation Properties
-        public bool UseControllerRotationPitch { get => bUseControllerRotationPitch; set => bUseControllerRotationPitch = value; }
-        public bool UseControllerRotationYaw { get => bUseControllerRotationYaw; set => bUseControllerRotationYaw = value; }
-        public bool UseControllerRotationRoll { get => bUseControllerRotationRoll; set => bUseControllerRotationRoll = value; }
-        public float BaseEyeHeight { get => baseEyeHeight; set => baseEyeHeight = value; }
-
-        /// <summary>
-        /// Set pawn configuration from a ScriptableObject asset.
-        /// Can be called during initialization or at runtime to change Pawn settings.
-        /// </summary>
-        public virtual void SetPawnConfig(PawnConfig config)
+        public Controller Controller
         {
-            if (config != null)
+            get
             {
-                pawnConfig = config;
-                config.ApplyTo(this);
+                AssertActorOwnerThread();
+                return controller;
+            }
+        }
+        public bool UseControllerRotationPitch
+        {
+            get
+            {
+                AssertActorOwnerThread();
+                return useControllerRotationPitch;
+            }
+            set
+            {
+                AssertActorOwnerThread();
+                useControllerRotationPitch = value;
             }
         }
 
-        public PawnConfig GetPawnConfig() => pawnConfig;
-        #endregion
-
-        #region Movement Input
-        /// <summary>
-        /// Adds movement input along the given world direction, scaled by ScaleValue.
-        /// Accumulated each frame and consumed by movement component via ConsumeMovementInputVector().
-        /// </summary>
-        public virtual void AddMovementInput(Vector3 WorldDirection, float ScaleValue = 1.0f, bool bForce = false)
+        public bool UseControllerRotationYaw
         {
-            if (bIsTurnedOff && !bForce) return;
-            if (controller != null && controller.IsMoveInputIgnored() && !bForce) return;
-            pendingMovementInput += WorldDirection * ScaleValue;
+            get
+            {
+                AssertActorOwnerThread();
+                return useControllerRotationYaw;
+            }
+            set
+            {
+                AssertActorOwnerThread();
+                useControllerRotationYaw = value;
+            }
         }
 
-        public Vector3 GetPendingMovementInputVector() => pendingMovementInput;
-        public Vector3 GetLastMovementInputVector() => lastMovementInput;
+        public bool UseControllerRotationRoll
+        {
+            get
+            {
+                AssertActorOwnerThread();
+                return useControllerRotationRoll;
+            }
+            set
+            {
+                AssertActorOwnerThread();
+                useControllerRotationRoll = value;
+            }
+        }
 
-        /// <summary>
-        /// Returns and clears the pending movement input. Typically called by PawnMovementComponent each tick.
-        /// </summary>
+        public float BaseEyeHeight
+        {
+            get
+            {
+                AssertActorOwnerThread();
+                return baseEyeHeight;
+            }
+            set
+            {
+                AssertActorOwnerThread();
+                ValidateFinite(value, nameof(value));
+                baseEyeHeight = value;
+            }
+        }
+
+        public float MaxLookUpAngle
+        {
+            get
+            {
+                AssertActorOwnerThread();
+                return maxLookUpAngle;
+            }
+            set
+            {
+                AssertActorOwnerThread();
+                ValidateLookAngle(value, nameof(value));
+                maxLookUpAngle = value;
+            }
+        }
+
+        public float MaxLookDownAngle
+        {
+            get
+            {
+                AssertActorOwnerThread();
+                return maxLookDownAngle;
+            }
+            set
+            {
+                AssertActorOwnerThread();
+                ValidateLookAngle(value, nameof(value));
+                maxLookDownAngle = value;
+            }
+        }
+
+        public virtual void SetPawnConfig(PawnConfig config)
+        {
+            AssertActorOwnerThread();
+            if (config == null)
+            {
+                throw new System.ArgumentNullException(nameof(config));
+            }
+
+            config.ValidateOrThrow();
+            pawnConfig = config;
+            ApplyPawnConfig(config);
+        }
+
+        public PawnConfig GetPawnConfig()
+        {
+            AssertActorOwnerThread();
+            return pawnConfig;
+        }
+
+        #region Movement input
+        public virtual void AddMovementInput(
+            Vector3 worldDirection,
+            float scaleValue = 1f,
+            bool force = false)
+        {
+            AssertActorOwnerThread();
+            if (isTurnedOff && !force)
+            {
+                return;
+            }
+
+            if (controller != null && controller.IsMoveInputIgnored() && !force)
+            {
+                return;
+            }
+
+            if (!IsFinite(worldDirection) || float.IsNaN(scaleValue) || float.IsInfinity(scaleValue))
+            {
+                return;
+            }
+
+            pendingMovementInput = Vector3.ClampMagnitude(
+                pendingMovementInput + worldDirection * scaleValue,
+                1f);
+        }
+
+        public Vector3 GetPendingMovementInputVector()
+        {
+            AssertActorOwnerThread();
+            return pendingMovementInput;
+        }
+        public Vector3 GetLastMovementInputVector()
+        {
+            AssertActorOwnerThread();
+            return lastMovementInput;
+        }
+
         public Vector3 ConsumeMovementInputVector()
         {
+            AssertActorOwnerThread();
             lastMovementInput = pendingMovementInput;
             pendingMovementInput = Vector3.zero;
             return lastMovementInput;
         }
         #endregion
 
-        #region Initial Rotation
-        /// <summary>
-        /// Notifies IInitialRotationSettable components when a Pawn is spawned with rotation.
-        /// Uses cached component list to avoid GC allocation.
-        /// </summary>
+        #region Initialization and restart
         public void NotifyInitialRotation(Quaternion rotation)
         {
-            _cachedComponents.Clear();
-            GetComponents(_cachedComponents);
-            for (int i = 0; i < _cachedComponents.Count; i++)
+            AssertActorOwnerThread();
+            cachedComponents.Clear();
+            GetComponents(cachedComponents);
+            for (int i = 0; i < cachedComponents.Count; i++)
             {
-                if (_cachedComponents[i] is IInitialRotationSettable settable)
+                if (cachedComponents[i] is IInitialRotationSettable settable)
                 {
                     settable.SetInitialRotation(rotation, immediate: true);
                 }
             }
         }
-        #endregion
 
-        #region Restart
         public void DispatchRestart()
         {
+            AssertActorOwnerThread();
             Restart();
         }
 
@@ -101,174 +213,246 @@ namespace CycloneGames.GameplayFramework.Runtime
         #endregion
 
         #region Possession
-        public virtual void PossessedBy(Controller NewController)
+        internal void SetPossessionState(Controller newController, PlayerState newPlayerState)
         {
-            Controller oldController = controller;
-            SetOwner(NewController);
-            controller = NewController;
-
-            if (controller?.GetPlayerState() != null)
-            {
-                SetPlayerState(controller.GetPlayerState());
-            }
-
-            NotifyControllerChanged(oldController, NewController);
+            controller = newController;
+            playerState = newPlayerState;
         }
 
-        public virtual void UnPossessed()
+        internal void PublishControllerChanged(Controller oldController, Controller newController)
         {
-            Controller oldController = controller;
-            SetPlayerState(null);
-            SetOwner(null);
-            controller = null;
-            NotifyControllerChanged(oldController, null);
+            NotifyControllerChanged(oldController, newController);
         }
 
-        protected virtual void NotifyControllerChanged(Controller OldController, Controller NewController) { }
+        protected virtual void NotifyControllerChanged(Controller oldController, Controller newController) { }
+
+        public PlayerState GetPlayerState()
+        {
+            AssertActorOwnerThread();
+            return playerState;
+        }
+
+        public T GetPlayerState<T>() where T : PlayerState
+        {
+            AssertActorOwnerThread();
+            return playerState as T;
+        }
         #endregion
 
-        #region PlayerState
-        private void SetPlayerState(PlayerState NewPlayerState)
-        {
-            if (playerState != null && ReferenceEquals(playerState.GetPawn(), this))
-            {
-                playerState.SetPawnPrivate(null);
-            }
-            playerState = NewPlayerState;
-            if (playerState != null)
-            {
-                playerState.SetPawnPrivate(this);
-            }
-        }
-
-        public PlayerState GetPlayerState() => playerState;
-        public T GetPlayerState<T>() where T : PlayerState => playerState as T;
-        #endregion
-
-        #region Control Rotation
+        #region Control and view
         public Quaternion GetControlRotation()
         {
+            AssertActorOwnerThread();
             return controller != null ? controller.ControlRotation() : Quaternion.identity;
         }
-        #endregion
 
-        #region View
         public virtual Quaternion GetViewRotation()
         {
+            AssertActorOwnerThread();
             return controller != null ? controller.ControlRotation() : GetActorRotation();
         }
 
         public virtual Quaternion GetBaseAimRotation()
         {
+            AssertActorOwnerThread();
             return GetViewRotation();
         }
 
         public virtual Vector3 GetPawnViewLocation()
         {
+            AssertActorOwnerThread();
             return GetActorLocation() + Vector3.up * baseEyeHeight;
         }
 
         public override void GetActorEyesViewPoint(out Vector3 outLocation, out Quaternion outRotation)
         {
+            AssertActorOwnerThread();
             outLocation = GetPawnViewLocation();
             outRotation = GetViewRotation();
         }
-        #endregion
 
-        #region FaceRotation
         /// <summary>
-        /// Updates Pawn rotation to match the controller's ControlRotation,
-        /// respecting bUseControllerRotation* flags. Called automatically each Update.
+        /// Applies the configured controller-rotation axes. Movement or character adapters call
+        /// this from their own tick; base Pawn does not add an empty per-object Update callback.
         /// </summary>
-        public virtual void FaceRotation(Quaternion NewControlRotation, float DeltaTime = 0f)
+        public virtual void ApplyControllerRotation(float deltaTime)
         {
-            Vector3 euler = NewControlRotation.eulerAngles;
+            AssertActorOwnerThread();
+            if (isTurnedOff || controller == null)
+            {
+                return;
+            }
+
+            FaceRotation(controller.ControlRotation(), deltaTime);
+        }
+
+        public virtual void FaceRotation(Quaternion newControlRotation, float deltaTime = 0f)
+        {
+            AssertActorOwnerThread();
+            Vector3 euler = newControlRotation.eulerAngles;
             Vector3 current = transform.eulerAngles;
 
-            if (bUseControllerRotationPitch) current.x = euler.x;
-            if (bUseControllerRotationYaw) current.y = euler.y;
-            if (bUseControllerRotationRoll) current.z = euler.z;
+            if (useControllerRotationPitch) current.x = euler.x;
+            if (useControllerRotationYaw) current.y = euler.y;
+            if (useControllerRotationRoll) current.z = euler.z;
 
-            if (bUseControllerRotationPitch || bUseControllerRotationYaw || bUseControllerRotationRoll)
+            if (useControllerRotationPitch || useControllerRotationYaw || useControllerRotationRoll)
             {
                 SetActorRotation(Quaternion.Euler(current));
             }
         }
         #endregion
 
-        #region State Queries
-        public bool IsPawnControlled() => controller != null;
+        #region State
+        public bool IsPawnControlled()
+        {
+            AssertActorOwnerThread();
+            return controller != null;
+        }
 
         public bool IsPlayerControlled()
         {
+            AssertActorOwnerThread();
             return controller is PlayerController;
         }
 
         public bool IsBotControlled()
         {
+            AssertActorOwnerThread();
             return controller is AIController;
         }
 
         public virtual bool IsLocallyControlled()
         {
-            return controller != null;
+            AssertActorOwnerThread();
+            return controller != null && controller.IsLocalController;
         }
-        #endregion
 
-        #region Turn Off/On
-        public bool IsTurnedOff() => bIsTurnedOff;
+        public bool IsTurnedOff()
+        {
+            AssertActorOwnerThread();
+            return isTurnedOff;
+        }
 
         public virtual void TurnOff()
         {
-            bIsTurnedOff = true;
+            AssertActorOwnerThread();
+            isTurnedOff = true;
         }
 
         public virtual void TurnOn()
         {
-            bIsTurnedOff = false;
+            AssertActorOwnerThread();
+            isTurnedOff = false;
         }
-        #endregion
 
-        #region Detach
         public virtual void DetachFromControllerPendingDestroy()
         {
-            if (controller != null)
-            {
-                controller.UnPossess();
-            }
+            AssertActorOwnerThread();
+            controller?.UnPossess();
         }
         #endregion
 
-        #region Migration
-        public override ActorMigrationState CaptureMigrationState(int ownerConnectionId, int instigatorActorId)
+        protected override void OnDestroy()
         {
-            return base.CaptureMigrationState(ownerConnectionId, instigatorActorId);
-        }
-
-        public override void RestoreMigrationState(in ActorMigrationState state)
-        {
-            base.RestoreMigrationState(state);
-            pendingMovementInput = Vector3.zero;
-            lastMovementInput = Vector3.zero;
-        }
-
-        public override void PostMigration()
-        {
-            base.PostMigration();
-            ConsumeMovementInputVector();
-        }
-        #endregion
-
-        protected override void Update()
-        {
-            base.Update();
-            if (!bIsTurnedOff && controller != null)
+            var terminalExceptions = new TerminalExceptionAccumulator();
+            Controller previousController = controller;
+            if (!ReferenceEquals(previousController, null))
             {
-                if (bUseControllerRotationPitch || bUseControllerRotationYaw || bUseControllerRotationRoll)
+                try
                 {
-                    FaceRotation(controller.ControlRotation(), Time.deltaTime);
+                    if (previousController != null && !previousController.IsChangingPossession)
+                    {
+                        previousController.UnPossess();
+                    }
+                    else
+                    {
+                        previousController.DetachDestroyedPawn(this);
+                    }
+                }
+                catch (System.Exception exception)
+                {
+                    terminalExceptions.HandleAndLog(
+                        exception,
+                        "Pawn failed to release its Controller during destruction; fallback detachment will run.");
+                    try
+                    {
+                        previousController.DetachDestroyedPawn(this);
+                    }
+                    catch (System.Exception fallbackException)
+                    {
+                        terminalExceptions.HandleAndLog(
+                            fallbackException,
+                            "Pawn fallback Controller detachment failed during destruction.");
+                    }
                 }
             }
+
+            cachedComponents.Clear();
+            controller = null;
+            playerState = null;
+            try
+            {
+                base.OnDestroy();
+            }
+            catch (System.Exception exception)
+            {
+                terminalExceptions.HandleAndLog(
+                    exception,
+                    "Pawn base Actor cleanup failed during destruction.");
+            }
+
+            terminalExceptions.ThrowIfCaptured();
+        }
+
+        protected override void Awake()
+        {
+            base.Awake();
+            if (pawnConfig != null)
+            {
+                pawnConfig.ValidateOrThrow();
+                ApplyPawnConfig(pawnConfig);
+            }
+        }
+
+        private void ApplyPawnConfig(PawnConfig config)
+        {
+            useControllerRotationPitch = config.UseControllerRotationPitch;
+            useControllerRotationYaw = config.UseControllerRotationYaw;
+            useControllerRotationRoll = config.UseControllerRotationRoll;
+            baseEyeHeight = config.BaseEyeHeight;
+            maxLookUpAngle = config.MaxLookUpAngle;
+            maxLookDownAngle = config.MaxLookDownAngle;
+        }
+
+        private static void ValidateFinite(float value, string parameterName)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value))
+            {
+                throw new System.ArgumentOutOfRangeException(
+                    parameterName,
+                    value,
+                    "Pawn configuration values must be finite.");
+            }
+        }
+
+        private static void ValidateLookAngle(float value, string parameterName)
+        {
+            ValidateFinite(value, parameterName);
+            if (value < 0f || value > 180f)
+            {
+                throw new System.ArgumentOutOfRangeException(
+                    parameterName,
+                    value,
+                    "Pawn look angles must be between 0 and 180 degrees.");
+            }
+        }
+
+        private static bool IsFinite(Vector3 value)
+        {
+            return !float.IsNaN(value.x) && !float.IsInfinity(value.x) &&
+                   !float.IsNaN(value.y) && !float.IsInfinity(value.y) &&
+                   !float.IsNaN(value.z) && !float.IsInfinity(value.z);
         }
     }
 }

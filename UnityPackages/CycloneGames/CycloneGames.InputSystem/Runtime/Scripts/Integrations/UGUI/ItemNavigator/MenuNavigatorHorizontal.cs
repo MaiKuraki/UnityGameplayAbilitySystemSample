@@ -2,7 +2,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using System;
 using System.Collections.Generic;
-using CycloneGames.Logger;
+using CycloneGames.Logging;
 using R3;
 
 namespace CycloneGames.InputSystem.Runtime
@@ -26,6 +26,8 @@ namespace CycloneGames.InputSystem.Runtime
 
     public class MenuNavigatorHorizontal : MonoBehaviour
     {
+        private static readonly LogChannel Log = InputSystemUguiLog.Channel;
+
         private class InternalNavItem
         {
             public Button Button;
@@ -110,46 +112,21 @@ namespace CycloneGames.InputSystem.Runtime
         private System.IDisposable _deviceKindSubscription;
 
         /// <summary>
-        /// Initializes the horizontal menu navigator with the provided setup data.
+        /// Initializes the navigator with the supplied items and callbacks.
         /// </summary>
-        /// <param name="setupData">List of navigable items (buttons) with their associated callbacks</param>
-        /// <param name="focusIndicator">Optional transform to use as a visual focus indicator</param>
-        /// <param name="allowLooping">Whether navigation should loop from first to last item and vice versa</param>
-        /// <param name="defaultFocusIndex">Index of the item to focus on initialization (default: 0)</param>
+        /// <param name="setupData">Navigable items paired with their callbacks.</param>
+        /// <param name="focusIndicator">Optional transform used as the visual focus indicator.</param>
+        /// <param name="allowLooping">Whether navigation wraps from the last item to the first and back.</param>
+        /// <param name="defaultFocusIndex">Item focused on initialization.</param>
         /// <param name="autoSubscribeButtonClick">
-        /// Controls whether MenuNavigatorHorizontal automatically subscribes to button click events.
-        /// Default: false
-        /// 
-        /// When true:
-        /// - MenuNavigatorHorizontal automatically subscribes to Button.OnClickAsObservable() for all buttons
-        /// - Button clicks (mouse, keyboard, gamepad) are handled automatically via OnConfirm callback
-        /// - Do NOT manually subscribe to Button.OnClickAsObservable() in your UI code when this is true
-        /// - Do NOT use Unity's Button.onClick.AddListener() or Inspector-assigned onClick events when this is true
-        /// - Doing so will cause duplicate event handling, duplicate callback invocations, and potential logic errors
-        /// - Recommended for simple menus where you want automatic click handling
-        /// 
-        /// When false (default):
-        /// - MenuNavigatorHorizontal still subscribes to Button.OnClickAsObservable() but only handles keyboard/gamepad confirm
-        /// - When a button is currently focused and keyboard/gamepad submit is pressed, OnConfirm callback is invoked
-        /// - Mouse clicks on buttons should be handled manually via your own subscription
-        /// - Mouse clicks on focused buttons will trigger both OnConfirm (via MenuNavigatorHorizontal) and your manual subscription
-        ///   - You should guard against duplicate handling in your manual subscription (e.g., use a flag)
-        /// - Use this option when you need custom mouse click handling but still want keyboard/gamepad to work via OnConfirm
-        /// 
-        /// Note: Mouse hover focus is always handled automatically via MenuNavigatorPointerHandler component regardless of this setting
-        /// <param name="focusIndicatorOnTop">
-        /// Controls whether the focus indicator is placed on top (last sibling) or bottom (first sibling) of the focused item's children.
-        /// Default: true (on top, rendered in front)
+        /// True makes the navigator own every button click, so the caller must not also subscribe to
+        /// <c>Button.onClick</c>. False routes only keyboard and gamepad submit and leaves pointer clicks to the
+        /// caller. Mouse hover focus is handled by <see cref="MenuNavigatorPointerHandler"/> either way.
         /// </param>
-        /// <param name="inputPlayer">
-        /// Optional IInputPlayer for touch confirmation gate support.
-        /// When provided, first touch after switching from gamepad only focuses, second touch confirms.
-        /// </param>
+        /// <param name="focusIndicatorOnTop">Whether the indicator is parented last (in front) or first (behind).</param>
+        /// <param name="inputPlayer">Optional player used by the touch confirmation gate.</param>
         public void Initialize(List<HorizontalNavItemSetup> setupData, Transform focusIndicator, bool allowLooping, int defaultFocusIndex = 0, bool autoSubscribeButtonClick = false, bool focusIndicatorOnTop = true, IInputPlayer inputPlayer = null)
         {
-            // Removed early return to ensure cache (active status) is refreshed even if previously initialized
-            // if (_isInitialized) return;
-
             _focusIndicator = focusIndicator;
             _allowLooping = allowLooping;
             _focusIndicatorOnTop = focusIndicatorOnTop;
@@ -223,8 +200,8 @@ namespace CycloneGames.InputSystem.Runtime
                         }
                         buttonPointerHandler.Initialize(this, index, true, _inputPlayer);
                     }
-                    
-                    // Toggle pointer handler (no onValueChanged subscription needed - 
+
+                    // Toggle pointer handler (no onValueChanged subscription needed -
                     // PointerHandler intercepts clicks and prevents automatic isOn changes)
                     if (itemSetup.Toggle != null && itemSetup.Toggle.gameObject != null)
                     {
@@ -242,18 +219,17 @@ namespace CycloneGames.InputSystem.Runtime
 
             try
             {
-                // Initialize focus state: ensure all items are unfocused first (except the one we're about to focus)
-                // This ensures correct initial visual state when UI elements default to focused appearance
+                // UI elements can ship with a focused appearance, so every other item is explicitly
+                // unfocused before the target receives focus.
                 int targetFocusIndex = -1;
                 int itemCount = _navigableItems.Count;
-                
+
                 if (IsItemSelectable(defaultFocusIndex))
                 {
                     targetFocusIndex = defaultFocusIndex;
                 }
                 else
                 {
-                    // Find first available item
                     for (int i = 0; i < itemCount; i++)
                     {
                         if (IsItemSelectable(i))
@@ -264,7 +240,6 @@ namespace CycloneGames.InputSystem.Runtime
                     }
                 }
 
-                // Set all items to unfocused state first (only if they have OnUnfocused callback)
                 if (targetFocusIndex >= 0)
                 {
                     for (int i = 0; i < itemCount; i++)
@@ -287,7 +262,6 @@ namespace CycloneGames.InputSystem.Runtime
                     }
                 }
 
-                // Now set focus on the target item
                 if (targetFocusIndex >= 0)
                 {
                     SetFocusWithoutUnfocus(targetFocusIndex);
@@ -307,9 +281,8 @@ namespace CycloneGames.InputSystem.Runtime
                 _isInitialized = false;
                 UpdateFocusIndicator();
             }
-            
-            // Setup device kind subscription for touch confirmation gate
-            // Must be called after Cleanup() and after _isInitialized is set
+
+            // Requires Cleanup() to have run and _isInitialized to be set.
             SetupDeviceKindSubscription();
         }
 
@@ -446,7 +419,7 @@ namespace CycloneGames.InputSystem.Runtime
                 ResetTouchConfirmationGate();
                 return;
             }
-                
+
             SetFocus(index);
             ConfirmSelection();
         }
@@ -462,13 +435,13 @@ namespace CycloneGames.InputSystem.Runtime
             _touchConfirmationRequired = false;
 
             _previousDeviceKind = _inputPlayer.ActiveDeviceKind.CurrentValue;
-            
+
             // If starting in Gamepad mode, first pointer click should be blocked
             if (_previousDeviceKind == InputDeviceKind.Gamepad)
             {
                 _touchConfirmationRequired = true;
             }
-            
+
             _deviceKindSubscription = _inputPlayer.ActiveDeviceKind.Subscribe(OnDeviceKindChanged);
         }
 
@@ -484,7 +457,7 @@ namespace CycloneGames.InputSystem.Runtime
             {
                 _touchConfirmationRequired = false;
             }
-            
+
             _previousDeviceKind = newKind;
         }
 
@@ -492,7 +465,7 @@ namespace CycloneGames.InputSystem.Runtime
         {
             if (_inputPlayer == null) return false;
             if (!_touchConfirmationRequired) return false;
-            
+
             // Block if gate is set and current input is a pointer device (mouse or touch)
             var currentKind = _inputPlayer.ActiveDeviceKind.CurrentValue;
             return currentKind == InputDeviceKind.Touchscreen || currentKind == InputDeviceKind.KeyboardMouse;
@@ -702,7 +675,9 @@ namespace CycloneGames.InputSystem.Runtime
 
         private static void LogException(Exception exception)
         {
-            CLogger.LogError($"[MenuNavigatorHorizontal] Callback failed: {exception.Message}");
+            Log.Error(
+                exception,
+                "[MenuNavigatorHorizontal] Callback failed.");
         }
 
 

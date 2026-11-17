@@ -1,287 +1,479 @@
 # CycloneGames.Cheat
 
-<div align="left"><a href="./README.md">English</a> | 简体中文</div>
+[English | 简体中文](README.md)
 
-一个基于 VitalRouter 的轻量级、类型安全的运行时 Cheat 系统。针对 GC、跨平台和性能进行了优化。用于在 Unity 中进行调试、GM 指令或开发期便捷控制，支持结构体/类参数与异步执行，并内置同一命令的并发去重与取消能力。
+CycloneGames.Cheat 是面向内部调试、QA、GM、自动化和 live-ops 工具的命令层。模块通过 VitalRouter 路由强类型命令，把包级中性契约放在 `Core` assembly、Unity-facing runtime 服务放在 `Runtime` assembly，并用 `ENABLE_CHEAT` 构建符号把关，让发布版本以 no-op runtime 运行。
 
-## 特性
+## 目录
 
-- **类型安全的指令载体**：提供 `CheatCommand` 系列类型（无参、结构体泛型、类泛型以及多参数结构体泛型）。
-- **解耦的消息路由**：借助 VitalRouter 的 `[Route]` 特性进行分发，无需显式耦合发布方与订阅方。
-- **异步执行**：基于 Cysharp UniTask，避免阻塞主线程。
-- **编译级剥离**：整个实现由 `ENABLE_CHEAT` 宏门控。发布版不定义该宏时，所有调用编译为零成本空壳 — 调用侧无需 `#if` 包裹。
-- **多路由隔离**：可通过领域专用路由（UI、Gameplay 等）实现命令的分域处理。
-- **灵活集成**：可选的日志接口，支持自定义日志集成。
+- [概述](#概述)
+- [架构](#架构)
+- [快速上手](#快速上手)
+- [核心概念](#核心概念)
+- [使用指南](#使用指南)
+- [进阶主题](#进阶主题)
+- [常见场景](#常见场景)
+- [性能与内存](#性能与内存)
+- [故障排查](#故障排查)
 
-## 安装与依赖
+## 概述
 
-- Unity：`2022.3`+
-- 依赖包：
-  - `com.cysharp.unitask` ≥ `2.0.0`
-  - `jp.hadashikick.vitalrouter` ≥ `2.0.0`
+Cheat 命令回答一个问题：哪个内部操作应该在哪个 router 上、用哪个 payload 运行？CycloneGames.Cheat 用小型 `ICheatCommand` struct 通过 `CheatCommandRuntime` 派发回答它。Runtime 按 `Router` 跟踪在飞命令，应用重复策略，支持取消，并暴露计数器供 QA 面板和 live-ops dashboard 读取。
 
-可通过 UPM 或将本包放入 `Packages`/`Assets` 进行引用。包信息参考本目录下 `package.json`。
+模块分为两个 runtime assembly 加可选的 VContainer integration。`Core` 携带命令 payload、重复策略与 metrics。`Runtime` 添加 `CheatCommandRuntime`、`CheatCommandExecutionOptions` 与引擎无关的 `CycloneGames.Logging` 集成。当 `ENABLE_CHEAT` 未定义时，runtime 编译为 no-op，所有 publish 立即完成，不派发、不累加 metrics、不写日志。
 
-### 启用系统
+适用场景：为调试控制台、测试运行器、GM 工具和自动化提供一个统一的强类型入口。商业多人项目仍必须在服务端验证权威操作，通过环境和身份限制高权限命令，审计使用记录，并不把客户端调试命令当作玩法事实来源。
 
-在 **Player Settings → Scripting Define Symbols** 中添加 `ENABLE_CHEAT`（通常仅在 Debug / Development 配置下添加）。未定义时，`CheatCommandUtility` 编译为空壳 — IL2CPP 会将其内联为零开销。
+### 主要特性
+
+- **`ICheatCommand` payload**：`CheatCommand`、`CheatCommand<T>`、`CheatCommand<T1,T2>`、`CheatCommand<T1,T2,T3>`，以及 class 变体 `CheatCommandClass<T>`（引用类型 payload）和 `CheatCommandIdClass`（只有 ID），供必须按引用持有命令实例的调用方使用。
+- **`CheatCommandRuntime`**：显式 owner 的 runtime，含按 router 跟踪、重复策略、取消和 metrics。
+- **`ICheatCommandAdmissionPublisher`**：可选 capability，供必须区分成功派发与重复、容量、校验或构建开关拒绝的调用方使用。
+- **`CheatCommandExecutionOptions`**：值类型选项，在调用处指定 `Router`、`DuplicatePolicy` 和 `Source`。
+- **`ENABLE_CHEAT` 构建开关**：未定义时 runtime 成为 no-op，派发零开销。
+- **统一日志**：默认使用进程 `ILogWriter`，支持显式 writer 注入，并可通过 `ICheatLogWriterConfigurable` 在线替换。
+- **可选 VContainer installer**：把 `ICheatCommandRuntime`、`ICheatCommandPublisher` 与 `ICheatCommandControl` 注册为单例。
+
+## 架构
+
+| 程序集 | 路径 | 用途 |
+| --- | --- | --- |
+| `CycloneGames.Cheat.Core` | `Core/` | 命令 payload、`CheatDuplicatePolicy` 与 `CheatRuntimeMetrics`。`noEngineReferences: true`；仅引用 `VitalRouter.dll`。 |
+| `CycloneGames.Cheat.Runtime` | `Runtime/` | `CheatCommandRuntime`、稳定的 publisher/control/runtime 契约、可选 admission/logging capability 与 `CheatCommandExecutionOptions`。引用 `UniTask`、`VitalRouter.Unity`、Core 和 Logging。 |
+| `CycloneGames.Cheat.Runtime.Integrations.VContainer` | `Runtime/Integrations/DI/VContainer/` | `CheatVContainerInstaller`。仅当 `VCONTAINER_PRESENT` 定义时编译。 |
+| `CycloneGames.Cheat.Tests.Editor` | `Tests/Editor/` | Core 与 Runtime 契约测试。 |
+| `CycloneGames.Cheat.Sample` | `Samples/` | 可选示例与基准。 |
+
+```mermaid
+flowchart LR
+    Caller["Caller\nGM console, test runner, automation"] --> Publisher["ICheatCommandPublisher"]
+    Publisher --> Runtime["CheatCommandRuntime"]
+    Runtime --> Policy{"DuplicatePolicy"}
+    Policy -->|Drop| Register["Register state\nkeyed by CommandId+Router+Type"]
+    Policy -->|AllowParallel| Sequence["Allocate per-call sequence"]
+    Sequence --> Register
+    Register --> Router["VitalRouter Router\n(default or scoped)"]
+    Router --> Handler["Handler\n[Routes] + [Route]"]
+    Handler --> Metrics["CheatRuntimeMetrics"]
+    Register --> Metrics
+
+    classDef core fill:#dbeafe,stroke:#1d4ed8,color:#111827;
+    classDef adapter fill:#fef3c7,stroke:#b45309,color:#111827;
+    classDef external fill:#dcfce7,stroke:#15803d,color:#111827;
+    class Runtime,Register,Metrics core;
+    class Publisher,Handler adapter;
+    class Router external;
+```
+
+调用方决定哪个 `Router` 接收命令，runtime 用 `(CommandId, Router, CommandTypeHandle, Sequence)` 作为 key 跟踪状态，VitalRouter 派发到 source-generated handler，runtime 记录 metrics 并在 handler 退出时释放状态。
 
 ## 快速上手
 
-一个最简的端到端示例 — 发布命令并处理它。
-
-### 第 1 步：定义处理器
+在你的 asmdef 中引用 `CycloneGames.Cheat.Runtime`，然后导入命名空间：
 
 ```csharp
+using CycloneGames.Cheat.Core;
 using CycloneGames.Cheat.Runtime;
+using CycloneGames.Logging;
+using Cysharp.Threading.Tasks;
+```
+
+### 创建 runtime 并 publish 命令
+
+```csharp
+// 应用 composition root 安装一次 ILogWriter。
+LogRuntime.TryInstallWriter(applicationLogWriter);
+var runtime = new CheatCommandRuntime();
+await runtime.PublishAsync("World_ReloadConfig");
+runtime.Dispose();
+```
+
+### 用 VitalRouter source generation 定义 handler
+
+```csharp
+using System.Threading;
+using Cysharp.Threading.Tasks;
 using UnityEngine;
 using VitalRouter;
 
 [Routes]
-public partial class MyCheatHandler : MonoBehaviour
+public partial class DebugWorldCheatHandler : MonoBehaviour
 {
-    void Awake() => MapTo(Router.Default);
-    void OnDestroy() => UnmapRoutes();
+    private void Awake() => MapTo(Router.Default);
+    private void OnDestroy() => UnmapRoutes();
 
     [Route]
-    void OnCheat(CheatCommand cmd)
+    private async UniTask OnReload(CheatCommand command, CancellationToken cancellationToken)
     {
-        Debug.Log($"Received: {cmd.CommandID}");
+        if (command.CommandId != "World_ReloadConfig")
+        {
+            return;
+        }
+
+        await UniTask.Yield(cancellationToken);
     }
 }
 ```
 
-### 第 2 步：发布命令
+`ENABLE_CHEAT` 定义时，runtime 通过 `Router.Default` 派发命令，handler 接收并执行，metrics 反映派发。未定义时，同一调用返回 `UniTask.CompletedTask`，不发生派发。
 
-```csharp
-using CycloneGames.Cheat.Runtime;
-using Cysharp.Threading.Tasks;
+## 核心概念
 
-// 在代码任意位置：
-CheatCommandUtility.PublishCheatCommand("Hello_Cheat").Forget();
-```
+### 命令
 
-将 `MyCheatHandler` 挂载到任意 GameObject，进入 Play 模式 — 执行发布代码后控制台输出 `Received: Hello_Cheat`。
+每个 payload 实现 `ICheatCommand`，后者又实现 `VitalRouter.ICommand`：
+
+| 类型 | 用途 |
+| --- | --- |
+| `CheatCommand` | 只有 command ID。 |
+| `CheatCommand<T>` | 一个 struct payload。 |
+| `CheatCommand<T1, T2>` | 两个 struct payload。 |
+| `CheatCommand<T1, T2, T3>` | 三个 struct payload。 |
+| `CheatCommandClass<T>` | 一个引用类型 payload。热路径优先使用 struct payload。 |
+| `CheatCommandIdClass` | `CheatCommand` 的 class 变体。热路径优先使用 `CheatCommand`。 |
+
+稳定生产工作流建议定义实现 `ICheatCommand` 的专用 command struct，而不是用字符串分支处理所有操作。专用类型让 VitalRouter 提供更强的路由，并减少 handler 内部分支。
+
+struct 与 class 变体是不同的 VitalRouter command 类型。订阅方映射到某个变体后只会收到该确切类型；并且由于 command 类型参与重复判定，`CheatCommand("X")` 与 `CheatCommandIdClass("X")` 会被视为不同命令。同一 command ID 应选定一种变体，并在 publisher 与 subscriber 两侧保持一致。
+
+### Runtime 所有权
+
+`CheatCommandRuntime` 由调用方显式持有。非 DI 项目可以直接创建；DI 项目可以注册 `ICheatCommandRuntime`、`ICheatCommandPublisher` 和 `ICheatCommandControl`。释放 runtime 会停止新的 publish 请求，原子摘除在飞 registry，再请求取消，并由对应 publish 操作在 handler 退出时释放命令状态。取消 callback 与 token source 的释放永远不会在持有 admission lock 时执行。
+
+模块不提供全局 static facade。长期项目应在 scene root、工具 owner、service composition root 或 DI lifetime scope 中显式表达所有权。
+
+### 重复策略
+
+`CheatDuplicatePolicy` 控制同一命令标识在同一 `Router` 上、前一命令仍在运行时第二次 publish 的处理方式。命令标识由 command ID、目标 `Router`、具体的 `ICheatCommand` 类型以及 `AllowParallel` 发布的 sequence number 共同组成：
+
+| 策略 | 行为 |
+| --- | --- |
+| `Drop`（默认） | 第二次 publish 被丢弃并计入 `DroppedDuplicateCount`。 |
+| `AllowParallel` | 第二次 publish 获得新 sequence number，与第一次并行运行。 |
+
+`Drop` 适合 "reload config" 或 "reset inventory" 这类有状态操作。`AllowParallel` 适合 "spawn enemy at point" 这类无状态触发，多次执行相互独立。
+
+每个 runtime 还强制执行构造期指定的 concurrent-command 上限，默认值为 `256`，支持的绝对最大值为 `4096`。一个很窄的 admission 临界区先判定 duplicate，再检查 capacity，最后把 state 注册与 running counter 提交作为同一操作。duplicate 因此不会占用最后一个 slot，也不会退化为 capacity rejection；并发 publisher 同样无法越过配置上限。因容量被拒绝的 publish 会递增 `CapacityRejectedCommandCount`，且不会进入 VitalRouter。handler 派发、异步等待、取消 callback、writer callback 与 token source 释放始终在 admission 临界区之外执行。
+
+历史 `PublishAsync` 契约继续保留；重复或容量 admission 拒绝命令时，它不返回结果并正常完成，也不会为每次 admission 拒绝写日志。必须做确定性产品决策的调用方应请求可选 `ICheatCommandAdmissionPublisher` capability，并检查其 `CheatCommandPublishResult`。容量诊断没有加入 `ICheatCommandRuntime` 或 `ICheatCommandControl`，因此外部已有的这些接口实现仍保持源码兼容。
+
+### 构建开关
+
+`ENABLE_CHEAT` 控制 `CheatCommandRuntime` 是否可用：
+
+| 状态 | 行为 |
+| --- | --- |
+| 已定义 | Publish 通过 VitalRouter 派发，metrics 累加，runtime 记录错误与异常。 |
+| 未定义 | Publish 立即返回 `UniTask.CompletedTask`，metrics 保持为零，不派发，不写日志。 |
+
+Disabled 路径保持相同的 public API 和 assembly 引用，调用方不需要 `#if` 守卫。Sample 和工具 UI 如果需要解释 disabled runtime，应在自身启动诊断中提示。
 
 ## 使用指南
 
-### 无参命令
-
-最简形式 — 仅命令 ID，零分配：
+### 带参数 publish
 
 ```csharp
-CheatCommandUtility.PublishCheatCommand("Protocol_ReloadConfig").Forget();
+await runtime.PublishAsync("Player_SetHealth", 50);
+await runtime.PublishAsync("Player_SetPosition", 12.5f, 7.0f);
+await runtime.PublishAsync("Inventory_AddItem", itemId: 42, count: 1, rarity: 3);
 ```
 
-### 结构体参数命令
+每个重载把参数包装到对应的 `CheatCommand<T>`、`CheatCommand<T1, T2>` 或 `CheatCommand<T1, T2, T3>` struct。
 
-传递值类型数据，零分配：
+### 引用类型 payload
 
 ```csharp
-public struct SpawnData
+public sealed class InventoryBatch
 {
-    public Vector3 Position;
-    public int Count;
+    public int[] ItemIds;
 }
 
-var data = new SpawnData { Position = Vector3.zero, Count = 5 };
-CheatCommandUtility.PublishCheatCommand("Enemy_Spawn", data).Forget();
+await runtime.PublishClassAsync("Inventory_AddBatch", new InventoryBatch { ItemIds = new[] { 1, 2, 3 } });
 ```
 
-处理侧：
+`PublishClassAsync` 拒绝 null 参数并在派发前记录错误。
+
+### 自定义 command struct
 
 ```csharp
-[Route]
-void OnSpawn(CheatCommand<SpawnData> cmd)
+public readonly struct ReloadConfigCommand : ICheatCommand
 {
-    Debug.Log($"Spawn {cmd.Arg.Count} enemies at {cmd.Arg.Position}");
+    public string CommandId => "World_ReloadConfig";
+    public readonly string Profile;
+    public ReloadConfigCommand(string profile) => Profile = profile;
 }
+
+await runtime.PublishAsync(new ReloadConfigCommand(profile: "Live"));
 ```
 
-### 多参数结构体命令
+自定义命令与内置变体经过同样的路由、重复与取消管线，VitalRouter 可以派发到专用 handler 方法。
 
-最多可传递 3 个结构体参数，仍然零分配：
+### 观察 admission 结果
 
-```csharp
-CheatCommandUtility.PublishCheatCommand("Set_Transform", position, rotation).Forget();
-
-// 处理器
-[Route]
-void OnSetTransform(CheatCommand<Vector3, Quaternion> cmd)
-{
-    transform.SetPositionAndRotation(cmd.Arg1, cmd.Arg2);
-}
-```
-
-### 引用类型参数命令
-
-用于引用类型（字符串、复杂对象）。会产生堆分配 — 当结构体不可行时使用：
+控制台、自动化运行器或 GM 工作流必须区分派发与拒绝时，使用可选 admission capability：
 
 ```csharp
-CheatCommandUtility.PublishCheatCommandWithClass("Log_Message", "Hello from cheat!").Forget();
+ICheatCommandAdmissionPublisher admission = runtime;
+CheatCommandPublishResult result = await admission.TryPublishAsync(
+    new CheatCommand("World_ReloadConfig"));
 
-// 处理器
-[Route]
-void OnLogMessage(CheatCommandClass<string> cmd)
+if (result == CheatCommandPublishResult.CapacityRejected)
 {
-    Debug.Log(cmd.Arg);
+    ShowCapacityWarning(admission.MaximumConcurrentCommandCount);
 }
 ```
 
-### 取消机制
+`Published` 表示命令通过 admission 并到达 VitalRouter；handler 完成、取消与故障仍通过 `CheatRuntimeMetrics` 观察。`DuplicateRejected`、`CapacityRejected`、`InvalidCommand` 与 `Disabled` 明确说明未派发原因，无需解析日志或比较调用前后的计数器。
 
-长时间运行的命令支持协作式取消：
+### 使用 execution options
 
 ```csharp
-// 启动长任务
-CheatCommandUtility.PublishCheatCommand("Protocol_LongTask").Forget();
+var options = new CheatCommandExecutionOptions(
+    router: myRouter,
+    duplicatePolicy: CheatDuplicatePolicy.AllowParallel,
+    source: "AutomationSuite");
 
-// 稍后取消
-CheatCommandUtility.CancelCheatCommand("Protocol_LongTask");
+await runtime.PublishAsync(new ReloadConfigCommand("Live"), options);
+
+// 或增量构建：
+var options2 = default(CheatCommandExecutionOptions)
+    .WithRouter(myRouter)
+    .WithDuplicatePolicy(CheatDuplicatePolicy.AllowParallel)
+    .WithSource("GMConsole");
 ```
 
-处理器中配合取消令牌：
+`Router` 为 null 时默认为 `Router.Default`。`Source` 对 runtime 透明——是 owner 产品可用于审计或 UI 分组的 tag。
+
+### 查看与取消运行中命令
 
 ```csharp
-[Route]
-async UniTask OnLongTask(CheatCommand cmd, CancellationToken ct)
+CheatRuntimeMetrics metrics = runtime.Metrics;
+Console.WriteLine($"running={metrics.RunningCommandCount}");
+Console.WriteLine($"published={metrics.PublishedCommandCount}");
+Console.WriteLine($"dropped={metrics.DroppedDuplicateCount}");
+Console.WriteLine($"faulted={metrics.FaultedCommandCount}");
+
+if (runtime.IsCommandRunning("World_ReloadConfig"))
 {
-    await UniTask.Delay(TimeSpan.FromSeconds(10), cancellationToken: ct);
-    Debug.Log("Task completed");
+    runtime.CancelCommand("World_ReloadConfig");
+}
+
+runtime.ClearAll();
+```
+
+`CancelCommand` 通过匹配状态拥有的 `CancellationTokenSource` 请求取消。Handler 通过 VitalRouter route 参数接收 token，应迅速退出。
+
+## 进阶主题
+
+### 作用域 Router
+
+命令不应跨系统泄漏时，为不同工具、场景、world 或权限边界使用专用 `Router`：
+
+```csharp
+private readonly Router _sceneRouter = new Router();
+
+void Awake()
+{
+    var runtime = new CheatCommandRuntime();
+    var options = new CheatCommandExecutionOptions(_sceneRouter);
+    await runtime.PublishAsync("Scene_SkipIntro", options);
 }
 ```
 
-### 查询运行状态
+`CancelCommand` 与 `IsCommandRunning` 接受可选的 `Router` 参数以限定范围：
 
 ```csharp
-bool running = CheatCommandUtility.IsCommandRunning("Protocol_LongTask");
-int total = CheatCommandUtility.RunningCommandCount;
+runtime.CancelCommand("World_ReloadConfig", _sceneRouter);
 ```
 
-### 多路由隔离
+### VContainer 集成
 
-通过领域专用路由实现命令的分域处理：
-
-```csharp
-// 创建专用路由
-var uiRouter = new Router();
-var gameplayRouter = new Router();
-
-// 发布到指定路由 — 只有映射到该路由的处理器才会收到
-CheatCommandUtility.PublishCheatCommand("UI_ShowPopup", uiRouter).Forget();
-CheatCommandUtility.PublishCheatCommand("Player_Jump", jumpData, gameplayRouter).Forget();
-```
-
-处理器注册：
+可选的 `CheatVContainerInstaller` 位于受 `VCONTAINER_PRESENT` 约束的 assembly 中。没有安装 VContainer 的项目可以移除或忽略该目录，不会影响核心 runtime。
 
 ```csharp
-[Routes]
-public partial class UICheatHandler
+using CycloneGames.Cheat.Runtime.Integrations.VContainer;
+using CycloneGames.Logging;
+using VContainer;
+using VContainer.Unity;
+
+public sealed class GameLifetimeScope : LifetimeScope
 {
-    public UICheatHandler(Router uiRouter) => MapTo(uiRouter);
-
-    [Route]
-    void OnUICommand(CheatCommand cmd)
+    protected override void Configure(IContainerBuilder builder)
     {
-        Debug.Log($"UI: {cmd.CommandID}");
+        var installer = new CheatVContainerInstaller(
+            logWriterFactory: resolver => resolver.Resolve<ILogWriter>());
+        installer.Install(builder);
+
+        builder.Register<DebugWorldCheatHandler>(Lifetime.Singleton);
     }
 }
 ```
 
-### 日志集成
+Installer 把 `ICheatCommandRuntime`、`ICheatCommandPublisher`、`ICheatCommandControl`、`ICheatCommandAdmissionPublisher` 与 `ICheatLogWriterConfigurable` 注册为单例，并挂接 dispose callback，使 runtime 随 lifetime scope 一起释放。
 
-默认使用 `UnityDebugCheatLogger`，输出到 Unity 的 Debug API。无需额外设置。
+### 日志配置
+
+Cheat 日志使用 `CycloneGames.Cheat` category。大多数 host 通过 `LogRuntime` 安装应用级 `ILogWriter`；需要隔离的 service 可以显式注入 writer，并通过具体属性或可选 capability 后续替换：
+
+Runtime 的 channel 构造统一收敛在 internal `Runtime/Diagnostics/CheatRuntimeLog.cs` facade。包内代码使用其 `Channel` 成员获取 ambient 日志，使用 `Create(ILogWriter)` 绑定显式的非 null writer；调用点不再重复 category 字符串，也不直接构造 `LogChannel`。`Create` 会拒绝 `null`；独立命名的兼容 helper 保留 runtime 原有的原子 nullable-writer fallback。该 internal 组织方式不改变 public 注入与替换 API。
+
+可选 sample asmdef 通过 `Samples/Diagnostics/CheatSampleLog.cs` 遵循同一边界。标准 `Category` 与 `Channel` 保留 `CycloneGames.Cheat.Sample`；独立命名的 `BenchmarkCategory`、`BenchmarkChannel` 和 `CreateBenchmark(ILogWriter logWriter)` 保留 `CycloneGames.Cheat.Sample.Benchmark`，避免调用点重复 category 字面量。
 
 ```csharp
-// 自定义日志器
-public class CustomCheatLogger : ICheatLogger
-{
-    public void LogError(string message) { /* ... */ }
-    public void LogException(Exception exception) { /* ... */ }
-}
+var runtime = new CheatCommandRuntime(
+    CheatCommandRuntime.DefaultMaximumConcurrentCommandCount,
+    telemetryWriter);
 
-CheatCommandUtility.Logger = new CustomCheatLogger();
-
-// 完全禁用日志
-CheatCommandUtility.Logger = null;
+ICheatLogWriterConfigurable logging = runtime;
+logging.LogWriter = replacementWriter;
 ```
 
-## API 参考
+历史包专用 logger contract、adapter、构造器与属性已不再属于 public API。Integration 只使用 `CycloneGames.Logging.ILogWriter`：可通过 `CheatCommandRuntime(int, ILogWriter)` 注入、设置 `ICheatLogWriterConfigurable.LogWriter`，或向 `CheatVContainerInstaller` 提供 `ILogWriter` factory。`LogWriter` 使用 `Volatile.Read` / `Volatile.Write` 读写，可以从其他线程替换；writer 的所有权和释放责任仍属于 composition root。
 
-### 命令类型
+### Build 与 CI
 
-| 类型 | 分配 | 说明 |
-|------|------|------|
-| `CheatCommand` | 零分配 | 无参命令 |
-| `CheatCommand<T>` | 零分配 | 单个结构体参数 |
-| `CheatCommand<T1, T2>` | 零分配 | 两个结构体参数 |
-| `CheatCommand<T1, T2, T3>` | 零分配 | 三个结构体参数 |
-| `CheatCommandClass<T>` | 堆分配 | 单个引用类型参数 |
+`BuildData` 暴露 `Cheat Build Mode`：
 
-所有类型均实现 `ICheatCommand : VitalRouter.ICommand`，提供 `string CommandID` 属性。
+| 模式 | 行为 |
+| --- | --- |
+| `Disabled` | 规范 Pipeline 的 Player 构建期间保持禁用 `ENABLE_CHEAT`。 |
+| `DevelopmentBuilds` | 仅在 debug/development 构建中启用 `ENABLE_CHEAT`。 |
+| `Enabled` | 所有规范 Pipeline 的 Player 构建都启用 `ENABLE_CHEAT`。仅用于受保护的内部构建。 |
 
-### 发布工具类 `CheatCommandUtility`（静态）
+CI 可以用 `-pipelineEnableCheat` 或 `-pipelineDisableCheat` 覆盖资产设置。Build 支持位于本包之外：Build 模块通过字符串 symbol、反射和 Unity 编译元数据检测 `CycloneGames.Cheat.Runtime` assembly 契约，而不是任何 package 路径。模块可以位于 `Assets`、嵌入式 UPM package、package cache 或其他 Unity 支持的源码位置。如果 runtime assembly 缺失且没有请求 Cheat，普通构建会继续且不应用 `ENABLE_CHEAT`；如果 Profile 或命令行请求了 Cheat，preflight 会失败，而不会生成标记错误的构建。
 
-| 方法 | 说明 |
-|------|------|
-| `UniTask PublishCheatCommand(string, Router?)` | 发布无参命令 |
-| `UniTask PublishCheatCommand<T>(string, T, Router?)` | 发布结构体参数命令 |
-| `UniTask PublishCheatCommand<T1,T2>(string, T1, T2, Router?)` | 发布双结构体参数命令 |
-| `UniTask PublishCheatCommand<T1,T2,T3>(string, T1, T2, T3, Router?)` | 发布三结构体参数命令 |
-| `UniTask PublishCheatCommandWithClass<T>(string, T, Router?)` | 发布引用类型参数命令 |
-| `void CancelCheatCommand(string)` | 跨所有路由取消 |
-| `void CancelCheatCommand(string, Router)` | 在指定路由上取消 |
-| `bool IsCommandRunning(string)` | 查询命令是否正在执行 |
-| `void ClearAll()` | 取消并释放所有命令 |
-| `ICheatLogger Logger { get; set; }` | 自定义日志器（默认：Unity Debug） |
-| `int RunningCommandCount { get; }` | 当前运行中的命令数量 |
+Cheat 构建模式归 `BuildData` 所有，与 `HybridCLRBuildConfig` 无关；Player recipe 不需要仅为了启用 Cheat 而经过 `hot-update` step。普通 Player 构建通过 `BuildPlayerOptions.extraScriptingDefines` 传入 `ENABLE_CHEAT`，不会修改 PlayerSettings 全局 defines。HybridCLR 8.12 没有等价的单次调用 define 输入，因此同时启用 HybridCLR 和有效 Cheat 的 Player recipe 会在 preflight 失败；不构建 Player 的 hot-update 或 content-only recipe 仍保持独立。
 
-### 日志接口 `ICheatLogger`
+## 常见场景
 
-| 方法 | 说明 |
-|------|------|
-| `void LogError(string)` | 记录错误消息 |
-| `void LogException(Exception)` | 记录异常 |
+### 带 per-scene Router 的 GM 控制台
 
-## 执行与并发控制
+GM 控制台面板把命令 publish 到当前场景的 router，避免其他场景的 handler 干扰：
 
-- **去重**：键为 `(commandId, command type, router instance)`，同一键在执行期间再次调用会被忽略，直到前一次完成。
-- **线程安全**：原生平台使用 `ConcurrentDictionary`，WebGL 使用 `Dictionary + lock`（单线程环境）。Logger 访问使用 `Volatile.Read/Write`。
-- **取消机制**：`CancelCheatCommand` 触发 `CancellationTokenSource.Cancel()` → 处理器通过 `CancellationToken` 参数接收取消信号。
+```csharp
+public sealed class GMConsolePanel : MonoBehaviour
+{
+    private readonly Router _router = new Router();
+    private ICheatCommandRuntime _runtime;
 
-## 编译开关：`ENABLE_CHEAT`
+    void Awake()
+    {
+        _runtime = new CheatCommandRuntime();
+    }
 
-| 定义情况 | 行为 |
-|---------|------|
-| 定义 `ENABLE_CHEAT` | 完整实现 — 去重、路由分发、取消 |
-| 未定义 `ENABLE_CHEAT` | 所有方法均为空壳，返回 `UniTask.CompletedTask` / `false` / `0`。IL2CPP 内联为零指令，无运行时开销。 |
+    public void OnReloadConfigButton() =>
+        _runtime.PublishAsync(
+            "World_ReloadConfig",
+            new CheatCommandExecutionOptions(_router)).Forget();
 
-调用侧无需 `#if` 包裹 — 两条路径的 API 签名完全一致。
+    public void OnGiveItemButton(int itemId, int count) =>
+        _runtime.PublishAsync(
+            "Inventory_AddItem",
+            itemId,
+            count,
+            new CheatCommandExecutionOptions(_router)).Forget();
 
-**推荐配置**：仅在 Debug / Development 构建配置的 **Player Settings → Scripting Define Symbols** 中添加 `ENABLE_CHEAT`。
+    void OnDestroy()
+    {
+        _runtime.CancelCommand("World_ReloadConfig", _router);
+        _runtime.Dispose();
+    }
+}
+```
 
-## 实战建议
+Handler 映射到 `_router` 而不是 `Router.Default`，GM 控制台的命令只到达当前场景的 handler。
 
-- **优先使用结构体命令**以实现零分配。仅在需要引用语义时使用 `CheatCommandClass<T>`。
-- **缓存命令 ID** 为 `static readonly string` 字段，避免重复的字符串分配。
-- **轻量处理**：订阅方法应尽量快速返回，耗时逻辑使用 UniTask 切分。
-- **尊重 `CancellationToken`**：异步处理器中配合取消令牌，用于长时间运行或可中断的命令。
-- **类型匹配是严格的**：`CheatCommand<int>` 和 `CheatCommand<float>` 是不同类型 — 处理器参数类型必须与发布的命令类型完全一致。
-- **使用领域专用路由**（UI、Gameplay 等）以获得更好的代码组织和隔离性。
-- **在订阅方法内处理错误**：发布侧吞并异常（除取消外）。请在 `[Route]` 方法中自行捕获并记录异常。
+### 带取消的测试运行器
 
-## 常见问题（FAQ）
+测试运行器 publish 一个长时间运行的 cheat 并在测试完成时取消：
 
-- **处理器没有被触发？**
-  - 检查命令类型是否匹配（如 `CheatCommand` vs `CheatCommand<GameData>`）。
-  - 确保使用 `[Routes]` partial class 并调用了 `MapTo(router)`。
-  - 确保 `ENABLE_CHEAT` 已添加到 Scripting Define Symbols。
+```csharp
+[UnityTest]
+public IEnumerator ReloadConfig_CompletesWithinFrame()
+{
+    var runtime = new CheatCommandRuntime();
+    UniTask publishTask = runtime.PublishAsync("World_ReloadConfig");
 
-- **重复调用无效果？**
-  - 同一 `(commandId, type, router)` 在执行期间会被去重。等待前一次完成后才会再次触发。
+    yield return publishTask.ToCoroutine();
 
-- **如何中止正在运行的命令？**
-  - 调用 `CheatCommandUtility.CancelCheatCommand(commandId)`；处理器需配合处理 `CancellationToken`。
+    Assert.AreEqual(0, runtime.Metrics.RunningCommandCount);
+    Assert.Greater(runtime.Metrics.CompletedCommandCount, 0);
 
-- **如何在发布版中剥离 Cheat？**
-  - 从 Scripting Define Symbols 中移除 `ENABLE_CHEAT`。所有调用变为零成本空操作。
+    runtime.Dispose();
+}
+```
+
+`Dispose` 取消所有在飞命令，测试 teardown 因此确定性。
+
+### 并行触发的自动化
+
+自动化套件并行触发 "spawn enemy"，不丢弃任何一次：
+
+```csharp
+var options = new CheatCommandExecutionOptions(
+    router: automationRouter,
+    duplicatePolicy: CheatDuplicatePolicy.AllowParallel,
+    source: "NightlyAutomation");
+
+for (int i = 0; i < 16; i++)
+{
+    runtime.PublishAsync("Enemy_SpawnAt", i * 1.0f, i * 0.5f, options).Forget();
+}
+```
+
+`AllowParallel` 给每次 publish 分配独立的 sequence number，所以 16 个命令全部注册并并发运行。
+
+## 性能与内存
+
+| 路径 | 行为 | 分配 |
+| --- | --- | --- |
+| Disabled publish（`ENABLE_CHEAT` 未定义） | 返回 `UniTask.CompletedTask` | 0 字节 |
+| Enabled publish，无 handler | 派发后返回 completed task | 每个命令一个 `CancellationTokenSource`，受 `MaximumConcurrentCommandCount` 限制 |
+| Enabled publish，有 handler | await handler，然后释放状态 | 每个命令一个 `CancellationTokenSource`，受 `MaximumConcurrentCommandCount` 限制 |
+| `CancelCommand` / `ClearAll` / `Dispose` | 最多 snapshot 或摘除 `MaximumConcurrentCommandCount` 个状态，再在 lock 外取消 | 每次调用一个有界 control-path list |
+| `Metrics` 读取 | 构造 `CheatRuntimeMetrics` readonly struct | 0 字节 |
+| `IsCommandRunning` | 在飞状态线性扫描 | 0 字节 |
+
+状态以 struct (`CommandStateKey`) 为 key，字典查找避免装箱。Admission 把 duplicate 检测、capacity 校验、state 注册和 running count 提交串行化，拒绝路径不分配 command state；长期 metrics 使用 `Interlocked` 操作。Runtime 每个已准入命令持有一个 `CancellationTokenSource`，handler 退出时释放。标量指标只在既有 `ENABLE_CHEAT` capability 定义时供 caller-owned diagnostics 使用；未定义该 capability 的 Release 配置不包含 Cheat runtime。
+
+### 线程
+
+- `CheatCommandRuntime` 可以从任意线程调用。
+- 所有平台都使用同一个窄锁，在有界 `Dictionary` 上协调 admission、release、lookup 与稳定的取消 snapshot。
+- 持有该锁时不会执行 VitalRouter publish、handler、`await`、取消 callback、writer callback 或 `CancellationTokenSource.Cancel` / `Dispose`。取消 callback 可以安全重入 runtime 的 control 或 admission API。
+- `ClearAll` 会在交付第一次取消前标记完整 snapshot，因此同步完成的 handler 不会使枚举失效，也不会让 snapshot 中后续成员漏掉取消。
+- 取消 callback 与可选 writer 的异常会按 state 隔离，因此一个故障 callback 不会阻止有界 snapshot 的后续成员收到取消。
+- `PublishAsync` await VitalRouter 的派发，遵循 `Router` 的调度配置。
+- `LogWriter` 属性用 `Volatile.Read` / `Volatile.Write` 读写，可以从其他线程切换而无需外部同步。
+
+### 持久化
+
+Cheat 模块不写 runtime 文件、存档、偏好、缓存或资产。它只持有内存中的命令状态和一个不拥有所有权的 writer 引用。GM 控制台历史、审计记录、远程授权和跨设备同步由 owner 产品负责，应具备显式存储、schema version、访问控制和迁移策略。
+
+## 故障排查
+
+| 现象 | 可能原因 | 解决方法 |
+| --- | --- | --- |
+| 出现 `Publishing` 日志但没有 `Received` | `ENABLE_CHEAT` 未定义、目标 `Router` 错误、listener 已 unmap 或 VitalRouter source generation 失败 | 检查 compile symbol、目标 `Router`、命令 payload 类型、listener 生命周期与 VitalRouter 构建输出 |
+| 第二次 publish 被丢弃 | 设置了 `CheatDuplicatePolicy.Drop` 且前一命令仍在运行 | 切换为 `AllowParallel`、await 前一命令或先取消它 |
+| Runtime 已启用且 publish 已完成，但 handler 没有运行 | 重复或容量 admission 拒绝了命令 | 使用 `ICheatCommandAdmissionPublisher.TryPublishAsync` 获取逐次结果，并检查 `DroppedDuplicateCount` / `CapacityRejectedCommandCount` 聚合诊断 |
+| Metrics 显示 `FaultedCommandCount > 0` | Handler 抛出了 `OperationCanceledException` 以外的异常 | 检查 `CycloneGames.Cheat` category 输出，保护 handler |
+| `IsCommandRunning` 在 publish 后立即返回 `false` | Handler 同步完成于检查之前 | 改查 `Metrics.CompletedCommandCount` |
+| `CancelCommand` 没有停止 handler | Handler 没有观察 `CancellationToken` | 把 token 传入 `UniTask.Yield`、网络调用与 async 原语 |
+| VContainer installer 不编译 | 未定义 `VCONTAINER_PRESENT` | 安装 VContainer 或移除 integration 目录 |
+| publish 时 `ObjectDisposedException` | publish 完成前调用了 `Dispose` | 先 await 未完成的 publish 再 dispose，或让 runtime 取消它们 |
+
+## 验证
+
+通过 Unity Test Runner 运行聚焦测试：
+
+```text
+<UnityEditor> -batchmode -nographics -projectPath <repo-root>/UnityStarter -runTests -testPlatform EditMode -assemblyNames CycloneGames.Cheat.Tests.Editor -testResults <result-path> -quit
+```
+
+Editor 测试套件覆盖命令派发、重复策略、取消、metrics、disabled-runtime 的 no-op 行为、public `ILogWriter` 构造器形状、可选 admission 结果契约、容量边界上的阻塞 handler 并发、取消 callback 重入、dispose 摘除、handler 同步完成时的稳定取消 snapshot，以及 callback 与已安装 writer 同时失败时继续交付整批取消。构建模式开关必须在 Player build 中以目标 `ENABLE_CHEAT` 配置验证。
+
+## 参考
+
+- [VitalRouter](https://github.com/hadashiA/VitalRouter)
+- [UniTask](https://github.com/Cysharp/UniTask)

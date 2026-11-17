@@ -4,6 +4,64 @@ using CycloneGames.DeterministicMath;
 namespace CycloneGames.GameplayAbilities.Core
 {
     /// <summary>
+    /// Immutable per-state capacity budget. Limits are ownership policy, not measured
+    /// platform recommendations; callers should select them for their gameplay profile.
+    /// </summary>
+    public sealed class GASAbilitySystemLimits
+    {
+        /// <summary>
+        /// The defaults used when a caller does not pass limits. <see cref="MaxAttributes"/> also
+        /// bounds dependency propagation depth: a dirty attribute walks live dependents recursively,
+        /// so the deepest possible chain equals the attribute count. 512 is covered by tests up to a
+        /// 508-hop chain; larger budgets are not, and a deep enough chain ends in an uncatchable
+        /// <see cref="System.StackOverflowException"/>.
+        /// </summary>
+        public static GASAbilitySystemLimits Default { get; } = new GASAbilitySystemLimits(
+            maxAbilities: 256,
+            maxAttributes: 512,
+            maxActiveEffects: 1024,
+            maxModifiers: 16384,
+            maxPredictedAttributeChanges: 4096);
+
+        /// <summary>Bounds granted ability specs per state.</summary>
+        public int MaxAbilities { get; }
+        /// <summary>Bounds registered attributes. Also bounds dependency propagation depth.</summary>
+        public int MaxAttributes { get; }
+        /// <summary>Bounds simultaneously active effects.</summary>
+        public int MaxActiveEffects { get; }
+        /// <summary>Bounds the shared modifier pool; each effect reserves a contiguous slice.</summary>
+        public int MaxModifiers { get; }
+        /// <summary>Bounds pending predicted attribute changes per state.</summary>
+        public int MaxPredictedAttributeChanges { get; }
+
+        public GASAbilitySystemLimits(
+            int maxAbilities,
+            int maxAttributes,
+            int maxActiveEffects,
+            int maxModifiers,
+            int maxPredictedAttributeChanges)
+        {
+            MaxAbilities = RequirePositive(maxAbilities, nameof(maxAbilities));
+            MaxAttributes = RequirePositive(maxAttributes, nameof(maxAttributes));
+            MaxActiveEffects = RequirePositive(maxActiveEffects, nameof(maxActiveEffects));
+            MaxModifiers = RequirePositive(maxModifiers, nameof(maxModifiers));
+            MaxPredictedAttributeChanges = RequirePositive(
+                maxPredictedAttributeChanges,
+                nameof(maxPredictedAttributeChanges));
+        }
+
+        private static int RequirePositive(int value, string parameterName)
+        {
+            if (value <= 0)
+            {
+                throw new ArgumentOutOfRangeException(parameterName, value, "GAS state limits must be positive.");
+            }
+
+            return value;
+        }
+    }
+
+    /// <summary>
     /// Pure ASC state. This is the authoritative storage model that Runtime adapters should wrap.
     /// It intentionally stores ids, handles and compact value data instead of Unity object references.
     /// </summary>
@@ -14,6 +72,8 @@ namespace CycloneGames.GameplayAbilities.Core
         private GASActiveEffectData[] activeEffects;
         private GASModifierData[] modifiers;
         private GASPredictedAttributeChange[] predictedAttributeChanges;
+        // Reused between removals so a narrowed recompute stays allocation-free.
+        private GASAttributeId[] removedAttributeIds = Array.Empty<GASAttributeId>();
 
         private int abilitySpecCount;
         private int attributeCount;
@@ -29,6 +89,24 @@ namespace CycloneGames.GameplayAbilities.Core
         public int AttributeCount => attributeCount;
         public int ActiveEffectCount => activeEffectCount;
         public int ModifierCount => modifierCount;
+        public int PredictedAttributeChangeCount => predictedAttributeChangeCount;
+        /// <summary>
+        /// Number of attribute evaluations whose aggregation exceeded the Q32.32 range. Values are
+        /// still produced with unchecked wrapping; this counter is the only signal that they did.
+        /// </summary>
+        public long OverflowCount { get; private set; }
+        public GASAbilitySystemLimits Limits { get; }
+
+        /// <summary>
+        /// How duration/infinite modifiers combine during aggregation. Default is
+        /// <see cref="GASModifierAggregationMode.MultiplicativeProduct"/>.
+        /// </summary>
+        public GASModifierAggregationMode AggregationMode { get; set; } = GASModifierAggregationMode.MultiplicativeProduct;
+
+        public GASAbilitySystemState(GASEntityId entity, GASAbilitySystemLimits limits)
+            : this(entity, 16, 32, 32, 128, 32, limits)
+        {
+        }
 
         public GASAbilitySystemState(
             GASEntityId entity,
@@ -36,14 +114,17 @@ namespace CycloneGames.GameplayAbilities.Core
             int attributeCapacity = 32,
             int activeEffectCapacity = 32,
             int modifierCapacity = 128,
-            int predictionCapacity = 32)
+            int predictionCapacity = 32,
+            GASAbilitySystemLimits limits = null)
         {
+            Limits = limits ?? GASAbilitySystemLimits.Default;
             Entity = entity;
-            abilitySpecs = new GASAbilitySpecData[Math.Max(1, abilityCapacity)];
-            attributes = new GASAttributeValueData[Math.Max(1, attributeCapacity)];
-            activeEffects = new GASActiveEffectData[Math.Max(1, activeEffectCapacity)];
-            modifiers = new GASModifierData[Math.Max(1, modifierCapacity)];
-            predictedAttributeChanges = new GASPredictedAttributeChange[Math.Max(1, predictionCapacity)];
+            abilitySpecs = new GASAbilitySpecData[ClampInitialCapacity(abilityCapacity, Limits.MaxAbilities)];
+            attributes = new GASAttributeValueData[ClampInitialCapacity(attributeCapacity, Limits.MaxAttributes)];
+            activeEffects = new GASActiveEffectData[ClampInitialCapacity(activeEffectCapacity, Limits.MaxActiveEffects)];
+            modifiers = new GASModifierData[ClampInitialCapacity(modifierCapacity, Limits.MaxModifiers)];
+            predictedAttributeChanges = new GASPredictedAttributeChange[
+                ClampInitialCapacity(predictionCapacity, Limits.MaxPredictedAttributeChanges)];
         }
 
         public void Reset(GASEntityId entity)
@@ -54,42 +135,51 @@ namespace CycloneGames.GameplayAbilities.Core
             activeEffectCount = 0;
             modifierCount = 0;
             predictedAttributeChangeCount = 0;
-            nextSpecHandle = 1;
-            nextEffectHandle = 1;
             Version++;
         }
 
-        public void Reserve(
+        public bool Reserve(
             int abilityCapacity,
             int attributeCapacity,
             int activeEffectCapacity,
             int modifierCapacity,
             int predictionCapacity)
         {
+            if (ExceedsLimit(abilityCapacity, Limits.MaxAbilities) ||
+                ExceedsLimit(attributeCapacity, Limits.MaxAttributes) ||
+                ExceedsLimit(activeEffectCapacity, Limits.MaxActiveEffects) ||
+                ExceedsLimit(modifierCapacity, Limits.MaxModifiers) ||
+                ExceedsLimit(predictionCapacity, Limits.MaxPredictedAttributeChanges))
+            {
+                return false;
+            }
+
             if (abilityCapacity > 0)
             {
-                EnsureAbilityCapacity(abilityCapacity);
+                if (!EnsureAbilityCapacity(abilityCapacity)) return false;
             }
 
             if (attributeCapacity > 0)
             {
-                EnsureAttributeCapacity(attributeCapacity);
+                if (!EnsureAttributeCapacity(attributeCapacity)) return false;
             }
 
             if (activeEffectCapacity > 0)
             {
-                EnsureActiveEffectCapacity(activeEffectCapacity);
+                if (!EnsureActiveEffectCapacity(activeEffectCapacity)) return false;
             }
 
             if (modifierCapacity > 0)
             {
-                EnsureModifierCapacity(modifierCapacity);
+                if (!EnsureModifierCapacity(modifierCapacity)) return false;
             }
 
             if (predictionCapacity > 0)
             {
-                EnsurePredictionCapacity(predictionCapacity);
+                if (!EnsurePredictionCapacity(predictionCapacity)) return false;
             }
+
+            return true;
         }
 
         public bool TryGetAbilitySpecByIndex(int index, out GASAbilitySpecData spec)
@@ -206,24 +296,26 @@ namespace CycloneGames.GameplayAbilities.Core
         public GASSpecHandle GrantAbility(
             GASDefinitionId abilityDefinitionId,
             ushort level,
-            GASInstancingPolicy instancingPolicy,
-            GASNetExecutionPolicy netExecutionPolicy,
-            GASReplicationPolicy replicationPolicy)
+            GASInstancingPolicy instancingPolicy)
         {
-            if (!abilityDefinitionId.IsValid)
+            if (abilityDefinitionId.Value <= 0 ||
+                !IsValidInstancingPolicy(instancingPolicy) ||
+                abilitySpecCount >= Limits.MaxAbilities ||
+                !TryAllocateSpecHandle(out var handle))
             {
                 return default;
             }
 
-            EnsureAbilityCapacity(abilitySpecCount + 1);
-            var handle = new GASSpecHandle(nextSpecHandle++);
+            if (!EnsureAbilityCapacity(abilitySpecCount + 1))
+            {
+                return default;
+            }
+
             abilitySpecs[abilitySpecCount++] = new GASAbilitySpecData(
                 handle,
                 abilityDefinitionId,
                 level,
-                instancingPolicy,
-                netExecutionPolicy,
-                replicationPolicy);
+                instancingPolicy);
             Version++;
             return handle;
         }
@@ -233,9 +325,7 @@ namespace CycloneGames.GameplayAbilities.Core
             handle = GrantAbility(
                 request.AbilityDefinitionId,
                 request.Level,
-                request.InstancingPolicy,
-                request.NetExecutionPolicy,
-                request.ReplicationPolicy);
+                request.InstancingPolicy);
             return handle.IsValid;
         }
 
@@ -259,20 +349,66 @@ namespace CycloneGames.GameplayAbilities.Core
             return true;
         }
 
-        public void SetAttributeBase(GASAttributeId attributeId, GASFixedValue baseValue)
+        public bool SetAttributeBase(GASAttributeId attributeId, GASFixedValue baseValue)
         {
-            SetAttributeBaseRaw(attributeId, baseValue.RawValue);
+            return SetAttributeBaseRaw(attributeId, baseValue.RawValue);
         }
 
-        public void SetAttributeBaseRaw(GASAttributeId attributeId, long baseValueRaw)
+        public bool SetAttributeBaseRaw(GASAttributeId attributeId, long baseValueRaw)
         {
-            int index = EnsureAttribute(attributeId);
+            if (HasAnyPredictedAttributeChange(attributeId))
+            {
+                return false;
+            }
+
+            if (!TryEnsureAttribute(attributeId, out int index))
+            {
+                return false;
+            }
+
             attributes[index] = new GASAttributeValueData(
                 attributeId,
                 baseValueRaw,
                 EvaluateCurrentValueRaw(attributeId, baseValueRaw),
                 attributes[index].AggregatorVersion + 1u);
             Version++;
+            return true;
+        }
+
+        public bool RemoveAttribute(GASAttributeId attributeId)
+        {
+            int index = FindAttributeIndex(attributeId);
+            if (index < 0 || !CanRemoveAttribute(attributeId))
+            {
+                return false;
+            }
+
+            int lastIndex = attributeCount - 1;
+            if (index < lastIndex)
+            {
+                Array.Copy(attributes, index + 1, attributes, index, lastIndex - index);
+            }
+            attributes[lastIndex] = default;
+            attributeCount--;
+            Version++;
+            return true;
+        }
+
+        public bool CanRemoveAttribute(GASAttributeId attributeId)
+        {
+            if (FindAttributeIndex(attributeId) < 0 || HasAnyPredictedAttributeChange(attributeId))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < modifierCount; i++)
+            {
+                if (modifiers[i].AttributeId == attributeId)
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         public bool ApplyInstantModifier(GASModifierData modifier)
@@ -282,11 +418,20 @@ namespace CycloneGames.GameplayAbilities.Core
 
         public bool ApplyInstantModifier(GASModifierData modifier, GASPredictionKey predictionKey)
         {
-            int index = EnsureAttribute(modifier.AttributeId);
+            if (!IsValidModifier(in modifier) ||
+                !CanRecordPredictedAttributeChange(predictionKey, modifier.AttributeId) ||
+                !TryEnsureAttribute(modifier.AttributeId, out int index))
+            {
+                return false;
+            }
+
             var attribute = attributes[index];
             if (predictionKey.IsValid)
             {
-                RecordPredictedAttributeChange(predictionKey, modifier.AttributeId, attribute.BaseValueRaw);
+                if (!RecordPredictedAttributeChange(predictionKey, modifier.AttributeId, attribute.BaseValueRaw))
+                {
+                    return false;
+                }
             }
 
             long baseValueRaw = ApplyModifierToBaseRaw(attribute.BaseValueRaw, modifier);
@@ -326,29 +471,33 @@ namespace CycloneGames.GameplayAbilities.Core
             GASEffectDurationPolicy durationPolicy,
             ushort level,
             ushort stackCount,
-            int startTick,
+            long startTick,
             int durationTicks,
             GASModifierData[] effectModifiers,
             int effectModifierStart,
-            int effectModifierCount)
+            int effectModifierCount,
+            GASStackMagnitudePolicy stackMagnitudePolicy = GASStackMagnitudePolicy.LinearBias)
         {
-            if (!effectDefinitionId.IsValid)
+            if (!ValidateActiveEffectInput(
+                    effectDefinitionId,
+                    durationPolicy,
+                    stackCount,
+                    durationTicks,
+                    effectModifiers,
+                    effectModifierStart,
+                    effectModifierCount) ||
+                activeEffectCount >= Limits.MaxActiveEffects ||
+                effectModifierCount > Limits.MaxModifiers - modifierCount ||
+                !TryAllocateEffectHandle(out var handle))
             {
                 return default;
             }
 
-            if (effectModifierCount < 0 || effectModifierStart < 0 || effectModifiers == null && effectModifierCount > 0)
+            if (!EnsureActiveEffectCapacity(activeEffectCount + 1) ||
+                !EnsureModifierCapacity(modifierCount + effectModifierCount))
             {
                 return default;
             }
-
-            if (effectModifiers != null && effectModifierStart + effectModifierCount > effectModifiers.Length)
-            {
-                return default;
-            }
-
-            EnsureActiveEffectCapacity(activeEffectCount + 1);
-            EnsureModifierCapacity(modifierCount + effectModifierCount);
 
             int modifierStart = modifierCount;
             for (int i = 0; i < effectModifierCount; i++)
@@ -356,7 +505,6 @@ namespace CycloneGames.GameplayAbilities.Core
                 modifiers[modifierCount++] = effectModifiers[effectModifierStart + i];
             }
 
-            var handle = new GASActiveEffectHandle(nextEffectHandle++);
             activeEffects[activeEffectCount++] = new GASActiveEffectData(
                 handle,
                 effectDefinitionId,
@@ -366,11 +514,12 @@ namespace CycloneGames.GameplayAbilities.Core
                 predictionKey,
                 durationPolicy,
                 level,
-                stackCount == 0 ? (ushort)1 : stackCount,
+                stackCount,
                 startTick,
                 durationTicks,
                 (uint)modifierStart,
-                (ushort)effectModifierCount);
+                (ushort)effectModifierCount,
+                stackMagnitudePolicy);
 
             RecalculateModifiedAttributes(modifierStart, effectModifierCount);
             Version++;
@@ -379,32 +528,39 @@ namespace CycloneGames.GameplayAbilities.Core
 
         public GASActiveEffectHandle ApplyGameplayEffectSpecToSelf(in GASGameplayEffectSpecData spec)
         {
+            TryApplyGameplayEffectSpecToSelf(in spec, out var handle);
+            return handle;
+        }
+
+        public bool TryApplyGameplayEffectSpecToSelf(
+            in GASGameplayEffectSpecData spec,
+            out GASActiveEffectHandle handle)
+        {
+            handle = default;
+            if (!ValidateEffectSpec(in spec))
+            {
+                return false;
+            }
+
             if (spec.DurationPolicy == GASEffectDurationPolicy.Instant)
             {
-                if (spec.Modifiers == null && spec.ModifierCount > 0)
+                if (!PrepareInstantModifierBatch(in spec))
                 {
-                    return default;
-                }
-
-                if (spec.ModifierStart < 0 || spec.ModifierCount < 0)
-                {
-                    return default;
-                }
-
-                if (spec.Modifiers != null && spec.ModifierStart + spec.ModifierCount > spec.Modifiers.Length)
-                {
-                    return default;
+                    return false;
                 }
 
                 for (int i = 0; i < spec.ModifierCount; i++)
                 {
-                    ApplyInstantModifier(spec.Modifiers[spec.ModifierStart + i], spec.PredictionKey);
+                    if (!ApplyInstantModifier(spec.Modifiers[spec.ModifierStart + i], spec.PredictionKey))
+                    {
+                        throw new InvalidOperationException("Validated GAS instant-effect mutation failed unexpectedly.");
+                    }
                 }
 
-                return default;
+                return true;
             }
 
-            return AddActiveEffect(
+            handle = AddActiveEffect(
                 spec.EffectDefinitionId,
                 spec.Source,
                 spec.PredictionKey,
@@ -415,7 +571,9 @@ namespace CycloneGames.GameplayAbilities.Core
                 spec.DurationTicks,
                 spec.Modifiers,
                 spec.ModifierStart,
-                spec.ModifierCount);
+                spec.ModifierCount,
+                spec.StackMagnitudePolicy);
+            return handle.IsValid;
         }
 
         public bool RemoveActiveEffect(GASActiveEffectHandle handle)
@@ -426,43 +584,143 @@ namespace CycloneGames.GameplayAbilities.Core
                 return false;
             }
 
-            var removed = activeEffects[index];
-            RemoveModifierRange((int)removed.ModifierStartIndex, removed.ModifierCount);
-            int lastIndex = activeEffectCount - 1;
-            if (index != lastIndex)
-            {
-                activeEffects[index] = activeEffects[lastIndex];
-            }
-
-            activeEffects[lastIndex] = default;
-            activeEffectCount--;
-            RecalculateAllAttributes();
-            Version++;
+            int touchedCount = CollectTouchedAttributes(activeEffects[index], 0);
+            RemoveActiveEffectAtIndex(index);
+            RecalculateTouchedAttributes(touchedCount);
             return true;
         }
 
-        public int RemoveExpiredEffects(int currentTick)
+        public int RemoveExpiredEffects(long currentTick)
         {
-            int removedCount = 0;
+            int expiredCount = 0;
+            for (int i = activeEffectCount - 1; i >= 0; i--)
+            {
+                if (IsExpiredAt(activeEffects[i], currentTick))
+                {
+                    expiredCount++;
+                }
+            }
+
+            if (expiredCount == 0)
+            {
+                return 0;
+            }
+
+            // Collect before any removal: modifier indices are only valid against the current pool.
+            int touchedCount = 0;
             for (int i = activeEffectCount - 1; i >= 0; i--)
             {
                 var effect = activeEffects[i];
-                if (effect.DurationPolicy != GASEffectDurationPolicy.Duration)
+                if (!IsExpiredAt(effect, currentTick))
                 {
                     continue;
                 }
 
-                if (currentTick - effect.StartTick >= effect.DurationTicks)
+                touchedCount = CollectTouchedAttributes(effect, touchedCount);
+                if (touchedCount < 0)
                 {
-                    RemoveActiveEffect(effect.Handle);
-                    removedCount++;
+                    break;
                 }
             }
 
+            int removedCount = 0;
+            for (int i = activeEffectCount - 1; i >= 0; i--)
+            {
+                if (!IsExpiredAt(activeEffects[i], currentTick))
+                {
+                    continue;
+                }
+
+                RemoveActiveEffectAtIndex(i);
+                removedCount++;
+            }
+
+            RecalculateTouchedAttributes(touchedCount);
             return removedCount;
         }
 
-        public void AcceptPrediction(GASPredictionKey predictionKey)
+        private bool IsExpiredAt(in GASActiveEffectData effect, long currentTick)
+        {
+            return effect.DurationPolicy == GASEffectDurationPolicy.Duration &&
+                   currentTick - effect.StartTick >= effect.DurationTicks;
+        }
+
+        private void RemoveActiveEffectAtIndex(int index)
+        {
+            var removed = activeEffects[index];
+            RemoveModifierRange((int)removed.ModifierStartIndex, removed.ModifierCount);
+            int lastIndex = activeEffectCount - 1;
+            if (index < lastIndex)
+            {
+                Array.Copy(activeEffects, index + 1, activeEffects, index, lastIndex - index);
+            }
+
+            activeEffects[lastIndex] = default;
+            activeEffectCount--;
+            Version++;
+        }
+
+        /// <summary>
+        /// Appends the distinct attribute ids targeted by an effect's modifiers to
+        /// <see cref="removedAttributeIds"/>. Returns the new count, or -1 when the scratch buffer
+        /// cannot grow, in which case the caller falls back to a full recompute.
+        /// </summary>
+        private int CollectTouchedAttributes(in GASActiveEffectData effect, int scratchCount)
+        {
+            int effectModifierCount = effect.ModifierCount;
+            if (effectModifierCount <= 0)
+            {
+                return scratchCount;
+            }
+
+            if (!EnsureArrayCapacity(
+                    ref removedAttributeIds,
+                    scratchCount + effectModifierCount,
+                    Limits.MaxModifiers))
+            {
+                return -1;
+            }
+
+            int end = (int)effect.ModifierStartIndex + effectModifierCount;
+            for (int i = (int)effect.ModifierStartIndex; i < end; i++)
+            {
+                var attributeId = modifiers[i].AttributeId;
+                bool alreadyCollected = false;
+                for (int existing = 0; existing < scratchCount; existing++)
+                {
+                    if (removedAttributeIds[existing] == attributeId)
+                    {
+                        alreadyCollected = true;
+                        break;
+                    }
+                }
+
+                if (alreadyCollected)
+                {
+                    continue;
+                }
+
+                removedAttributeIds[scratchCount++] = attributeId;
+            }
+
+            return scratchCount;
+        }
+
+        private void RecalculateTouchedAttributes(int touchedCount)
+        {
+            if (touchedCount < 0)
+            {
+                RecalculateAllAttributes();
+                return;
+            }
+
+            for (int i = 0; i < touchedCount; i++)
+            {
+                RecalculateAttribute(removedAttributeIds[i]);
+            }
+        }
+
+        public void CommitPrediction(GASPredictionKey predictionKey)
         {
             if (!predictionKey.IsValid)
             {
@@ -472,7 +730,7 @@ namespace CycloneGames.GameplayAbilities.Core
             RemovePredictedAttributeChanges(predictionKey, restore: false);
         }
 
-        public void RejectPrediction(GASPredictionKey predictionKey)
+        public void RollbackPrediction(GASPredictionKey predictionKey)
         {
             if (!predictionKey.IsValid)
             {
@@ -493,11 +751,9 @@ namespace CycloneGames.GameplayAbilities.Core
 
         /// <summary>
         /// Computes a deterministic state fingerprint using FNV-1a hashing.
-        /// 
         /// Magic numbers: 2166136261 is the FNV-1a 32-bit offset basis;
         /// 16777619 is the FNV-1a prime. Both are standard constants chosen
         /// for their avalanche properties in hash mixing.
-        /// 
         /// Each domain (abilities, attributes, effects) is hashed independently
         /// so the network layer can detect which subsystem changed without
         /// reading the full state snapshot.
@@ -512,7 +768,6 @@ namespace CycloneGames.GameplayAbilities.Core
                 abilities = HashInt(abilities, spec.AbilityDefinitionId.Value);
                 abilities = HashInt(abilities, spec.Level);
                 abilities = HashInt(abilities, (int)spec.InstancingPolicy);
-                abilities = HashInt(abilities, (int)spec.NetExecutionPolicy);
             }
 
             uint attrs = 2166136261u;
@@ -536,39 +791,136 @@ namespace CycloneGames.GameplayAbilities.Core
                 effects = HashInt(effects, effect.PredictionKey.Value);
                 effects = HashInt(effects, effect.Level);
                 effects = HashInt(effects, effect.StackCount);
-                effects = HashInt(effects, effect.StartTick);
+                effects = HashLong(effects, effect.StartTick);
                 effects = HashInt(effects, effect.DurationTicks);
+
+                int modifierStart = (int)effect.ModifierStartIndex;
+                int modifierEnd = modifierStart + effect.ModifierCount;
+                for (int modifierIndex = modifierStart; modifierIndex < modifierEnd; modifierIndex++)
+                {
+                    var modifier = modifiers[modifierIndex];
+                    effects = HashInt(effects, modifier.AttributeId.Value);
+                    effects = HashInt(effects, (int)modifier.Op);
+                    effects = HashInt(effects, (int)modifier.EvaluationChannel);
+                    effects = HashLong(effects, modifier.MagnitudeRaw);
+                }
             }
 
             return new GASStateChecksum(abilities, attrs, effects, 2166136261u);
         }
 
-        private int EnsureAttribute(GASAttributeId attributeId)
+        private bool TryEnsureAttribute(GASAttributeId attributeId, out int index)
         {
-            int index = FindAttributeIndex(attributeId);
-            if (index >= 0)
+            if (attributeId.Value <= 0)
             {
-                return index;
+                index = -1;
+                return false;
             }
 
-            EnsureAttributeCapacity(attributeCount + 1);
+            index = FindAttributeIndex(attributeId);
+            if (index >= 0)
+            {
+                return true;
+            }
+
+            if (attributeCount >= Limits.MaxAttributes || !EnsureAttributeCapacity(attributeCount + 1))
+            {
+                index = -1;
+                return false;
+            }
+
             attributes[attributeCount] = new GASAttributeValueData(attributeId, 0L, 0L, 1u);
-            return attributeCount++;
+            index = attributeCount++;
+            return true;
         }
 
-        private void RecordPredictedAttributeChange(GASPredictionKey predictionKey, GASAttributeId attributeId, long oldBaseValueRaw)
+        private bool CanRecordPredictedAttributeChange(GASPredictionKey predictionKey, GASAttributeId attributeId)
+        {
+            if (!predictionKey.IsValid)
+            {
+                return !HasAnyPredictedAttributeChange(attributeId);
+            }
+
+            if (attributeId.Value <= 0)
+            {
+                return false;
+            }
+
+            if (HasPredictedAttributeChangeFromAnotherPrediction(predictionKey, attributeId))
+            {
+                return false;
+            }
+
+            return HasPredictedAttributeChange(predictionKey, attributeId) ||
+                   predictedAttributeChangeCount < Limits.MaxPredictedAttributeChanges;
+        }
+
+        private bool HasPredictedAttributeChange(GASPredictionKey predictionKey, GASAttributeId attributeId)
         {
             for (int i = 0; i < predictedAttributeChangeCount; i++)
             {
                 var change = predictedAttributeChanges[i];
                 if (change.PredictionKey.Equals(predictionKey) && change.AttributeId == attributeId)
                 {
-                    return;
+                    return true;
                 }
             }
 
-            EnsurePredictionCapacity(predictedAttributeChangeCount + 1);
+            return false;
+        }
+
+        private bool HasAnyPredictedAttributeChange(GASAttributeId attributeId)
+        {
+            for (int i = 0; i < predictedAttributeChangeCount; i++)
+            {
+                if (predictedAttributeChanges[i].AttributeId == attributeId)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool HasPredictedAttributeChangeFromAnotherPrediction(
+            GASPredictionKey predictionKey,
+            GASAttributeId attributeId)
+        {
+            for (int i = 0; i < predictedAttributeChangeCount; i++)
+            {
+                var change = predictedAttributeChanges[i];
+                if (!change.PredictionKey.Equals(predictionKey) && change.AttributeId == attributeId)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool RecordPredictedAttributeChange(
+            GASPredictionKey predictionKey,
+            GASAttributeId attributeId,
+            long oldBaseValueRaw)
+        {
+            if (!predictionKey.IsValid || attributeId.Value <= 0)
+            {
+                return false;
+            }
+
+            if (HasPredictedAttributeChange(predictionKey, attributeId))
+            {
+                return true;
+            }
+
+            if (predictedAttributeChangeCount >= Limits.MaxPredictedAttributeChanges ||
+                !EnsurePredictionCapacity(predictedAttributeChangeCount + 1))
+            {
+                return false;
+            }
+
             predictedAttributeChanges[predictedAttributeChangeCount++] = new GASPredictedAttributeChange(predictionKey, attributeId, oldBaseValueRaw);
+            return true;
         }
 
         private void RemovePredictedAttributeChanges(GASPredictionKey predictionKey, bool restore)
@@ -583,12 +935,15 @@ namespace CycloneGames.GameplayAbilities.Core
 
                 if (restore)
                 {
-                    int attrIndex = EnsureAttribute(change.AttributeId);
-                    attributes[attrIndex] = new GASAttributeValueData(
-                        change.AttributeId,
-                        change.OldBaseValueRaw,
-                        EvaluateCurrentValueRaw(change.AttributeId, change.OldBaseValueRaw),
-                        attributes[attrIndex].AggregatorVersion + 1u);
+                    int attrIndex = FindAttributeIndex(change.AttributeId);
+                    if (attrIndex >= 0)
+                    {
+                        attributes[attrIndex] = new GASAttributeValueData(
+                            change.AttributeId,
+                            change.OldBaseValueRaw,
+                            EvaluateCurrentValueRaw(change.AttributeId, change.OldBaseValueRaw),
+                            attributes[attrIndex].AggregatorVersion + 1u);
+                    }
                 }
 
                 int lastIndex = predictedAttributeChangeCount - 1;
@@ -602,28 +957,157 @@ namespace CycloneGames.GameplayAbilities.Core
             }
         }
 
+        private bool PrepareInstantModifierBatch(in GASGameplayEffectSpecData spec)
+        {
+            int additionalAttributes = 0;
+            int additionalPredictionRecords = 0;
+            int end = spec.ModifierStart + spec.ModifierCount;
+            for (int modifierIndex = spec.ModifierStart; modifierIndex < end; modifierIndex++)
+            {
+                var attributeId = spec.Modifiers[modifierIndex].AttributeId;
+                bool firstOccurrence = true;
+                for (int earlierIndex = spec.ModifierStart; earlierIndex < modifierIndex; earlierIndex++)
+                {
+                    if (spec.Modifiers[earlierIndex].AttributeId == attributeId)
+                    {
+                        firstOccurrence = false;
+                        break;
+                    }
+                }
+
+                if (!firstOccurrence)
+                {
+                    continue;
+                }
+
+                if (FindAttributeIndex(attributeId) < 0)
+                {
+                    additionalAttributes++;
+                }
+
+                if (spec.PredictionKey.IsValid &&
+                    !HasPredictedAttributeChange(spec.PredictionKey, attributeId))
+                {
+                    if (HasPredictedAttributeChangeFromAnotherPrediction(spec.PredictionKey, attributeId))
+                    {
+                        return false;
+                    }
+
+                    additionalPredictionRecords++;
+                }
+            }
+
+            if (additionalAttributes > Limits.MaxAttributes - attributeCount ||
+                additionalPredictionRecords > Limits.MaxPredictedAttributeChanges - predictedAttributeChangeCount)
+            {
+                return false;
+            }
+
+            return EnsureAttributeCapacity(attributeCount + additionalAttributes) &&
+                   EnsurePredictionCapacity(predictedAttributeChangeCount + additionalPredictionRecords);
+        }
+
+        private static bool ValidateModifierSlice(
+            GASModifierData[] effectModifiers,
+            int effectModifierStart,
+            int effectModifierCount)
+        {
+            if (effectModifierStart < 0 || effectModifierCount < 0 || effectModifierCount > ushort.MaxValue)
+            {
+                return false;
+            }
+
+            if (effectModifierCount == 0)
+            {
+                return effectModifiers == null
+                    ? effectModifierStart == 0
+                    : effectModifierStart <= effectModifiers.Length;
+            }
+
+            if (effectModifiers == null ||
+                effectModifierStart > effectModifiers.Length ||
+                effectModifierCount > effectModifiers.Length - effectModifierStart)
+            {
+                return false;
+            }
+
+            int end = effectModifierStart + effectModifierCount;
+            for (int i = effectModifierStart; i < end; i++)
+            {
+                if (!IsValidModifier(in effectModifiers[i]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool ValidateActiveEffectInput(
+            GASDefinitionId effectDefinitionId,
+            GASEffectDurationPolicy durationPolicy,
+            ushort stackCount,
+            int durationTicks,
+            GASModifierData[] effectModifiers,
+            int effectModifierStart,
+            int effectModifierCount)
+        {
+            return effectDefinitionId.Value > 0 &&
+                   durationPolicy != GASEffectDurationPolicy.Instant &&
+                   IsValidDurationPolicy(durationPolicy) &&
+                   durationTicks >= 0 &&
+                   (durationPolicy != GASEffectDurationPolicy.Duration || durationTicks > 0) &&
+                   stackCount > 0 &&
+                   ValidateModifierSlice(effectModifiers, effectModifierStart, effectModifierCount);
+        }
+
+        private static bool ValidateEffectSpec(in GASGameplayEffectSpecData spec)
+        {
+            return spec.EffectDefinitionId.Value > 0 &&
+                   IsValidDurationPolicy(spec.DurationPolicy) &&
+                   spec.DurationTicks >= 0 &&
+                   (spec.DurationPolicy != GASEffectDurationPolicy.Duration || spec.DurationTicks > 0) &&
+                   spec.StackCount > 0 &&
+                   ValidateModifierSlice(spec.Modifiers, spec.ModifierStart, spec.ModifierCount);
+        }
+
+        private static bool IsValidModifier(in GASModifierData modifier)
+        {
+            return modifier.AttributeId.Value > 0 &&
+                   (byte)modifier.Op <= (byte)GASModifierOp.Override &&
+                   GASModifierEvaluationChannels.IsValid(modifier.EvaluationChannel);
+        }
+
+        private static bool IsValidDurationPolicy(GASEffectDurationPolicy policy)
+        {
+            return (byte)policy <= (byte)GASEffectDurationPolicy.Duration;
+        }
+
+        private static bool IsValidInstancingPolicy(GASInstancingPolicy policy)
+        {
+            return (byte)policy <= (byte)GASInstancingPolicy.InstancedPerExecution;
+        }
+
         /// <summary>
         /// Aggregates all active duration/infinite modifiers for a given attribute.
-        /// 
-        /// Modifier stacking order (matching UE GAS semantics):
-        /// 1. Accumulate all Add modifiers (scaled by stack count).
-        /// 2. Accumulate all Multiply/Division modifiers as a single multiplicative factor.
-        /// 3. If any Override modifier is present, it wins — all other modifiers are ignored
-        ///    and the attribute's current value is set to the last Override's magnitude.
-        /// 4. Otherwise: (BaseValue + ΣAdd) × ΠMultiply.
-        /// 
-        /// Stack count scaling: each modifier's magnitude is multiplied by its parent
-        /// active effect's StackCount before being applied. This is why Add uses
-        /// magnitude * stackCount but Multiply/Division use the raw magnitude
-        /// (they compound multiplicatively across stacks).
+        /// Evaluation channels are processed from Channel0 to Channel9. Each channel
+        /// receives the value produced by the previous channel, so projects can express
+        /// layered modifier domains without hard-coded gameplay branches.
         /// </summary>
         private long EvaluateCurrentValueRaw(GASAttributeId attributeId, long baseValueRaw)
         {
-            var add = FPInt64.Zero;
-            var multiply = FPInt64.OneValue;
-            var overrideValue = FPInt64.Zero;
-            bool hasOverride = false;
+#if DEBUG
+            GASCoreEvaluationProbe.Evaluations++;
+            GASCoreEvaluationProbe.ChannelPasses++;
+#endif
+            Span<GASModifierAggregation.Accumulator> accumulators =
+                stackalloc GASModifierAggregation.Accumulator[GASModifierEvaluationChannels.MAX_CHANNEL_COUNT];
+            for (int c = 0; c < accumulators.Length; c++)
+            {
+                accumulators[c].Reset();
+            }
 
+            bool unrealBiasSum = AggregationMode == GASModifierAggregationMode.UnrealBiasSum;
             for (int i = 0; i < activeEffectCount; i++)
             {
                 var effect = activeEffects[i];
@@ -632,43 +1116,50 @@ namespace CycloneGames.GameplayAbilities.Core
                 for (int m = start; m < end; m++)
                 {
                     var modifier = modifiers[m];
+#if DEBUG
+                    GASCoreEvaluationProbe.ModifierVisits++;
+#endif
                     if (modifier.AttributeId != attributeId)
                     {
                         continue;
                     }
 
-                    var magnitude = FPInt64.FromRaw(modifier.MagnitudeRaw) * FPInt64.FromInt(effect.StackCount);
-                    switch (modifier.Op)
+                    int channelIndex = (int)modifier.EvaluationChannel;
+                    if ((uint)channelIndex >= (uint)accumulators.Length)
                     {
-                        case GASModifierOp.Add:
-                            add += magnitude;
-                            break;
-                        case GASModifierOp.Multiply:
-                            multiply *= FPInt64.FromRaw(modifier.MagnitudeRaw);
-                            break;
-                        case GASModifierOp.Division:
-                            if (modifier.MagnitudeRaw != 0)
-                            {
-                                multiply /= FPInt64.FromRaw(modifier.MagnitudeRaw);
-                            }
-                            break;
-                        case GASModifierOp.Override:
-                            hasOverride = true;
-                            overrideValue = FPInt64.FromRaw(modifier.MagnitudeRaw);
-                            break;
+                        continue;
                     }
+
+                    GASModifierAggregation.Accumulate(
+                        ref accumulators[channelIndex],
+                        modifier.Op,
+                        modifier.MagnitudeRaw,
+                        effect.StackCount,
+                        effect.StackMagnitudePolicy,
+                        unrealBiasSum);
                 }
             }
 
-            var baseValue = FPInt64.FromRaw(baseValueRaw);
-            return (hasOverride ? overrideValue : (baseValue + add) * multiply).RawValue;
+            long valueRaw = baseValueRaw;
+            bool overflowed = false;
+            for (int c = 0; c < accumulators.Length; c++)
+            {
+                valueRaw = GASModifierAggregation.Fold(ref accumulators[c], valueRaw, unrealBiasSum);
+                overflowed |= accumulators[c].Overflowed;
+            }
+
+            if (overflowed)
+            {
+                OverflowCount++;
+            }
+
+            return valueRaw;
         }
 
         /// <summary>
         /// Applies a single modifier to a base value for instant effects.
         /// Division by zero is guarded: when the modifier magnitude is near zero,
         /// the operation is silently skipped, returning the unmodified base value.
-        /// This matches UE GAS behavior where a 0-magnitude Division modifier is a no-op.
         /// </summary>
         private static long ApplyModifierToBaseRaw(long baseValueRaw, GASModifierData modifier)
         {
@@ -771,9 +1262,55 @@ namespace CycloneGames.GameplayAbilities.Core
                         effect.StartTick,
                         effect.DurationTicks,
                         effect.ModifierStartIndex - (uint)length,
-                        effect.ModifierCount);
+                        effect.ModifierCount,
+                        effect.StackMagnitudePolicy);
                 }
             }
+        }
+
+        private bool TryAllocateSpecHandle(out GASSpecHandle handle)
+        {
+            int candidate = nextSpecHandle > 0 ? nextSpecHandle : 1;
+            for (int attempt = 0; attempt <= abilitySpecCount; attempt++)
+            {
+                var proposed = new GASSpecHandle(candidate);
+                if (FindAbilitySpecIndex(proposed) < 0)
+                {
+                    handle = proposed;
+                    nextSpecHandle = AdvancePositiveHandle(candidate);
+                    return true;
+                }
+
+                candidate = AdvancePositiveHandle(candidate);
+            }
+
+            handle = default;
+            return false;
+        }
+
+        private bool TryAllocateEffectHandle(out GASActiveEffectHandle handle)
+        {
+            int candidate = nextEffectHandle > 0 ? nextEffectHandle : 1;
+            for (int attempt = 0; attempt <= activeEffectCount; attempt++)
+            {
+                var proposed = new GASActiveEffectHandle(candidate);
+                if (FindActiveEffectIndex(proposed) < 0)
+                {
+                    handle = proposed;
+                    nextEffectHandle = AdvancePositiveHandle(candidate);
+                    return true;
+                }
+
+                candidate = AdvancePositiveHandle(candidate);
+            }
+
+            handle = default;
+            return false;
+        }
+
+        private static int AdvancePositiveHandle(int current)
+        {
+            return current == int.MaxValue ? 1 : current + 1;
         }
 
         private int FindAbilitySpecIndex(GASSpecHandle handle)
@@ -815,54 +1352,60 @@ namespace CycloneGames.GameplayAbilities.Core
             return -1;
         }
 
-        private void EnsureAbilityCapacity(int capacity)
+        private bool EnsureAbilityCapacity(int capacity)
         {
-            if (abilitySpecs.Length >= capacity)
-            {
-                return;
-            }
-
-            Array.Resize(ref abilitySpecs, abilitySpecs.Length * 2 >= capacity ? abilitySpecs.Length * 2 : capacity);
+            return EnsureArrayCapacity(ref abilitySpecs, capacity, Limits.MaxAbilities);
         }
 
-        private void EnsureAttributeCapacity(int capacity)
+        private bool EnsureAttributeCapacity(int capacity)
         {
-            if (attributes.Length >= capacity)
-            {
-                return;
-            }
-
-            Array.Resize(ref attributes, attributes.Length * 2 >= capacity ? attributes.Length * 2 : capacity);
+            return EnsureArrayCapacity(ref attributes, capacity, Limits.MaxAttributes);
         }
 
-        private void EnsureActiveEffectCapacity(int capacity)
+        private bool EnsureActiveEffectCapacity(int capacity)
         {
-            if (activeEffects.Length >= capacity)
-            {
-                return;
-            }
-
-            Array.Resize(ref activeEffects, activeEffects.Length * 2 >= capacity ? activeEffects.Length * 2 : capacity);
+            return EnsureArrayCapacity(ref activeEffects, capacity, Limits.MaxActiveEffects);
         }
 
-        private void EnsureModifierCapacity(int capacity)
+        private bool EnsureModifierCapacity(int capacity)
         {
-            if (modifiers.Length >= capacity)
-            {
-                return;
-            }
-
-            Array.Resize(ref modifiers, modifiers.Length * 2 >= capacity ? modifiers.Length * 2 : capacity);
+            return EnsureArrayCapacity(ref modifiers, capacity, Limits.MaxModifiers);
         }
 
-        private void EnsurePredictionCapacity(int capacity)
+        private bool EnsurePredictionCapacity(int capacity)
         {
-            if (predictedAttributeChanges.Length >= capacity)
+            return EnsureArrayCapacity(
+                ref predictedAttributeChanges,
+                capacity,
+                Limits.MaxPredictedAttributeChanges);
+        }
+
+        private static bool EnsureArrayCapacity<T>(ref T[] array, int capacity, int maximum)
+        {
+            if (capacity < 0 || capacity > maximum)
             {
-                return;
+                return false;
             }
 
-            Array.Resize(ref predictedAttributeChanges, predictedAttributeChanges.Length * 2 >= capacity ? predictedAttributeChanges.Length * 2 : capacity);
+            if (array.Length >= capacity)
+            {
+                return true;
+            }
+
+            long doubled = (long)array.Length * 2L;
+            int newCapacity = (int)Math.Min(maximum, Math.Max(capacity, doubled));
+            Array.Resize(ref array, newCapacity);
+            return true;
+        }
+
+        private static int ClampInitialCapacity(int requested, int maximum)
+        {
+            return Math.Min(maximum, Math.Max(1, requested));
+        }
+
+        private static bool ExceedsLimit(int requested, int maximum)
+        {
+            return requested > maximum;
         }
 
         private static uint HashInt(uint hash, int value)
@@ -879,4 +1422,23 @@ namespace CycloneGames.GameplayAbilities.Core
             return HashInt(hash, unchecked((int)(value >> 32)));
         }
     }
+
+#if DEBUG
+    /// <summary>
+    /// Editor-only counters for the performance harness. Compiled out of player builds.
+    /// </summary>
+    internal static class GASCoreEvaluationProbe
+    {
+        internal static long Evaluations;
+        internal static long ChannelPasses;
+        internal static long ModifierVisits;
+
+        internal static void Reset()
+        {
+            Evaluations = 0;
+            ChannelPasses = 0;
+            ModifierVisits = 0;
+        }
+    }
+#endif
 }

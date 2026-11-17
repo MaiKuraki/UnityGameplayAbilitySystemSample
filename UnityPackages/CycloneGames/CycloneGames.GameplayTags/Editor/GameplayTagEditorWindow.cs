@@ -1,6 +1,16 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
 using UnityEditor;
 using UnityEditor.IMGUI.Controls;
 using UnityEngine;
+
+#if UNITY_6000_2_OR_NEWER
+using TreeViewState = UnityEditor.IMGUI.Controls.TreeViewState<int>;
+#else
+using TreeViewState = UnityEditor.IMGUI.Controls.TreeViewState;
+#endif
+
 using CycloneGames.GameplayTags.Core;
 
 namespace CycloneGames.GameplayTags.Unity.Editor
@@ -12,16 +22,22 @@ namespace CycloneGames.GameplayTags.Unity.Editor
         private const float MenuBarHeight = 20f;
         private const float ToolbarSpacing = 4f;
         private const float StatusBarHeight = 18f;
+        private const float DetailsPanelMinWindowWidth = 760f;
+        private const float DetailsPanelWidth = 300f;
+        private const float DetailsPanelGap = 4f;
         private static readonly string[] StatStrs = new string[3];
 
         private ManagerTreeView _treeView;
         private TreeViewState _treeViewState;
+        private GameplayTag _selectedTag;
+        private Vector2 _detailsScrollPosition;
         private int _cachedTagCount;
         private double _nextStatsRefresh;
         private string _cachedTagCountStr;
         private string _cachedStatusStr;
         private int _previousTagCount;
         private bool _isRefreshing;
+        private int _treeChanged;
 
         [MenuItem("Tools/CycloneGames/GameplayTags/Gameplay Tag Manager")]
         public static void ShowWindow()
@@ -33,21 +49,47 @@ namespace CycloneGames.GameplayTags.Unity.Editor
         private void OnEnable()
         {
             _treeViewState = new TreeViewState();
-            _treeView = new ManagerTreeView(_treeViewState);
-            _cachedTagCount = GameplayTagManager.GetAllTags().Length;
+            _treeView = new ManagerTreeView(_treeViewState, OnTagSelected);
+            _cachedTagCount = GameplayTagManager.TagCount;
             _previousTagCount = _cachedTagCount;
             UpdateCachedStrings();
-            GameplayTagManager.OnGameplayTagTreeChanged += OnTreeChanged;
+            BindTreeChanged();
+            EditorApplication.update += ProcessTreeChange;
         }
 
         private void OnDisable()
         {
-            GameplayTagManager.OnGameplayTagTreeChanged -= OnTreeChanged;
+            GameplayTagManager.TreeChanged -= OnTreeChanged;
+            EditorApplication.update -= ProcessTreeChange;
+        }
+
+        internal static void RebindOpenWindows()
+        {
+            GameplayTagEditorWindow[] windows = Resources.FindObjectsOfTypeAll<GameplayTagEditorWindow>();
+            for (int i = 0; i < windows.Length; i++)
+            {
+                windows[i].BindTreeChanged();
+                Interlocked.Exchange(ref windows[i]._treeChanged, 1);
+            }
+        }
+
+        private void BindTreeChanged()
+        {
+            GameplayTagManager.TreeChanged -= OnTreeChanged;
+            GameplayTagManager.TreeChanged += OnTreeChanged;
         }
 
         private void OnTreeChanged()
         {
-            _cachedTagCount = GameplayTagManager.GetAllTags().Length;
+            Interlocked.Exchange(ref _treeChanged, 1);
+        }
+
+        private void ProcessTreeChange()
+        {
+            if (Interlocked.Exchange(ref _treeChanged, 0) == 0)
+                return;
+            _cachedTagCount = GameplayTagManager.TagCount;
+            RefreshSelectedTag();
             _treeView?.Reload();
             UpdateCachedStrings();
             Repaint();
@@ -66,10 +108,26 @@ namespace CycloneGames.GameplayTags.Unity.Editor
 
             if (_treeView == null) return;
 
-            Rect treeRect = EditorGUILayout.GetControlRect(false, 0, GUILayout.ExpandHeight(true));
-            treeRect = new Rect(treeRect.x, treeRect.y, position.width, position.height - MenuBarHeight - StatusBarHeight);
+            Rect contentRect = EditorGUILayout.GetControlRect(false, 0, GUILayout.ExpandHeight(true));
+            contentRect = new Rect(0, contentRect.y, position.width, position.height - MenuBarHeight - StatusBarHeight);
 
-            _treeView.OnGUI(treeRect);
+            if (position.width >= DetailsPanelMinWindowWidth)
+            {
+                float detailsWidth = Mathf.Min(DetailsPanelWidth, position.width * 0.38f);
+                Rect treeRect = contentRect;
+                treeRect.width -= detailsWidth + DetailsPanelGap;
+
+                Rect detailsRect = contentRect;
+                detailsRect.x = treeRect.xMax + DetailsPanelGap;
+                detailsRect.width = detailsWidth;
+
+                _treeView.OnGUI(treeRect);
+                DrawDetailsPanel(detailsRect);
+            }
+            else
+            {
+                _treeView.OnGUI(contentRect);
+            }
 
             DrawStatusBar();
 
@@ -169,7 +227,7 @@ namespace CycloneGames.GameplayTags.Unity.Editor
             GUILayout.FlexibleSpace();
             if (_cachedTagCount != _previousTagCount)
             {
-                EditorGUILayout.LabelField($"Δ {(_cachedTagCount - _previousTagCount):+0;-#}", EditorStyles.centeredGreyMiniLabel, GUILayout.Width(40f));
+                EditorGUILayout.LabelField($"Delta {(_cachedTagCount - _previousTagCount):+0;-#}", EditorStyles.centeredGreyMiniLabel, GUILayout.Width(70f));
                 _previousTagCount = _cachedTagCount;
             }
             EditorGUILayout.EndHorizontal();
@@ -180,15 +238,126 @@ namespace CycloneGames.GameplayTags.Unity.Editor
             if (_isRefreshing) return;
 
             _isRefreshing = true;
-            UpdateCachedStrings();
+            try
+            {
+                UpdateCachedStrings();
+                GameplayTagManager.Reload();
+                _treeView?.Reload();
+                UpdateCachedStrings();
+                _nextStatsRefresh = EditorApplication.timeSinceStartup + 0.1d;
+            }
+            finally
+            {
+                _isRefreshing = false;
+            }
+        }
 
-            GameplayTagManager.ReloadTags();
-            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
-            _treeView?.Reload();
+        private void OnTagSelected(GameplayTag tag)
+        {
+            _selectedTag = tag;
+            _detailsScrollPosition = Vector2.zero;
+            Repaint();
+        }
 
-            _isRefreshing = false;
-            UpdateCachedStrings();
-            _nextStatsRefresh = EditorApplication.timeSinceStartup + 0.1d;
+        private void RefreshSelectedTag()
+        {
+            if (_selectedTag.IsNone)
+            {
+                _selectedTag = GameplayTag.None;
+                return;
+            }
+
+            string selectedTagName = _selectedTag.Name;
+            _selectedTag = GameplayTagManager.Request(selectedTagName, false);
+        }
+
+        private void DrawDetailsPanel(Rect rect)
+        {
+            GUI.Box(rect, GUIContent.none, EditorStyles.helpBox);
+
+            Rect innerRect = new Rect(rect.x + 8f, rect.y + 8f, rect.width - 16f, rect.height - 16f);
+            GUILayout.BeginArea(innerRect);
+            _detailsScrollPosition = EditorGUILayout.BeginScrollView(_detailsScrollPosition);
+
+            if (!_selectedTag.IsValid)
+            {
+                EditorGUILayout.LabelField("Tag Details", EditorStyles.boldLabel);
+                EditorGUILayout.HelpBox("Select a gameplay tag to inspect its stable ID, hierarchy, source files, and editor metadata.", MessageType.Info);
+                EditorGUILayout.LabelField("Manifest", $"0x{GameplayTagManager.ManifestHash:X16}");
+                EditorGUILayout.EndScrollView();
+                GUILayout.EndArea();
+                return;
+            }
+
+            EditorGUILayout.LabelField(_selectedTag.Label, EditorStyles.boldLabel);
+            DrawSelectableField("Name", _selectedTag.Name);
+            DrawSelectableField("Stable ID", $"0x{_selectedTag.StableId:X16}");
+            EditorGUILayout.LabelField("Runtime Index", _selectedTag.RuntimeIndex.ToString());
+            EditorGUILayout.LabelField("Manifest", $"0x{GameplayTagManager.ManifestHash:X16}");
+            EditorGUILayout.LabelField("Flags", _selectedTag.Flags.ToString());
+            EditorGUILayout.LabelField("Leaf", _selectedTag.IsLeaf ? "Yes" : "No");
+
+            EditorGUILayout.Space(6f);
+            EditorGUILayout.LabelField("Description", EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(string.IsNullOrEmpty(_selectedTag.Description) ? "No description." : _selectedTag.Description, MessageType.None);
+
+            EditorGUILayout.Space(6f);
+            EditorGUILayout.LabelField("Hierarchy", EditorStyles.boldLabel);
+            IReadOnlyList<IGameplayTagSource> sources = GameplayTagManager.GetTagSources(_selectedTag);
+
+            EditorGUILayout.Space(6f);
+            EditorGUILayout.LabelField("Sources", EditorStyles.boldLabel);
+            if (sources.Count == 0)
+            {
+                EditorGUILayout.LabelField("No source registered.");
+            }
+            else
+            {
+                for (int i = 0; i < sources.Count; i++)
+                {
+                    IGameplayTagSource source = sources[i];
+                    string access = source is IDeleteTagHandler ? "Editable" : "Read-only";
+                    EditorGUILayout.LabelField(source.Name, access);
+                }
+            }
+
+            EditorGUILayout.Space(8f);
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Copy Name"))
+            {
+                EditorGUIUtility.systemCopyBuffer = _selectedTag.Name;
+            }
+
+            if (GUILayout.Button("Copy Stable ID"))
+            {
+                EditorGUIUtility.systemCopyBuffer = $"0x{_selectedTag.StableId:X16}";
+            }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.EndScrollView();
+            GUILayout.EndArea();
+        }
+
+        private static void DrawSelectableField(string label, string value)
+        {
+            EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+            EditorGUILayout.SelectableLabel(value ?? string.Empty, EditorStyles.textField, GUILayout.Height(EditorGUIUtility.singleLineHeight));
+        }
+
+        private static void DrawTagSpan(string label, ReadOnlySpan<GameplayTag> tags)
+        {
+            if (tags.Length == 0)
+            {
+                EditorGUILayout.LabelField(label, "None");
+                return;
+            }
+
+            EditorGUILayout.LabelField(label, $"{tags.Length}");
+            for (int i = 0; i < tags.Length; i++)
+            {
+                GameplayTag tag = tags[i];
+                EditorGUILayout.LabelField("  " + (tag.IsNone ? "<None>" : tag.Name));
+            }
         }
 
         private void HandleKeyboardShortcuts()
@@ -216,8 +385,11 @@ namespace CycloneGames.GameplayTags.Unity.Editor
 
         private class ManagerTreeView : GameplayTagTreeViewBase
         {
-            public ManagerTreeView(TreeViewState state) : base(state)
+            private readonly System.Action<GameplayTag> _selectionChanged;
+
+            public ManagerTreeView(TreeViewState state, System.Action<GameplayTag> selectionChanged) : base(state)
             {
+                _selectionChanged = selectionChanged;
             }
 
             protected override void RowGUI(RowGUIArgs args)
@@ -228,6 +400,18 @@ namespace CycloneGames.GameplayTags.Unity.Editor
 
                 if (args.item is GameplayTagTreeViewItem item)
                     DoTagRowGUI(rect, item);
+            }
+
+            protected override void SelectionChanged(IList<int> selectedIds)
+            {
+                if (selectedIds.Count == 0)
+                {
+                    _selectionChanged?.Invoke(GameplayTag.None);
+                    return;
+                }
+
+                GameplayTagTreeViewItem item = FindItem(selectedIds[0]);
+                _selectionChanged?.Invoke(item?.Tag ?? GameplayTag.None);
             }
         }
     }

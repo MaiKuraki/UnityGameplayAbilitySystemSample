@@ -1,13 +1,34 @@
+using System;
 using UnityEditor;
 using UnityEngine;
+using CycloneGames.Compat;
 
 namespace CycloneGames.GameplayFramework.Runtime.Editor
 {
+    internal static class CameraDebugSampling
+    {
+        public static float GetElapsedSeconds(double previousTime, double currentTime)
+        {
+            if (double.IsNaN(previousTime) ||
+                double.IsInfinity(previousTime) ||
+                double.IsNaN(currentTime) ||
+                double.IsInfinity(currentTime) ||
+                currentTime <= previousTime)
+            {
+                return 0f;
+            }
+
+            double elapsed = currentTime - previousTime;
+            return elapsed >= float.MaxValue ? float.MaxValue : (float)elapsed;
+        }
+    }
+
     public class CameraDebugWindow : EditorWindow
     {
         private const int DefaultCapacity = 600;
         private const int MinCapacity = 120;
         private const int MaxCapacity = 2048;
+        private const double RuntimeStatePollInterval = 1d / 30d;
 
         private static readonly Color editableFoldoutColor = new Color(0.50f, 0.58f, 0.38f);
         private static readonly Color readOnlyFoldoutColor = new Color(0.30f, 0.50f, 0.70f);
@@ -53,7 +74,8 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
         private float angularSpeedWarning = 180f;
         private float angularSpeedCritical = 320f;
 
-        private float nextSampleTime;
+        private double nextSampleTime;
+        private double previousSampleTime;
 
         private float[] timeBuffer;
         private float[] fovBuffer;
@@ -66,12 +88,18 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
         private int sampleCount;
 
         private bool hasPreviousPose;
+        private bool hasPreviousSampleTime;
         private CameraPose previousPose;
         private bool hasPreviousBlendAlpha;
         private float previousBlendAlpha;
         private float blendStallDuration;
         private float latestFovDelta;
         private Vector2 scrollPosition;
+        private bool wasPlaying;
+        private bool hasRuntimeStateFingerprint;
+        private int runtimeStateFingerprint;
+        private int observedTargetManagerInstanceId;
+        private double nextRuntimeStatePollTime;
 
         private GUIStyle foldoutLabelStyle;
         private bool stylesInitialized;
@@ -93,6 +121,10 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
         {
             EnsureBuffers();
             EnsureStyles();
+            wasPlaying = Application.isPlaying;
+            hasRuntimeStateFingerprint = false;
+            observedTargetManagerInstanceId = GetTargetManagerInstanceId();
+            nextRuntimeStatePollTime = 0d;
             EditorApplication.update += OnEditorUpdate;
         }
 
@@ -103,9 +135,22 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
 
         private void OnEditorUpdate()
         {
-            if (!Application.isPlaying)
+            bool isPlaying = Application.isPlaying;
+            if (isPlaying != wasPlaying)
             {
+                wasPlaying = isPlaying;
+                hasRuntimeStateFingerprint = false;
+                nextRuntimeStatePollTime = 0d;
+                nextSampleTime = 0d;
+                if (isPlaying)
+                {
+                    ResetSamplingState();
+                }
                 Repaint();
+            }
+
+            if (!isPlaying)
+            {
                 return;
             }
 
@@ -114,27 +159,47 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
                 TryAutoBindFromSelection();
             }
 
+            int targetManagerInstanceId = GetTargetManagerInstanceId();
+            if (targetManagerInstanceId != observedTargetManagerInstanceId)
+            {
+                observedTargetManagerInstanceId = targetManagerInstanceId;
+                hasRuntimeStateFingerprint = false;
+                nextRuntimeStatePollTime = 0d;
+                ResetSamplingState();
+                Repaint();
+            }
+
             if (targetManager == null || samplingMode == SamplingMode.Off)
             {
-                Repaint();
+                RepaintIfRuntimeStateChanged();
                 return;
             }
 
-            float interval = 1f / Mathf.Max(1f, sampleRateHz);
-            if (Time.realtimeSinceStartup < nextSampleTime)
+            double currentTime = Time.realtimeSinceStartupAsDouble;
+            double interval = 1d / Mathf.Max(1f, sampleRateHz);
+            if (currentTime < nextSampleTime)
             {
+                return;
+            }
+
+            nextSampleTime = currentTime + interval;
+            float elapsedSeconds = hasPreviousSampleTime
+                ? CameraDebugSampling.GetElapsedSeconds(previousSampleTime, currentTime)
+                : 0f;
+            if (CaptureSample(elapsedSeconds, currentTime))
+            {
+                previousSampleTime = currentTime;
+                hasPreviousSampleTime = true;
                 Repaint();
                 return;
             }
 
-            nextSampleTime = Time.realtimeSinceStartup + interval;
-            CaptureSample(interval);
-            Repaint();
+            RepaintIfRuntimeStateChanged();
         }
 
         private void EnsureBuffers()
         {
-            if (timeBuffer != null && timeBuffer.Length == capacity) return;
+            if (BuffersHaveExpectedCapacity()) return;
 
             timeBuffer = new float[capacity];
             fovBuffer = new float[capacity];
@@ -143,18 +208,51 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
             linearSpeedBuffer = new float[capacity];
             angularSpeedBuffer = new float[capacity];
 
+            ResetSamplingState();
+        }
+
+        private bool BuffersHaveExpectedCapacity()
+        {
+            return timeBuffer != null && timeBuffer.Length == capacity
+                && fovBuffer != null && fovBuffer.Length == capacity
+                && blendAlphaBuffer != null && blendAlphaBuffer.Length == capacity
+                && blendRemainingBuffer != null && blendRemainingBuffer.Length == capacity
+                && linearSpeedBuffer != null && linearSpeedBuffer.Length == capacity
+                && angularSpeedBuffer != null && angularSpeedBuffer.Length == capacity;
+        }
+
+        private void ClearBuffer()
+        {
+            EnsureBuffers();
+
+            Array.Clear(timeBuffer, 0, timeBuffer.Length);
+            Array.Clear(fovBuffer, 0, fovBuffer.Length);
+            Array.Clear(blendAlphaBuffer, 0, blendAlphaBuffer.Length);
+            Array.Clear(blendRemainingBuffer, 0, blendRemainingBuffer.Length);
+            Array.Clear(linearSpeedBuffer, 0, linearSpeedBuffer.Length);
+            Array.Clear(angularSpeedBuffer, 0, angularSpeedBuffer.Length);
+
+            ResetSamplingState();
+        }
+
+        private void ResetSamplingState()
+        {
+            nextSampleTime = 0d;
+            previousSampleTime = 0d;
             writeIndex = 0;
             sampleCount = 0;
             hasPreviousPose = false;
+            hasPreviousSampleTime = false;
+            previousPose = default;
             hasPreviousBlendAlpha = false;
             previousBlendAlpha = 0f;
             blendStallDuration = 0f;
             latestFovDelta = 0f;
         }
 
-        private void CaptureSample(float deltaTime)
+        private bool CaptureSample(float deltaTime, double sampleTime)
         {
-            if (!targetManager.HasCurrentPose) return;
+            if (!targetManager.HasCurrentPose) return false;
 
             CameraPose pose = targetManager.CurrentPose;
             CameraBlendState blend = targetManager.BlendState;
@@ -162,11 +260,10 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
             float linearSpeed = 0f;
             float angularSpeed = 0f;
             float fovDelta = 0f;
-            if (samplingMode == SamplingMode.Full && hasPreviousPose)
+            if (samplingMode == SamplingMode.Full && hasPreviousPose && deltaTime > 0f)
             {
-                float dt = Mathf.Max(0.0001f, deltaTime);
-                linearSpeed = Vector3.Distance(previousPose.Position, pose.Position) / dt;
-                angularSpeed = Quaternion.Angle(previousPose.Rotation, pose.Rotation) / dt;
+                linearSpeed = Vector3.Distance(previousPose.Position, pose.Position) / deltaTime;
+                angularSpeed = Quaternion.Angle(previousPose.Rotation, pose.Rotation) / deltaTime;
             }
 
             if (hasPreviousPose)
@@ -174,7 +271,7 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
                 fovDelta = Mathf.Abs(pose.Fov - previousPose.Fov);
             }
 
-            timeBuffer[writeIndex] = Time.realtimeSinceStartup;
+            timeBuffer[writeIndex] = (float)sampleTime;
             fovBuffer[writeIndex] = pose.Fov;
             blendAlphaBuffer[writeIndex] = blend.NormalizedTime;
             blendRemainingBuffer[writeIndex] = blend.Remaining;
@@ -211,6 +308,55 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
                 previousBlendAlpha = 0f;
                 blendStallDuration = 0f;
             }
+
+            return true;
+        }
+
+        private void RepaintIfRuntimeStateChanged()
+        {
+            double currentTime = EditorApplication.timeSinceStartup;
+            if (currentTime < nextRuntimeStatePollTime) return;
+            nextRuntimeStatePollTime = currentTime + RuntimeStatePollInterval;
+
+            int fingerprint = CalculateRuntimeStateFingerprint(targetManager);
+            if (hasRuntimeStateFingerprint && fingerprint == runtimeStateFingerprint) return;
+
+            runtimeStateFingerprint = fingerprint;
+            hasRuntimeStateFingerprint = true;
+            Repaint();
+        }
+
+        private int GetTargetManagerInstanceId()
+        {
+            return targetManager != null ? unchecked((int)UnityObjectId.Of(targetManager)) : 0;
+        }
+
+        private static int CalculateRuntimeStateFingerprint(CameraManager manager)
+        {
+            if (manager == null) return 0;
+
+            unchecked
+            {
+                int hash = unchecked((int)UnityObjectId.Of(manager));
+                hash = (hash * 31) + (manager.IsInitialized ? 1 : 0);
+                hash = (hash * 31) + (manager.CameraStateDirty ? 1 : 0);
+
+                bool hasCurrentPose = manager.HasCurrentPose;
+                hash = (hash * 31) + (hasCurrentPose ? 1 : 0);
+                if (hasCurrentPose)
+                {
+                    CameraPose pose = manager.CurrentPose;
+                    hash = (hash * 31) + pose.Position.GetHashCode();
+                    hash = (hash * 31) + pose.Rotation.GetHashCode();
+                    hash = (hash * 31) + pose.Fov.GetHashCode();
+                }
+
+                CameraBlendState blendState = manager.BlendState;
+                hash = (hash * 31) + (blendState.IsActive ? 1 : 0);
+                hash = (hash * 31) + blendState.Duration.GetHashCode();
+                hash = (hash * 31) + blendState.Elapsed.GetHashCode();
+                return hash;
+            }
         }
 
         private int GetBufferIndex(int logicalIndex)
@@ -244,7 +390,7 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
                 EditorGUILayout.HelpBox("No CameraManager is currently bound.", MessageType.Warning);
                 if (GUILayout.Button("Find First CameraManager In Scene"))
                 {
-                    targetManager = FindFirstObjectByType<CameraManager>();
+                    targetManager = FindAnyObjectByType<CameraManager>();
                 }
                 EditorGUILayout.EndScrollView();
                 return;
@@ -282,8 +428,21 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
         protected virtual void DrawEditableSamplingSettings()
         {
             EditorGUILayout.LabelField("Sampling", EditorStyles.boldLabel);
-            samplingMode = (SamplingMode)EditorGUILayout.EnumPopup("Mode", samplingMode);
-            sampleRateHz = EditorGUILayout.Slider("Sample Rate (Hz)", sampleRateHz, 5f, 120f);
+            SamplingMode nextSamplingMode =
+                (SamplingMode)EditorGUILayout.EnumPopup("Mode", samplingMode);
+            if (nextSamplingMode != samplingMode)
+            {
+                samplingMode = nextSamplingMode;
+                ResetSamplingState();
+            }
+
+            float nextSampleRateHz =
+                EditorGUILayout.Slider("Sample Rate (Hz)", sampleRateHz, 5f, 120f);
+            if (!Mathf.Approximately(nextSampleRateHz, sampleRateHz))
+            {
+                sampleRateHz = nextSampleRateHz;
+                nextSampleTime = 0d;
+            }
 
             int newCapacity = EditorGUILayout.IntSlider("Buffer Capacity", capacity, MinCapacity, MaxCapacity);
             if (newCapacity != capacity)
@@ -300,11 +459,11 @@ namespace CycloneGames.GameplayFramework.Runtime.Editor
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button("Rebind Scene CameraManager"))
             {
-                targetManager = FindFirstObjectByType<CameraManager>();
+                targetManager = FindAnyObjectByType<CameraManager>();
             }
             if (GUILayout.Button("Clear Buffer"))
             {
-                EnsureBuffers();
+                ClearBuffer();
             }
             EditorGUILayout.EndHorizontal();
         }

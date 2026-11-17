@@ -12,8 +12,16 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e0ed2f4a7fe492f449faba41c737e4b7, type: 3}
   m_Name: UIWindowTitle
   m_EditorClassIdentifier: 
+  windowId: UIWindowTitle
   source: 0
   windowPrefab: {fileID: 7826224127917042793, guid: 51f5a6da99c72eb4a992bf87dd1e450b,
     type: 3}
+  prefabAssetRef:
+    location: 
+    editorGuid: 
   prefabLocation: 
   layer: {fileID: 11400000, guid: 3bfe720be49edf0479c8d207b282b353, type: 2}
+  priority: 0
+  isSceneBound: 0
+  subCanvasPolicy: 0
+  cullWhenHidden: 0

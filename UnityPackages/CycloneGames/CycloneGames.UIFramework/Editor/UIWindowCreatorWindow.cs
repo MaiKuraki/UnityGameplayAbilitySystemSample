@@ -1,1517 +1,2468 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
+using CycloneGames.IO;
+using CycloneGames.Logging;
+using CycloneGames.UIFramework.Runtime;
 using UnityEditor;
 using UnityEngine;
-using CycloneGames.UIFramework.Runtime;
-using Unio;
-using Unity.Collections;
+using UnityEngine.UI;
 
 namespace CycloneGames.UIFramework.Editor
 {
-    [System.Serializable]
-    public class UIWindowCreatorSettings
+    internal sealed class UIWindowCreatorAssetCommitException : IOException
     {
-        public string scriptFolderPath = "";
-        public string prefabFolderPath = "";
-        public string configFolderPath = "";
-        public string presenterFolderPath = "";
-        public string namespaceName = "";
-        public bool useMVP = false;
-        public int configSourceMode = (int)UIWindowConfiguration.PrefabSource.PrefabReference;
-        public bool autoFillLocationFromPrefabPath = true;
+        public string[] ResidualPaths { get; }
+
+        public UIWindowCreatorAssetCommitException(
+            string message,
+            Exception innerException,
+            params string[] residualPaths)
+            : base(message, innerException)
+        {
+            ResidualPaths = residualPaths ?? Array.Empty<string>();
+        }
     }
 
-    public class UIWindowCreatorWindow : EditorWindow
+    [Serializable]
+    internal sealed class UIWindowCreatorSettings
     {
-        private const string DEFAULT_TEMPLATE_GUID = "37c32b368ca8d4841b923d1b37cf97b9";
-        private const string SETTINGS_FILE_NAME = "UIWindowCreatorSettings.json";
-        private const string PREFS_KEY_SOURCE_MODE = "CycloneGames.UIFramework.UIWindowCreator.SourceMode";
-        private const string PREFS_KEY_AUTOFILL_LOCATION = "CycloneGames.UIFramework.UIWindowCreator.AutoFillLocation";
+        public int schemaVersion = 1;
+        public string scriptFolderPath = string.Empty;
+        public string prefabFolderPath = string.Empty;
+        public string configFolderPath = string.Empty;
+        public string presenterFolderPath = string.Empty;
+        public string namespaceName = string.Empty;
+        public bool useMvp;
+        public int configSourceMode;
+        public bool autoFillLocationFromPrefabPath = true;
+        public string runtimeLocation = string.Empty;
+        public bool hasTemplateSelection;
+        public string templatePrefabPath = string.Empty;
+    }
 
-        private string namespaceName = "";
-        private DefaultAsset scriptFolder;
-        private DefaultAsset soFolder;
-        private DefaultAsset prefabFolder;
-        private DefaultAsset presenterFolder;
-        private UILayerConfiguration selectedLayer;
-        private string windowName = "";
-        private GameObject templatePrefab;
-        private Vector2 scrollPosition;
-        private bool useMVP = false;
-        private UIWindowConfiguration.PrefabSource configSourceMode = UIWindowConfiguration.PrefabSource.PrefabReference;
-        private bool autoFillLocationFromPrefabPath = true;
-        private string settingsPath;
+    public sealed class UIWindowCreatorWindow : EditorWindow
+    {
+        private static readonly LogChannel Log = UIFrameworkEditorLog.Channel;
 
-        private static bool _stylesInitialized = false;
-        private static GUIStyle _headerStyle;
-        private static GUIStyle _sectionStyle;
-        
-        private static readonly GUIContent _headerContent = new GUIContent("UIWindow Creator");
-        private static readonly GUIContent _namespaceLabel = new GUIContent("Namespace (Optional)");
-        private static readonly GUIContent _windowNameLabel = new GUIContent("Window Name");
-        private static readonly GUIContent _scriptPathLabel = new GUIContent("Script Save Path");
-        private static readonly GUIContent _prefabPathLabel = new GUIContent("Prefab Save Path");
-        private static readonly GUIContent _configPathLabel = new GUIContent("Configuration Save Path");
-        private static readonly GUIContent _presenterPathLabel = new GUIContent("Presenter Save Path");
-        private static readonly GUIContent _layerLabel = new GUIContent("UILayer Configuration");
-        private static readonly GUIContent _mvpLabel = new GUIContent("Use MVP Pattern");
-        private static readonly GUIContent _mvpToggleLabel = new GUIContent("Generate MVP Structure");
-        private static readonly GUIContent _templateLabel = new GUIContent("Template Prefab");
-        private static readonly GUIContent _createButtonContent = new GUIContent("Create UIWindow");
-
-        private readonly StringBuilder _pathBuilder = new StringBuilder(256);
-        
-        private readonly System.Collections.Generic.List<string> _validationErrors = new System.Collections.Generic.List<string>(8);
-        private readonly System.Collections.Generic.List<string> _existingFilesList = new System.Collections.Generic.List<string>(8);
-
-        private void InitializeStyles()
+        private enum PipelineStatus
         {
-            if (_stylesInitialized) return;
-            _stylesInitialized = true;
-
-            _headerStyle = new GUIStyle(EditorStyles.boldLabel)
-            {
-                fontSize = 16,
-                alignment = TextAnchor.MiddleCenter
-            };
-
-            _sectionStyle = new GUIStyle(EditorStyles.boldLabel)
-            {
-                fontSize = 12
-            };
+            Ready,
+            NeedsInput,
+            Invalid,
+            Conflict
         }
 
-        [MenuItem("Tools/CycloneGames/UI Framework/UIWindow Creator")]
+        private enum FeedbackKind
+        {
+            None,
+            Success,
+            Pending,
+            Failure
+        }
+
+        private sealed class CreatorSnapshot
+        {
+            public UIWindowCreationRequest Request;
+            public UIWindowCreationPaths Paths;
+            public bool HasPaths;
+            public bool CanCreate;
+            public bool TemplateValid;
+            public PipelineStatus Status;
+            public string ValidationMessage = string.Empty;
+            public string[] ExistingFiles = Array.Empty<string>();
+        }
+
+        internal struct TemplateInspection
+        {
+            public bool IsPrefab;
+            public bool HasRootRectTransform;
+            public bool HasCanvasGroup;
+            public bool HasWindowComponent;
+            public bool HasRootWindowComponent;
+            public int WindowComponentCount;
+            public int MissingScriptCount;
+            public int ObjectCount;
+            public int GraphicCount;
+            public int SelectableCount;
+            public int LayoutGroupCount;
+            public int ContentSizeFitterCount;
+            public int MaskCount;
+            public int CanvasCount;
+            public int TextCount;
+
+            public bool IsValid =>
+                IsPrefab &&
+                HasRootRectTransform &&
+                MissingScriptCount == 0 &&
+                WindowComponentCount <= 1 &&
+                (WindowComponentCount == 0 || HasRootWindowComponent);
+        }
+
+        internal readonly struct RollbackResult
+        {
+            public readonly int AttemptedCount;
+            public readonly string[] Failures;
+            public readonly string[] ResidualPaths;
+
+            public RollbackResult(
+                int attemptedCount,
+                string[] failures,
+                string[] residualPaths)
+            {
+                AttemptedCount = attemptedCount;
+                Failures = failures ?? Array.Empty<string>();
+                ResidualPaths = residualPaths ?? Array.Empty<string>();
+            }
+
+            public bool IsComplete =>
+                (Failures == null || Failures.Length == 0) &&
+                (ResidualPaths == null || ResidualPaths.Length == 0);
+        }
+
+        internal sealed class CreatedAssetRecord
+        {
+            public string AssetPath { get; }
+            public string ExpectedGuid { get; }
+
+            internal CreatedAssetRecord(
+                string assetPath,
+                string expectedGuid)
+            {
+                AssetPath = assetPath ?? string.Empty;
+                ExpectedGuid = expectedGuid ?? string.Empty;
+            }
+
+            internal bool TryVerifyOwnership(
+                out string absolutePath,
+                out bool alreadyAbsent,
+                out string error)
+            {
+                alreadyAbsent = false;
+                if (!UIWindowCreationValidator.TryGetAbsoluteAssetPath(
+                        AssetPath,
+                        out absolutePath,
+                        out error))
+                {
+                    return false;
+                }
+
+                bool assetExists = File.Exists(absolutePath);
+                bool metaExists = File.Exists(absolutePath + ".meta");
+                if (!assetExists && !metaExists)
+                {
+                    if (string.IsNullOrEmpty(ExpectedGuid) ||
+                        string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(ExpectedGuid)))
+                    {
+                        alreadyAbsent = true;
+                        error = string.Empty;
+                        return true;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(ExpectedGuid))
+                {
+                    error = $"Rollback record for '{AssetPath}' has no GUID identity.";
+                    return false;
+                }
+
+                string currentGuid = AssetDatabase.AssetPathToGUID(AssetPath);
+                string resolvedPath = AssetDatabase.GUIDToAssetPath(ExpectedGuid);
+                if (!string.Equals(currentGuid, ExpectedGuid, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(resolvedPath, AssetPath, StringComparison.Ordinal))
+                {
+                    error =
+                        $"Ownership changed for '{AssetPath}'. Expected GUID '{ExpectedGuid}', " +
+                        $"current GUID='{currentGuid}', current path='{resolvedPath}'.";
+                    return false;
+                }
+
+                error = string.Empty;
+                return true;
+            }
+        }
+
+        private const string DefaultTemplateGuid = "37c32b368ca8d4841b923d1b37cf97b9";
+        private const string SettingsFileName = "CycloneGames.UIFramework.WindowCreator.json";
+        private const int MaxSettingsBytes = 1024 * 1024;
+        private const float StatusBadgeWidth = 104f;
+        private const float RequirementBadgeWidth = 72f;
+        private const float BadgeSpacing = 6f;
+        private const float PreviewLabelWidth = 126f;
+
+        private static readonly Color IdentityColor = new Color(0.30f, 0.45f, 0.72f);
+        private static readonly Color OutputColor = new Color(0.25f, 0.57f, 0.50f);
+        private static readonly Color RuntimeColor = new Color(0.50f, 0.40f, 0.70f);
+        private static readonly Color MvpColor = new Color(0.65f, 0.46f, 0.27f);
+        private static readonly Color TemplateColor = new Color(0.38f, 0.55f, 0.39f);
+        private static readonly Color ReviewColor = new Color(0.28f, 0.60f, 0.36f);
+        private static readonly Color ReadyColor = new Color(0.20f, 0.60f, 0.32f);
+        private static readonly Color MissingColor = new Color(0.72f, 0.36f, 0.18f);
+        private static readonly Color InvalidColor = new Color(0.72f, 0.22f, 0.20f);
+        private static readonly Color OptionalColor = new Color(0.42f, 0.42f, 0.42f);
+        private static readonly Color RequiredColor = new Color(0.28f, 0.52f, 0.82f);
+        private static readonly Color PendingColor = new Color(0.72f, 0.52f, 0.17f);
+
+        private static GUIStyle _heroTitleStyle;
+        private static GUIStyle _heroSubtitleStyle;
+        private static GUIStyle _sectionTitleStyle;
+        private static GUIStyle _cardTitleStyle;
+        private static GUIStyle _helpStyle;
+        private static GUIStyle _badgeStyle;
+        private static GUIStyle _previewKeyStyle;
+        private static GUIStyle _previewValueStyle;
+        private static GUIStyle _createTitleStyle;
+        private static GUIStyle _createSubtitleStyle;
+        private static GUIStyle _alertTitleStyle;
+        private static GUIStyle _alertBodyStyle;
+        private static bool _stylesInitialized;
+
+        private readonly List<string> _validationErrors = new List<string>(8);
+        private readonly List<string> _existingFiles = new List<string>(8);
+        private readonly UIWindowTemplateProcessor _templateProcessor = new UIWindowTemplateProcessor();
+
+        private string _windowName = string.Empty;
+        private string _namespaceName = string.Empty;
+        private DefaultAsset _scriptFolder;
+        private DefaultAsset _prefabFolder;
+        private DefaultAsset _configFolder;
+        private DefaultAsset _presenterFolder;
+        private UILayerConfiguration _layer;
+        private GameObject _templatePrefab;
+        private bool _templateSelectionExplicit;
+        private bool _useMvp;
+        private UIWindowConfiguration.PrefabSource _sourceMode =
+            UIWindowConfiguration.PrefabSource.PrefabReference;
+        private bool _autoFillPathLocation = true;
+        private string _runtimeLocation = string.Empty;
+        private bool _showLocationOverride;
+        private Vector2 _scroll;
+        private string _settingsPath;
+        private bool _snapshotDirty = true;
+        private CreatorSnapshot _snapshot;
+        private bool _templateInspectionDirty = true;
+        private TemplateInspection _templateInspection;
+        private FeedbackKind _feedbackKind;
+        private string _feedbackTitle = string.Empty;
+        private string _feedbackMessage = string.Empty;
+
+        [MenuItem("Tools/CycloneGames/UI Framework/Window Creator")]
         public static void ShowWindow()
         {
-            var window = GetWindow<UIWindowCreatorWindow>("UIWindow Creator");
-            window.minSize = new Vector2(500, 700);
+            UIWindowCreatorWindow window = GetWindow<UIWindowCreatorWindow>("UI Window Creator");
+            window.minSize = new Vector2(520f, 680f);
             window.Show();
         }
 
         private void OnEnable()
         {
-            string userSettingsDir = Path.Combine(Application.dataPath, "..", "UserSettings");
-            if (!Directory.Exists(userSettingsDir))
-            {
-                Directory.CreateDirectory(userSettingsDir);
-            }
-            settingsPath = Path.Combine(userSettingsDir, SETTINGS_FILE_NAME);
+            UIWindowAssemblyValidator.InvalidateCache();
+            _settingsPath = Path.GetFullPath(Path.Combine(
+                Application.dataPath,
+                "..",
+                "UserSettings",
+                SettingsFileName));
 
             LoadSettings();
-            LoadEditorPrefsSelection();
-
-            // Try to load default template using GUID (works across different project structures)
-            string templatePath = AssetDatabase.GUIDToAssetPath(DEFAULT_TEMPLATE_GUID);
-            if (!string.IsNullOrEmpty(templatePath))
+            if (!_templateSelectionExplicit)
             {
-                templatePrefab = AssetDatabase.LoadAssetAtPath<GameObject>(templatePath);
+                UseDefaultTemplate(false);
             }
 
-            // If GUID lookup fails, try to find by name in the package
-            if (templatePrefab == null)
-            {
-                string[] guids = AssetDatabase.FindAssets("UIWindow_TEMPLATED t:GameObject");
-                foreach (string guid in guids)
-                {
-                    string path = AssetDatabase.GUIDToAssetPath(guid);
-                    if (path.Contains("CycloneGames.UIFramework") && path.EndsWith("UIWindow_TEMPLATED.prefab"))
-                    {
-                        templatePrefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
-                        if (templatePrefab != null) break;
-                    }
-                }
-            }
+            EditorApplication.projectChanged += OnProjectChanged;
+            UIWindowCreatorPostCompileProcessor.StatusChanged += OnPostCompileStatusChanged;
+            MarkSnapshotDirty();
         }
 
         private void OnDisable()
         {
+            EditorApplication.projectChanged -= OnProjectChanged;
+            UIWindowCreatorPostCompileProcessor.StatusChanged -= OnPostCompileStatusChanged;
             SaveSettings();
-
-            EditorApplication.update -= OnAsyncScriptCheck;
         }
 
-        private void LoadSettings()
+        private void OnProjectChanged()
         {
-            if (File.Exists(settingsPath))
-            {
-                try
-                {
-                    string json = NativeFile.ReadAllText(settingsPath);
-                    UIWindowCreatorSettings settings = JsonUtility.FromJson<UIWindowCreatorSettings>(json);
-
-                    if (settings != null)
-                    {
-                        namespaceName = settings.namespaceName ?? "";
-                        useMVP = settings.useMVP;
-                        configSourceMode = (UIWindowConfiguration.PrefabSource)settings.configSourceMode;
-                        autoFillLocationFromPrefabPath = settings.autoFillLocationFromPrefabPath;
-                        if (!Enum.IsDefined(typeof(UIWindowConfiguration.PrefabSource), configSourceMode))
-                        {
-                            configSourceMode = UIWindowConfiguration.PrefabSource.PrefabReference;
-                        }
-
-                        if (!string.IsNullOrEmpty(settings.scriptFolderPath))
-                        {
-                            scriptFolder = AssetDatabase.LoadAssetAtPath<DefaultAsset>(settings.scriptFolderPath);
-                        }
-                        if (!string.IsNullOrEmpty(settings.prefabFolderPath))
-                        {
-                            prefabFolder = AssetDatabase.LoadAssetAtPath<DefaultAsset>(settings.prefabFolderPath);
-                        }
-                        if (!string.IsNullOrEmpty(settings.configFolderPath))
-                        {
-                            soFolder = AssetDatabase.LoadAssetAtPath<DefaultAsset>(settings.configFolderPath);
-                        }
-                        if (!string.IsNullOrEmpty(settings.presenterFolderPath))
-                        {
-                            presenterFolder = AssetDatabase.LoadAssetAtPath<DefaultAsset>(settings.presenterFolderPath);
-                        }
-                    }
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning($"Failed to load UIWindowCreator settings: {e.Message}");
-                }
-            }
+            UIWindowAssemblyValidator.InvalidateCache();
+            MarkSnapshotDirty();
+            _templateInspectionDirty = true;
+            Repaint();
         }
 
-        private void SaveSettings()
+        private void OnPostCompileStatusChanged()
         {
-            try
-            {
-                UIWindowCreatorSettings settings = new UIWindowCreatorSettings
-                {
-                    namespaceName = namespaceName ?? "",
-                    scriptFolderPath = scriptFolder != null ? AssetDatabase.GetAssetPath(scriptFolder) : "",
-                    prefabFolderPath = prefabFolder != null ? AssetDatabase.GetAssetPath(prefabFolder) : "",
-                    configFolderPath = soFolder != null ? AssetDatabase.GetAssetPath(soFolder) : "",
-                    presenterFolderPath = presenterFolder != null ? AssetDatabase.GetAssetPath(presenterFolder) : "",
-                    useMVP = useMVP,
-                    configSourceMode = (int)configSourceMode,
-                    autoFillLocationFromPrefabPath = autoFillLocationFromPrefabPath
-                };
-
-                string json = JsonUtility.ToJson(settings, true);
-                byte[] bytes = Encoding.UTF8.GetBytes(json);
-                using var nativeBytes = new NativeArray<byte>(bytes, Allocator.Temp);
-                NativeFile.WriteAllBytes(settingsPath, nativeBytes);
-                SaveEditorPrefsSelection();
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning($"Failed to save UIWindowCreator settings: {e.Message}");
-            }
-        }
-
-        private void LoadEditorPrefsSelection()
-        {
-            if (EditorPrefs.HasKey(PREFS_KEY_SOURCE_MODE))
-            {
-                var savedSource = (UIWindowConfiguration.PrefabSource)EditorPrefs.GetInt(
-                    PREFS_KEY_SOURCE_MODE,
-                    (int)UIWindowConfiguration.PrefabSource.PrefabReference);
-                if (Enum.IsDefined(typeof(UIWindowConfiguration.PrefabSource), savedSource))
-                {
-                    configSourceMode = savedSource;
-                }
-            }
-
-            if (EditorPrefs.HasKey(PREFS_KEY_AUTOFILL_LOCATION))
-            {
-                autoFillLocationFromPrefabPath = EditorPrefs.GetBool(PREFS_KEY_AUTOFILL_LOCATION, true);
-            }
-        }
-
-        private void SaveEditorPrefsSelection()
-        {
-            EditorPrefs.SetInt(PREFS_KEY_SOURCE_MODE, (int)configSourceMode);
-            EditorPrefs.SetBool(PREFS_KEY_AUTOFILL_LOCATION, autoFillLocationFromPrefabPath);
+            Repaint();
         }
 
         private void OnGUI()
         {
             InitializeStyles();
-            scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
 
-            // Header
-            EditorGUILayout.Space(10);
-            EditorGUILayout.LabelField(_headerContent, _headerStyle);
-            EditorGUILayout.Space(5);
-            EditorGUILayout.HelpBox("This tool helps you quickly create UIWindow scripts, prefabs, and configurations. Fill in all required fields below.", MessageType.Info);
-            EditorGUILayout.Space(15);
-
-            // Section 1: Basic Information
-            DrawSectionHeader("Basic Information");
-
-            // Namespace input
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("Namespace (Optional)", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("The namespace for the generated UIWindow script. Leave empty if you don't want a namespace. Example: MyGame.UI or MyGame.UI.Windows", MessageType.None);
-            string newNamespace = EditorGUILayout.TextField(namespaceName);
-            if (newNamespace != namespaceName)
-            {
-                namespaceName = newNamespace;
-                SaveSettings();
-            }
-            if (!string.IsNullOrEmpty(namespaceName))
-            {
-                EditorGUILayout.LabelField($"Namespace: {namespaceName}", EditorStyles.miniLabel);
-            }
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(10);
-
-            // Window Name input
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("Window Name", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("The name of the UIWindow class and prefab. Example: UIWindowHUD, HUDWindow, MainMenuWindow", MessageType.None);
-            windowName = EditorGUILayout.TextField(windowName);
-            if (!string.IsNullOrEmpty(windowName))
-            {
-                EditorGUILayout.LabelField($"Class Name: {windowName}", EditorStyles.miniLabel);
-                EditorGUILayout.LabelField($"Prefab Name: {windowName}.prefab", EditorStyles.miniLabel);
-                EditorGUILayout.LabelField($"Config Name: {windowName}_Config.asset", EditorStyles.miniLabel);
-
-                // Check for existing files
-                CheckAndDisplayExistingFiles();
-            }
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(10);
-
-            // Section 2: Paths
-            DrawSectionHeader("Save Paths");
-
-            // Script Folder path
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("Script Save Path", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("Drag and drop a folder where the generated UIWindow script (.cs file) will be saved.", MessageType.None);
-            DefaultAsset newScriptFolder = EditorGUILayout.ObjectField(scriptFolder, typeof(DefaultAsset), false) as DefaultAsset;
-            if (newScriptFolder != scriptFolder)
-            {
-                scriptFolder = newScriptFolder;
-                SaveSettings();
-            }
-            if (scriptFolder != null)
-            {
-                string scriptPath = AssetDatabase.GetAssetPath(scriptFolder);
-                if (AssetDatabase.IsValidFolder(scriptPath))
-                {
-                    EditorGUILayout.LabelField($"Path: {scriptPath}", EditorStyles.miniLabel);
-                    EditorGUILayout.LabelField($"Full Path: {scriptPath}/{windowName}.cs", EditorStyles.miniLabel);
-                }
-                else
-                {
-                    EditorGUILayout.HelpBox("⚠ Selected path is not a valid folder.", MessageType.Warning);
-                }
-            }
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(5);
-
-            // Prefab Folder path
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("Prefab Save Path", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("Drag and drop a folder where the generated UIWindow prefab (.prefab file) will be saved.", MessageType.None);
-            DefaultAsset newPrefabFolder = EditorGUILayout.ObjectField(prefabFolder, typeof(DefaultAsset), false) as DefaultAsset;
-            if (newPrefabFolder != prefabFolder)
-            {
-                prefabFolder = newPrefabFolder;
-                SaveSettings();
-            }
-            if (prefabFolder != null)
-            {
-                string prefabPath = AssetDatabase.GetAssetPath(prefabFolder);
-                if (AssetDatabase.IsValidFolder(prefabPath))
-                {
-                    EditorGUILayout.LabelField($"Path: {prefabPath}", EditorStyles.miniLabel);
-                    EditorGUILayout.LabelField($"Full Path: {prefabPath}/{windowName}.prefab", EditorStyles.miniLabel);
-                }
-                else
-                {
-                    EditorGUILayout.HelpBox("⚠ Selected path is not a valid folder.", MessageType.Warning);
-                }
-            }
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(5);
-
-            // SO Folder path
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("Configuration Save Path", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("Drag and drop a folder where the generated UIWindowConfiguration ScriptableObject (.asset file) will be saved.", MessageType.None);
-            EditorGUILayout.HelpBox("ℹ Config files use '_Config' suffix to avoid YooAsset Location conflicts. YooAsset uses filename (without extension) as Location key, so same-named Prefab and ScriptableObject would cause 'Location have existed' warnings.", MessageType.Info);
-            DefaultAsset newSoFolder = EditorGUILayout.ObjectField(soFolder, typeof(DefaultAsset), false) as DefaultAsset;
-            if (newSoFolder != soFolder)
-            {
-                soFolder = newSoFolder;
-                SaveSettings();
-            }
-            if (soFolder != null)
-            {
-                string soPath = AssetDatabase.GetAssetPath(soFolder);
-                if (AssetDatabase.IsValidFolder(soPath))
-                {
-                    EditorGUILayout.LabelField($"Path: {soPath}", EditorStyles.miniLabel);
-                    string configName = string.IsNullOrEmpty(windowName) ? "UIWindow_New_Config.asset" : $"{windowName}_Config.asset";
-                    EditorGUILayout.LabelField($"Full Path: {soPath}/{configName}", EditorStyles.miniLabel);
-                }
-                else
-                {
-                    EditorGUILayout.HelpBox("⚠ Selected path is not a valid folder.", MessageType.Warning);
-                }
-            }
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(10);
-
-            // Section 3: Configuration
-            DrawSectionHeader("Configuration");
-
-            // UILayer Selection
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("UILayer Configuration", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("Select the UILayerConfiguration ScriptableObject that defines which UI layer this window belongs to (e.g., Menu, Dialogue, Notification).", MessageType.None);
-            selectedLayer = EditorGUILayout.ObjectField(selectedLayer, typeof(UILayerConfiguration), false) as UILayerConfiguration;
-            if (selectedLayer != null)
-            {
-                EditorGUILayout.LabelField($"Layer Name: {selectedLayer.LayerName}", EditorStyles.miniLabel);
-                string layerPath = AssetDatabase.GetAssetPath(selectedLayer);
-                EditorGUILayout.LabelField($"Path: {layerPath}", EditorStyles.miniLabel);
-            }
-
-            EditorGUILayout.Space(5);
-            EditorGUILayout.LabelField("UIWindow Source Mode", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("Choose how UIWindowConfiguration manages the prefab source after creation.", MessageType.None);
-            var newSourceMode = (UIWindowConfiguration.PrefabSource)EditorGUILayout.EnumPopup(configSourceMode);
-            if (newSourceMode != configSourceMode)
-            {
-                configSourceMode = newSourceMode;
-                SaveSettings();
-            }
-
-            bool newAutoFill = EditorGUILayout.ToggleLeft(
-                new GUIContent("Auto Fill Location From Prefab Path", "When enabled, creator pre-fills location/address from generated prefab asset path."),
-                autoFillLocationFromPrefabPath);
-            if (newAutoFill != autoFillLocationFromPrefabPath)
-            {
-                autoFillLocationFromPrefabPath = newAutoFill;
-                SaveSettings();
-            }
-
-            if (configSourceMode == UIWindowConfiguration.PrefabSource.PrefabReference)
-            {
-                EditorGUILayout.HelpBox("PrefabReference: config stores direct prefab reference.", MessageType.Info);
-            }
-            else if (configSourceMode == UIWindowConfiguration.PrefabSource.AssetReference)
-            {
-                EditorGUILayout.HelpBox("AssetReference: config stores AssetRef<GameObject> (GUID + path).", MessageType.Info);
-            }
-            else
-            {
-                EditorGUILayout.HelpBox("PathLocation: config stores plain string location.", MessageType.Info);
-            }
-
-            DrawCreatorPerformanceGuidance();
-
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(10);
-
-            // Section 4: MVP Architecture (Optional)
-            DrawSectionHeader("MVP Architecture (Optional)");
-
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("Use MVP Pattern", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("Enable to generate View interface and Presenter class alongside the UIWindow. " +
-                "This follows the Model-View-Presenter pattern for better separation of concerns.", MessageType.None);
-            
-            bool newUseMVP = EditorGUILayout.Toggle("Generate MVP Structure", useMVP);
-            if (newUseMVP != useMVP)
-            {
-                useMVP = newUseMVP;
-                SaveSettings();
-            }
-
-            if (useMVP)
-            {
-                EditorGUILayout.Space(5);
-                EditorGUILayout.HelpBox("MVP will generate:\n" +
-                    $"• I{windowName}View - View interface (in Script folder)\n" +
-                    $"• {windowName}Presenter - Presenter class (in Presenter folder)\n" +
-                    $"• {windowName} will implement I{windowName}View", MessageType.Info);
-
-                EditorGUILayout.Space(5);
-                EditorGUILayout.LabelField("Presenter Save Path", EditorStyles.boldLabel);
-                EditorGUILayout.HelpBox("Drag and drop a folder where the Presenter script will be saved. Can be same as Script folder.", MessageType.None);
-                DefaultAsset newPresenterFolder = EditorGUILayout.ObjectField(presenterFolder, typeof(DefaultAsset), false) as DefaultAsset;
-                if (newPresenterFolder != presenterFolder)
-                {
-                    presenterFolder = newPresenterFolder;
-                    SaveSettings();
-                }
-                if (presenterFolder != null)
-                {
-                    string presenterPath = AssetDatabase.GetAssetPath(presenterFolder);
-                    if (AssetDatabase.IsValidFolder(presenterPath))
-                    {
-                        EditorGUILayout.LabelField($"Path: {presenterPath}", EditorStyles.miniLabel);
-                        EditorGUILayout.LabelField($"Presenter: {presenterPath}/{windowName}Presenter.cs", EditorStyles.miniLabel);
-                    }
-                    else
-                    {
-                        EditorGUILayout.HelpBox("⚠ Selected path is not a valid folder.", MessageType.Warning);
-                    }
-                }
-                else
-                {
-                    EditorGUILayout.HelpBox("⚠ Presenter folder is required when using MVP.", MessageType.Warning);
-                }
-            }
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(10);
-
-            // Section 5: Template (Optional)
-            DrawSectionHeader("Template (Optional)");
-
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("Template Prefab", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("(Optional) Drag and drop a UIWindow prefab to use as a template. If not provided, a new prefab will be created from scratch with a RectTransform.", MessageType.None);
-            templatePrefab = EditorGUILayout.ObjectField(templatePrefab, typeof(GameObject), false) as GameObject;
-            if (templatePrefab == null)
-            {
-                EditorGUILayout.HelpBox("ℹ No template prefab selected. A new prefab will be created from scratch.", MessageType.Info);
-            }
-            else
-            {
-                string templatePath = AssetDatabase.GetAssetPath(templatePrefab);
-                PrefabAssetType prefabType = PrefabUtility.GetPrefabAssetType(templatePrefab);
-                if (prefabType == PrefabAssetType.NotAPrefab)
-                {
-                    EditorGUILayout.HelpBox("⚠ Selected object is not a prefab. Please select a prefab asset.", MessageType.Warning);
-                }
-                else
-                {
-                    EditorGUILayout.LabelField($"Path: {templatePath}", EditorStyles.miniLabel);
-                    EditorGUILayout.LabelField($"Type: {prefabType}", EditorStyles.miniLabel);
-                    EditorGUILayout.HelpBox("✓ Template prefab will be used as base for the new prefab.", MessageType.Info);
-                }
-            }
-            DrawTemplateAuditSummary();
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(15);
-
-            // Create button
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUI.BeginDisabledGroup(!CanCreate());
-            if (GUILayout.Button("Create UIWindow", GUILayout.Height(35)))
-            {
-                CreateUIWindow();
-            }
-            EditorGUI.EndDisabledGroup();
-
-            if (!CanCreate())
-            {
-                EditorGUILayout.Space(5);
-                EditorGUILayout.HelpBox("⚠ Please fill in all required fields to create UIWindow.", MessageType.Warning);
-            }
-            EditorGUILayout.EndVertical();
-
+            _scroll = EditorGUILayout.BeginScrollView(_scroll);
+            DrawHero();
+            DrawPipelineSummary(GetSnapshot());
+            DrawIdentitySection();
+            DrawOutputSection();
+            DrawRuntimeSection();
+            DrawMvpSection();
+            DrawTemplateSection();
+            DrawReviewSection(GetSnapshot());
+            DrawFeedback();
+            EditorGUILayout.Space(12f);
             EditorGUILayout.EndScrollView();
         }
 
-        private void DrawSectionHeader(string title)
+        private static void InitializeStyles()
         {
-            EditorGUILayout.Space(5);
-            EditorGUILayout.LabelField(title, _sectionStyle);
-            EditorGUILayout.Space(3);
+            if (_stylesInitialized)
+            {
+                return;
+            }
+
+            _stylesInitialized = true;
+            _heroTitleStyle = new GUIStyle(EditorStyles.boldLabel)
+            {
+                fontSize = 17,
+                alignment = TextAnchor.MiddleLeft
+            };
+            _heroSubtitleStyle = new GUIStyle(EditorStyles.miniLabel)
+            {
+                wordWrap = true,
+                alignment = TextAnchor.MiddleLeft
+            };
+            _sectionTitleStyle = new GUIStyle(EditorStyles.boldLabel)
+            {
+                fontSize = 12,
+                normal = { textColor = Color.white },
+                alignment = TextAnchor.MiddleLeft
+            };
+            _cardTitleStyle = new GUIStyle(EditorStyles.boldLabel)
+            {
+                fontSize = 11,
+                alignment = TextAnchor.MiddleLeft
+            };
+            _helpStyle = new GUIStyle(EditorStyles.miniLabel)
+            {
+                wordWrap = true,
+                alignment = TextAnchor.MiddleLeft
+            };
+            _badgeStyle = new GUIStyle(EditorStyles.miniBoldLabel)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                normal = { textColor = Color.white }
+            };
+            _previewKeyStyle = new GUIStyle(EditorStyles.miniBoldLabel)
+            {
+                alignment = TextAnchor.MiddleLeft
+            };
+            _previewValueStyle = new GUIStyle(EditorStyles.miniLabel)
+            {
+                clipping = TextClipping.Clip,
+                alignment = TextAnchor.MiddleLeft
+            };
+            _createTitleStyle = new GUIStyle(EditorStyles.boldLabel)
+            {
+                fontSize = 13,
+                alignment = TextAnchor.MiddleCenter,
+                normal = { textColor = Color.white }
+            };
+            _createSubtitleStyle = new GUIStyle(EditorStyles.miniLabel)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                normal = { textColor = new Color(0.86f, 0.96f, 0.88f) }
+            };
+            _alertTitleStyle = new GUIStyle(EditorStyles.boldLabel)
+            {
+                wordWrap = true,
+                normal =
+                {
+                    textColor = EditorGUIUtility.isProSkin
+                        ? new Color(1f, 0.88f, 0.84f)
+                        : new Color(0.42f, 0.06f, 0.06f)
+                }
+            };
+            _alertBodyStyle = new GUIStyle(EditorStyles.miniLabel)
+            {
+                wordWrap = true,
+                normal =
+                {
+                    textColor = EditorGUIUtility.isProSkin
+                        ? new Color(0.94f, 0.84f, 0.82f)
+                        : new Color(0.36f, 0.08f, 0.08f)
+                }
+            };
         }
 
-        private void DrawCreatorPerformanceGuidance()
+        private void DrawHero()
         {
-            if (configSourceMode == UIWindowConfiguration.PrefabSource.PrefabReference)
+            EditorGUILayout.Space(8f);
+            Rect rect = EditorGUILayout.GetControlRect(false, 68f);
+            Color background = EditorGUIUtility.isProSkin
+                ? new Color(0.16f, 0.18f, 0.21f)
+                : new Color(0.82f, 0.86f, 0.91f);
+            EditorGUI.DrawRect(rect, background);
+            EditorGUI.DrawRect(new Rect(rect.x, rect.y, 5f, rect.height), IdentityColor);
+            EditorGUI.LabelField(
+                new Rect(rect.x + 16f, rect.y + 8f, rect.width - 32f, 24f),
+                "UIWindow Creator",
+                _heroTitleStyle);
+            EditorGUI.LabelField(
+                new Rect(rect.x + 16f, rect.y + 34f, rect.width - 32f, 28f),
+                "Generate a production-ready window, prefab, configuration, and optional MVP types through a validated, rollback-capable pipeline.",
+                _heroSubtitleStyle);
+            EditorGUILayout.Space(8f);
+        }
+
+        private void DrawPipelineSummary(CreatorSnapshot snapshot)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            DrawCardHeader(
+                "Pipeline Status",
+                GetPipelineStatusLabel(snapshot.Status),
+                GetPipelineStatusColor(snapshot.Status));
+
+            bool nameValid = UIWindowCreationValidator.IsValidCSharpIdentifier(snapshot.Request.WindowName);
+            DrawStatusRow(
+                "Window",
+                string.IsNullOrEmpty(snapshot.Request.WindowName)
+                    ? "Enter a window class and stable ID"
+                    : snapshot.Request.WindowName,
+                nameValid ? "OK" : string.IsNullOrEmpty(snapshot.Request.WindowName) ? "Need" : "Fix",
+                nameValid ? ReadyColor : string.IsNullOrEmpty(snapshot.Request.WindowName) ? MissingColor : InvalidColor);
+            DrawStatusRow(
+                "Folders",
+                AreRequiredFoldersReady() ? GetFolderSummary() : "Select valid Project folders",
+                AreRequiredFoldersReady());
+            DrawStatusRow(
+                "Layer",
+                _layer != null ? _layer.LayerName : "Select UILayerConfiguration",
+                _layer != null);
+            DrawStatusRow(
+                "Source",
+                GetSourceModeSummary(snapshot),
+                IsSourceReady(snapshot.Request));
+            DrawStatusRow(
+                "Template",
+                GetTemplateSummary(),
+                snapshot.TemplateValid ? "OK" : "Fix",
+                snapshot.TemplateValid ? ReadyColor : InvalidColor);
+            DrawStatusRow(
+                "Outputs",
+                snapshot.ExistingFiles.Length == 0
+                    ? snapshot.HasPaths ? "No generated asset conflicts" : "Waiting for output paths"
+                    : $"{snapshot.ExistingFiles.Length} generated asset conflict(s)",
+                snapshot.ExistingFiles.Length == 0 ? snapshot.HasPaths ? "OK" : "Wait" : "Conflict",
+                snapshot.ExistingFiles.Length == 0 ? snapshot.HasPaths ? ReadyColor : OptionalColor : InvalidColor);
+            DrawStatusRow(
+                "Composition",
+                _useMvp ? "Window + typed View + Presenter" : "Window only (DI remains optional)",
+                "OK",
+                ReadyColor);
+
+            DrawPostCompileSummary();
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(8f);
+        }
+
+        private void DrawIdentitySection()
+        {
+            DrawSectionHeader(
+                "Identity",
+                "Define the runtime window ID, generated class name, and optional namespace.",
+                IdentityColor);
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            string trimmedName = _windowName != null ? _windowName.Trim() : string.Empty;
+            bool nameValid = UIWindowCreationValidator.IsValidCSharpIdentifier(trimmedName);
+            DrawCardHeader(
+                "Window Class / ID",
+                string.IsNullOrEmpty(trimmedName) ? "Missing" : nameValid ? "Ready" : "Invalid",
+                string.IsNullOrEmpty(trimmedName) ? MissingColor : nameValid ? ReadyColor : InvalidColor,
+                true);
+            EditorGUILayout.LabelField(
+                "This value is used as the generated C# type, prefab name, configuration ID, and default runtime lookup key.",
+                _helpStyle);
+            string newName = EditorGUILayout.TextField(
+                new GUIContent("Name", "Use a stable C# identifier such as InventoryWindow."),
+                _windowName);
+            if (!string.Equals(newName, _windowName, StringComparison.Ordinal))
             {
-                EditorGUILayout.HelpBox("Direct Ref is the lowest-friction setup. Best for test scenes, built-in UI, and windows that do not need package-backed loading.", MessageType.None);
+                _windowName = newName;
+                MarkSnapshotDirty();
             }
-            else if (configSourceMode == UIWindowConfiguration.PrefabSource.AssetReference)
+
+            if (!string.IsNullOrEmpty(trimmedName))
             {
-                EditorGUILayout.HelpBox("Asset Ref is recommended for Addressables / YooAsset style projects. It aligns best with AssetManagement caching and package ownership.", MessageType.None);
+                DrawPreviewRow("Script", trimmedName + ".cs");
+                DrawPreviewRow("Prefab", trimmedName + ".prefab");
+                DrawPreviewRow("Configuration", trimmedName + "_Config.asset");
+            }
+
+            if (!string.IsNullOrEmpty(trimmedName) && !nameValid)
+            {
+                DrawAlert(
+                    "Invalid window name",
+                    "Use a C# identifier that starts with a letter or underscore and contains only letters, digits, or underscores. Reserved keywords are not accepted.");
+            }
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(6f);
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            string trimmedNamespace = _namespaceName != null ? _namespaceName.Trim() : string.Empty;
+            bool namespaceValid = UIWindowCreationValidator.IsValidNamespace(trimmedNamespace);
+            DrawCardHeader(
+                "Namespace",
+                string.IsNullOrEmpty(trimmedNamespace) ? "Optional" : namespaceValid ? "Ready" : "Invalid",
+                string.IsNullOrEmpty(trimmedNamespace) ? OptionalColor : namespaceValid ? ReadyColor : InvalidColor,
+                false);
+            EditorGUILayout.LabelField(
+                "Leave empty for the global namespace, or use dot-separated C# identifiers such as MyGame.UI.Windows.",
+                _helpStyle);
+            string newNamespace = EditorGUILayout.TextField("Namespace", _namespaceName);
+            if (!string.Equals(newNamespace, _namespaceName, StringComparison.Ordinal))
+            {
+                _namespaceName = newNamespace;
+                MarkSnapshotDirty();
+            }
+
+            if (!string.IsNullOrEmpty(trimmedNamespace))
+            {
+                DrawPreviewRow("Generated type", trimmedNamespace + "." + GetSafeWindowName("WindowName"));
+            }
+            if (!namespaceValid)
+            {
+                DrawAlert(
+                    "Invalid namespace",
+                    "Each namespace segment must be a valid non-keyword C# identifier.");
+            }
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(8f);
+        }
+
+        private void DrawOutputSection()
+        {
+            DrawSectionHeader(
+                "Output Paths",
+                "Choose explicit Project folders. Every generated path is previewed before creation.",
+                OutputColor);
+
+            DrawFolderCard(
+                "Script Folder",
+                "Generated UIWindow script and, when enabled, the typed View interface.",
+                ref _scriptFolder,
+                GetSafeWindowName("WindowName") + ".cs",
+                true);
+            DrawFolderCard(
+                "Prefab Folder",
+                "Generated, unpacked UIWindow prefab.",
+                ref _prefabFolder,
+                GetSafeWindowName("WindowName") + ".prefab",
+                true);
+            DrawFolderCard(
+                "Configuration Folder",
+                "Generated UIWindowConfiguration asset. The suffix keeps its location distinct from the prefab.",
+                ref _configFolder,
+                GetSafeWindowName("WindowName") + "_Config.asset",
+                true);
+
+            EditorGUILayout.HelpBox(
+                "The creator never overwrites an existing output. Conflicts are listed in the review section and must be resolved explicitly.",
+                MessageType.Info);
+            EditorGUILayout.Space(8f);
+        }
+
+        private void DrawRuntimeSection()
+        {
+            DrawSectionHeader(
+                "Runtime Configuration",
+                "Choose the destination layer and the provider-neutral prefab reference contract.",
+                RuntimeColor);
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            DrawCardHeader(
+                "UILayer Configuration",
+                _layer != null ? "Ready" : "Missing",
+                _layer != null ? ReadyColor : MissingColor,
+                true);
+            EditorGUILayout.LabelField(
+                "The selected layer controls where UIService attaches the window and participates in layer ordering.",
+                _helpStyle);
+            UILayerConfiguration newLayer = (UILayerConfiguration)EditorGUILayout.ObjectField(
+                "Layer",
+                _layer,
+                typeof(UILayerConfiguration),
+                false);
+            if (newLayer != _layer)
+            {
+                _layer = newLayer;
+                MarkSnapshotDirty(true);
+            }
+            if (_layer != null)
+            {
+                DrawPreviewRow("Layer", _layer.LayerName);
+                DrawPreviewRow("Asset", AssetDatabase.GetAssetPath(_layer));
+            }
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(6f);
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            DrawCardHeader("Prefab Source", _sourceMode.ToString(), ReadyColor, true);
+            EditorGUILayout.LabelField(
+                "Select how UIWindowConfiguration resolves the generated prefab. Source selection does not add a dependency on a specific asset package.",
+                _helpStyle);
+            UIWindowConfiguration.PrefabSource newSource =
+                (UIWindowConfiguration.PrefabSource)EditorGUILayout.EnumPopup("Source", _sourceMode);
+            if (newSource != _sourceMode)
+            {
+                _sourceMode = newSource;
+                MarkSnapshotDirty(true);
+            }
+
+            switch (_sourceMode)
+            {
+                case UIWindowConfiguration.PrefabSource.PrefabReference:
+                    EditorGUILayout.HelpBox(
+                        "Stores a direct prefab reference. This is the simplest option for built-in UI and tests. The prefab remains a serialized dependency of the configuration asset.",
+                        MessageType.None);
+                    DrawPreviewRow("Runtime value", "Direct generated prefab reference");
+                    break;
+
+                case UIWindowConfiguration.PrefabSource.AssetReference:
+                    EditorGUILayout.HelpBox(
+                        "Stores the Editor GUID plus a provider runtime location. The location is auto-derived from the active asset management integration (for example a YooAsset address or asset path).",
+                        MessageType.None);
+
+                    string autoPreview = GetAutoDerivedLocationPreview();
+                    if (string.IsNullOrEmpty(autoPreview))
+                    {
+                        DrawAlert(
+                            "Location cannot be auto-derived",
+                            "No asset management integration owns this prefab folder, or it is not covered by a YooAsset collector. Configure the collector, or use the manual override below.");
+                    }
+                    else
+                    {
+                        DrawPreviewRow("Auto-derived location", autoPreview);
+                    }
+
+                    _showLocationOverride = EditorGUILayout.Foldout(
+                        _showLocationOverride,
+                        "Manual override (advanced)",
+                        true);
+                    if (_showLocationOverride)
+                    {
+                        DrawRuntimeLocationField(
+                            "Provider Location",
+                            "Optional override for the provider-specific location or address. Leave empty to keep the auto-derived value.",
+                            required: false);
+                    }
+
+                    DrawPreviewRow("Editor metadata", "Generated prefab GUID");
+                    break;
+
+                case UIWindowConfiguration.PrefabSource.PathLocation:
+                    bool newAutoFill = EditorGUILayout.ToggleLeft(
+                        new GUIContent(
+                            "Use generated Unity project asset path",
+                            "Enable only when the runtime provider intentionally resolves Assets/... project paths."),
+                        _autoFillPathLocation);
+                    if (newAutoFill != _autoFillPathLocation)
+                    {
+                        _autoFillPathLocation = newAutoFill;
+                        MarkSnapshotDirty(true);
+                    }
+                    if (_autoFillPathLocation)
+                    {
+                        CreatorSnapshot snapshot = GetSnapshot();
+                        DrawPreviewRow(
+                            "Runtime location",
+                            snapshot.HasPaths ? snapshot.Paths.PrefabFilePath : "Generated prefab project path");
+                    }
+                    else
+                    {
+                        DrawRuntimeLocationField("Runtime Location", "Location passed unchanged to IUIWindowAssetProvider.");
+                    }
+                    EditorGUILayout.HelpBox(
+                        "PathLocation is intended for providers with an explicit path contract. Do not assume every provider accepts Unity project asset paths.",
+                        MessageType.None);
+                    break;
+            }
+
+            DrawPreviewRow("Contract", GetSourceModeSummary(GetSnapshot()));
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(8f);
+        }
+
+        private void DrawRuntimeLocationField(string label, string tooltip, bool required = true)
+        {
+            string newLocation = EditorGUILayout.TextField(
+                new GUIContent(label, tooltip),
+                _runtimeLocation);
+            if (!string.Equals(newLocation, _runtimeLocation, StringComparison.Ordinal))
+            {
+                _runtimeLocation = newLocation;
+                MarkSnapshotDirty();
+            }
+
+            string trimmed = _runtimeLocation != null ? _runtimeLocation.Trim() : string.Empty;
+            if (string.IsNullOrEmpty(trimmed))
+            {
+                if (required)
+                {
+                    DrawAlert("Runtime location required", "Enter the exact location understood by the configured window asset provider.");
+                }
+                else
+                {
+                    DrawPreviewRow("Runtime location", "Auto-derived at creation");
+                }
             }
             else
             {
-                EditorGUILayout.HelpBox("Path mode is flexible for custom loaders, but validation depends on your runtime loader contract. Prefer it only when your project intentionally uses path-driven resolution.", MessageType.None);
+                DrawPreviewRow("Runtime location", trimmed);
             }
         }
 
-        private void DrawTemplateAuditSummary()
+        private string GetAutoDerivedLocationPreview()
         {
-            if (templatePrefab == null) return;
-
-            var report = UIPerformanceAuditUtility.AuditPrefab(templatePrefab);
-            if (report == null) return;
-
-            EditorGUILayout.Space(6);
-            EditorGUILayout.LabelField("Template Performance Audit", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField(
-                $"Graphics {report.GraphicsCount}  |  Layout {report.LayoutGroupCount}/{report.ContentSizeFitterCount}  |  Masks {report.MaskCount + report.RectMaskCount}  |  Suggested {report.SuggestedSubCanvasPolicy}",
-                EditorStyles.miniLabel);
-
-            for (int i = 0; i < report.Issues.Count; i++)
+            CreatorSnapshot snapshot = GetSnapshot();
+            if (!snapshot.HasPaths)
             {
-                MessageType type = report.Issues[i].Severity == UIPerformanceAuditUtility.AuditSeverity.Warning
-                    ? MessageType.Warning
-                    : report.Issues[i].Severity == UIPerformanceAuditUtility.AuditSeverity.Error
-                        ? MessageType.Error
-                        : MessageType.None;
-                EditorGUILayout.HelpBox(report.Issues[i].Message, type);
+                return null;
             }
+
+            // The generated prefab does not exist yet, so only its future path is known. Resolvers that key
+            // off the asset path (for example YooAsset collectors) can still answer; the GUID is unknown until
+            // creation and is passed as null.
+            return UIWindowLocationResolverRegistry.Resolve(null, snapshot.Paths.PrefabFilePath);
+        }
+
+        private void DrawMvpSection()
+        {
+            DrawSectionHeader(
+                "Composition",
+                "Generate a minimal UIWindow, or add typed MVP artifacts without binding the module to a DI container.",
+                MvpColor);
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            DrawCardHeader(
+                "MVP Structure",
+                _useMvp ? "Enabled" : "Optional",
+                _useMvp ? ReadyColor : OptionalColor,
+                false);
+            EditorGUILayout.LabelField(
+                "MVP adds an IView interface and Presenter. DI remains optional: register the Presenter in the composition root with UIPresenterBinder or a DI integration.",
+                _helpStyle);
+            bool newUseMvp = EditorGUILayout.ToggleLeft("Generate typed View and Presenter", _useMvp);
+            if (newUseMvp != _useMvp)
+            {
+                _useMvp = newUseMvp;
+                MarkSnapshotDirty(true);
+            }
+
+            DrawPreviewRow("Window", "Generated in every mode");
+            DrawPreviewRow("DI", "Optional in every mode");
+            if (_useMvp)
+            {
+                DrawPreviewRow("View", "I" + GetSafeWindowName("WindowName") + "View.cs");
+                DrawPreviewRow("Presenter", GetSafeWindowName("WindowName") + "Presenter.cs");
+            }
+            EditorGUILayout.EndVertical();
+
+            if (_useMvp)
+            {
+                EditorGUILayout.Space(6f);
+                DrawFolderCard(
+                    "Presenter Folder",
+                    "Generated Presenter script. This may be the same folder as the window script.",
+                    ref _presenterFolder,
+                    GetSafeWindowName("WindowName") + "Presenter.cs",
+                    true);
+            }
+            EditorGUILayout.Space(8f);
+        }
+
+        private void DrawTemplateSection()
+        {
+            DrawSectionHeader(
+                "Prefab Template",
+                "Clone a project-specific visual template or create a minimal full-screen RectTransform root.",
+                TemplateColor);
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            TemplateInspection inspection = GetTemplateInspection();
+            DrawCardHeader(
+                "Template Prefab",
+                _templatePrefab == null ? "Minimal" : inspection.IsValid ? "Ready" : "Invalid",
+                _templatePrefab == null ? OptionalColor : inspection.IsValid ? ReadyColor : InvalidColor,
+                false);
+            EditorGUILayout.LabelField(
+                "The selected prefab is cloned and unpacked. Its root UIWindow component is replaced, and a compatible TMP title is updated when present.",
+                _helpStyle);
 
             EditorGUILayout.BeginHorizontal();
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button("Open Performance Auditor", GUILayout.Width(170)))
+            GameObject newTemplate = (GameObject)EditorGUILayout.ObjectField(
+                "Template",
+                _templatePrefab,
+                typeof(GameObject),
+                false);
+            if (newTemplate != _templatePrefab)
             {
-                UIPerformanceAuditWindow.ShowWindow();
+                SetTemplate(newTemplate, true);
+            }
+            Texture thumbnail = _templatePrefab != null ? AssetPreview.GetMiniThumbnail(_templatePrefab) : null;
+            if (thumbnail != null)
+            {
+                GUILayout.Label(thumbnail, GUILayout.Width(36f), GUILayout.Height(36f));
             }
             EditorGUILayout.EndHorizontal();
-        }
 
-        private System.Type GetScriptType(string scriptName, string namespaceName)
-        {
-            System.Type scriptType = null;
-            string fullTypeName = string.IsNullOrEmpty(namespaceName) ? scriptName : $"{namespaceName}.{scriptName}";
-
-            foreach (var assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Use Package Default"))
             {
-                scriptType = assembly.GetType(fullTypeName);
-                if (scriptType != null)
-                    break;
+                UseDefaultTemplate(true);
             }
-            return scriptType;
-        }
-
-        private bool CanCreate()
-        {
-            // Namespace is optional, so we don't check it
-            if (scriptFolder == null)
-                return false;
-            if (soFolder == null)
-                return false;
-            if (prefabFolder == null)
-                return false;
-            if (selectedLayer == null)
-                return false;
-            if (string.IsNullOrEmpty(windowName))
-                return false;
-
-            // MVP requires presenter folder
-            if (useMVP && presenterFolder == null)
-                return false;
-
-            if (!IsValidCSharpIdentifier(windowName))
-                return false;
-
-            string scriptPath = scriptFolder != null ? AssetDatabase.GetAssetPath(scriptFolder) : "";
-            string soPath = soFolder != null ? AssetDatabase.GetAssetPath(soFolder) : "";
-            string prefabPath = prefabFolder != null ? AssetDatabase.GetAssetPath(prefabFolder) : "";
-            string presenterPath = presenterFolder != null ? AssetDatabase.GetAssetPath(presenterFolder) : "";
-
-            if (!string.IsNullOrEmpty(scriptPath) && !AssetDatabase.IsValidFolder(scriptPath))
-                return false;
-            if (!string.IsNullOrEmpty(soPath) && !AssetDatabase.IsValidFolder(soPath))
-                return false;
-            if (!string.IsNullOrEmpty(prefabPath) && !AssetDatabase.IsValidFolder(prefabPath))
-                return false;
-            if (useMVP && !string.IsNullOrEmpty(presenterPath) && !AssetDatabase.IsValidFolder(presenterPath))
-                return false;
-
-            if (HasExistingFiles())
-                return false;
-
-            return true;
-        }
-
-        private bool IsValidCSharpIdentifier(string name)
-        {
-            if (string.IsNullOrEmpty(name))
-                return false;
-
-            if (!char.IsLetter(name[0]) && name[0] != '_')
-                return false;
-
-            for (int i = 1; i < name.Length; i++)
+            using (new EditorGUI.DisabledScope(_templatePrefab == null))
             {
-                if (!char.IsLetterOrDigit(name[i]) && name[i] != '_')
-                    return false;
+                if (GUILayout.Button("Ping"))
+                {
+                    EditorGUIUtility.PingObject(_templatePrefab);
+                }
+                if (GUILayout.Button("Open Prefab"))
+                {
+                    AssetDatabase.OpenAsset(_templatePrefab);
+                }
+                if (GUILayout.Button("Use Minimal"))
+                {
+                    SetTemplate(null, true);
+                }
             }
+            EditorGUILayout.EndHorizontal();
 
-            return true;
-        }
-
-        private bool HasExistingFiles()
-        {
-            if (string.IsNullOrEmpty(windowName) || scriptFolder == null || prefabFolder == null || soFolder == null)
-                return false;
-
-            string scriptPath = AssetDatabase.GetAssetPath(scriptFolder);
-            string prefabPath = AssetDatabase.GetAssetPath(prefabFolder);
-            string soPath = AssetDatabase.GetAssetPath(soFolder);
-
-            if (!scriptPath.EndsWith("/")) scriptPath += "/";
-            if (!prefabPath.EndsWith("/")) prefabPath += "/";
-            if (!soPath.EndsWith("/")) soPath += "/";
-
-            string scriptFile = scriptPath + windowName + ".cs";
-            string prefabFile = prefabPath + windowName + ".prefab";
-            string configFile = soPath + windowName + "_Config.asset";
-
-            return File.Exists(scriptFile) || File.Exists(prefabFile) || File.Exists(configFile);
-        }
-
-        private void CheckAndDisplayExistingFiles()
-        {
-            if (string.IsNullOrEmpty(windowName) || scriptFolder == null || prefabFolder == null || soFolder == null)
-                return;
-
-            string scriptPath = AssetDatabase.GetAssetPath(scriptFolder);
-            string prefabPath = AssetDatabase.GetAssetPath(prefabFolder);
-            string soPath = AssetDatabase.GetAssetPath(soFolder);
-
-            if (!scriptPath.EndsWith("/")) scriptPath += "/";
-            if (!prefabPath.EndsWith("/")) prefabPath += "/";
-            if (!soPath.EndsWith("/")) soPath += "/";
-
-            string scriptFile = scriptPath + windowName + ".cs";
-            string prefabFile = prefabPath + windowName + ".prefab";
-            string configFile = soPath + windowName + "_Config.asset";
-
-            _existingFilesList.Clear();
-            if (File.Exists(scriptFile))
-                _existingFilesList.Add($"Script: {scriptFile}");
-            if (File.Exists(prefabFile))
-                _existingFilesList.Add($"Prefab: {prefabFile}");
-            if (File.Exists(configFile))
-                _existingFilesList.Add($"Config: {configFile}");
-
-            if (_existingFilesList.Count > 0)
+            if (_templatePrefab == null)
             {
-                EditorGUILayout.HelpBox($"⚠ The following files already exist:\n{string.Join("\n", _existingFilesList)}", MessageType.Warning);
+                EditorGUILayout.HelpBox(
+                    "A full-screen RectTransform with CanvasGroup and UIWindow placeholder will be created.",
+                    MessageType.None);
             }
+            else
+            {
+                DrawPreviewRow("Asset", AssetDatabase.GetAssetPath(_templatePrefab));
+                DrawPreviewRow("Generated title", UIWindowTitleFormatter.BuildTemplateTitleText(GetSafeWindowName("Window Name")));
+                DrawPreviewRow("Objects / Graphics", inspection.ObjectCount + " / " + inspection.GraphicCount);
+                DrawPreviewRow("Selectables / Canvases", inspection.SelectableCount + " / " + inspection.CanvasCount);
+                DrawPreviewRow("Layout / Fitters", inspection.LayoutGroupCount + " / " + inspection.ContentSizeFitterCount);
+                DrawPreviewRow("Masks / text", inspection.MaskCount + " / " + inspection.TextCount);
+                DrawPreviewRow("UIWindow / Missing scripts", inspection.WindowComponentCount + " / " + inspection.MissingScriptCount);
+
+                if (!inspection.IsPrefab)
+                {
+                    DrawAlert("Invalid template", "Select a prefab asset from the Project window.");
+                }
+                else if (!inspection.HasRootRectTransform)
+                {
+                    DrawAlert("Invalid UI root", "The template root must use RectTransform so the generated asset can participate in the UI hierarchy.");
+                }
+                else if (inspection.MissingScriptCount > 0)
+                {
+                    DrawAlert(
+                        "Missing scripts",
+                        $"The template contains {inspection.MissingScriptCount} missing MonoBehaviour reference(s). Repair or remove them before generation.");
+                }
+                else if (inspection.WindowComponentCount > 1 ||
+                         (inspection.WindowComponentCount == 1 && !inspection.HasRootWindowComponent))
+                {
+                    DrawAlert(
+                        "Invalid UIWindow placement",
+                        "A template may contain at most one UIWindow placeholder, and it must be attached to the prefab root.");
+                }
+                else
+                {
+                    if (!inspection.HasCanvasGroup)
+                    {
+                        EditorGUILayout.HelpBox(
+                            "The template has no root CanvasGroup. The creator will add one before saving the generated prefab.",
+                            MessageType.Info);
+                    }
+                    if (inspection.HasWindowComponent)
+                    {
+                        EditorGUILayout.HelpBox(
+                            "The template UIWindow component is authoring-only and will be replaced by the generated window component.",
+                            MessageType.None);
+                    }
+                    if (inspection.TextCount == 0)
+                    {
+                        EditorGUILayout.HelpBox(
+                            DescribeMissingTextComponents(),
+                            MessageType.None);
+                    }
+                }
+            }
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(8f);
         }
 
         /// <summary>
-        /// Performs comprehensive validation before creating UIWindow.
-        /// Checks: folder existence, file conflicts, window name validity.
-        /// Returns error message if validation fails, empty string if successful.
+        /// Explains why no text component was recognized, naming the registered backends whose base
+        /// type cannot be resolved in this project.
         /// </summary>
-        private string ValidateBeforeCreate()
+        private static string DescribeMissingTextComponents()
         {
-            _validationErrors.Clear();
+            const string NoText =
+                "No text component from a registered text backend was detected. Template title substitution will be skipped.";
 
-            // === 1. Validate Window Name ===
-            if (string.IsNullOrEmpty(windowName))
+            string unresolvable = null;
+            foreach (UITextBackend backend in UITextBackendRegistry.Backends)
             {
-                _validationErrors.Add("• Window name is required");
-            }
-            else if (!IsValidCSharpIdentifier(windowName))
-            {
-                _validationErrors.Add($"• Window name '{windowName}' is not a valid C# identifier");
-            }
+                if (UITextBackendRegistry.TryResolveBackendType(backend, out _))
+                {
+                    continue;
+                }
 
-            // === 2. Validate Folder References ===
-            if (scriptFolder == null)
-            {
-                _validationErrors.Add("• Script folder reference is missing");
-            }
-            if (prefabFolder == null)
-            {
-                _validationErrors.Add("• Prefab folder reference is missing");
-            }
-            if (soFolder == null)
-            {
-                _validationErrors.Add("• Configuration folder reference is missing");
-            }
-            if (useMVP && presenterFolder == null)
-            {
-                _validationErrors.Add("• Presenter folder reference is required when using MVP");
-            }
-            if (selectedLayer == null)
-            {
-                _validationErrors.Add("• UILayer configuration is required");
+                string entry = "'" + backend.Id + "' (" + backend.BaseTypeName + ")";
+                unresolvable = unresolvable == null ? entry : unresolvable + ", " + entry;
             }
 
-            // Early return if references are missing
-            if (_validationErrors.Count > 0)
+            if (unresolvable == null)
             {
-                return "Missing Required Fields:\n\n" + string.Join("\n", _validationErrors);
+                return NoText;
             }
 
-            // === 3. Validate Folder Existence ===
-            _validationErrors.Clear(); // Reuse for missing folders
-
-            string scriptPath = AssetDatabase.GetAssetPath(scriptFolder);
-            string prefabPath = AssetDatabase.GetAssetPath(prefabFolder);
-            string soPath = AssetDatabase.GetAssetPath(soFolder);
-            string presenterPath = useMVP && presenterFolder != null ? AssetDatabase.GetAssetPath(presenterFolder) : "";
-
-            if (!AssetDatabase.IsValidFolder(scriptPath))
-            {
-                _validationErrors.Add($"• Script folder: {scriptPath}");
-            }
-            if (!AssetDatabase.IsValidFolder(prefabPath))
-            {
-                _validationErrors.Add($"• Prefab folder: {prefabPath}");
-            }
-            if (!AssetDatabase.IsValidFolder(soPath))
-            {
-                _validationErrors.Add($"• Config folder: {soPath}");
-            }
-            if (useMVP && !string.IsNullOrEmpty(presenterPath) && !AssetDatabase.IsValidFolder(presenterPath))
-            {
-                _validationErrors.Add($"• Presenter folder: {presenterPath}");
-            }
-
-            if (_validationErrors.Count > 0)
-            {
-                return "Folders No Longer Exist:\n\nThe following folders may have been deleted or moved:\n" + string.Join("\n", _validationErrors) + "\n\nPlease re-select the folders.";
-            }
-
-            // === 4. Check for Existing Files ===
-            _validationErrors.Clear(); // Reuse for existing files
-
-            // Normalize paths
-            if (!scriptPath.EndsWith("/")) scriptPath += "/";
-            if (!prefabPath.EndsWith("/")) prefabPath += "/";
-            if (!soPath.EndsWith("/")) soPath += "/";
-            if (useMVP && !string.IsNullOrEmpty(presenterPath) && !presenterPath.EndsWith("/")) presenterPath += "/";
-
-            // Check main files
-            string scriptFile = scriptPath + windowName + ".cs";
-            string prefabFile = prefabPath + windowName + ".prefab";
-            string configFile = soPath + windowName + "_Config.asset";
-
-            if (File.Exists(scriptFile))
-                _validationErrors.Add($"• Script: {scriptFile}");
-            if (File.Exists(prefabFile))
-                _validationErrors.Add($"• Prefab: {prefabFile}");
-            if (File.Exists(configFile))
-                _validationErrors.Add($"• Config: {configFile}");
-
-            // Check MVP files
-            if (useMVP)
-            {
-                string viewInterfaceFile = scriptPath + "I" + windowName + "View.cs";
-                string presenterFile = presenterPath + windowName + "Presenter.cs";
-
-                if (File.Exists(viewInterfaceFile))
-                    _validationErrors.Add($"• View Interface: {viewInterfaceFile}");
-                if (File.Exists(presenterFile))
-                    _validationErrors.Add($"• Presenter: {presenterFile}");
-            }
-
-            if (_validationErrors.Count > 0)
-            {
-                return "Files Already Exist:\n\nThe following files would be overwritten:\n" + string.Join("\n", _validationErrors) + "\n\nPlease delete or rename them first, or choose a different window name.";
-            }
-
-            // All validations passed
-            return "";
+            return NoText
+                + " Registered backend(s) " + unresolvable
+                + " could not be resolved in this project: the package that ships them is absent, or"
+                + " their base type name is stale after a rename. Check " + nameof(UITextBackend.BaseTypeName)
+                + " at the registration site.";
         }
 
-        private void CreateUIWindow()
+        private void DrawReviewSection(CreatorSnapshot snapshot)
         {
+            DrawSectionHeader(
+                "Review & Create",
+                "Inspect the exact output set and validation state before the transaction starts.",
+                ReviewColor);
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            DrawCardHeader(
+                "Creation Transaction",
+                snapshot.CanCreate ? "Ready" : "Blocked",
+                snapshot.CanCreate ? ReadyColor : InvalidColor);
+
+            if (snapshot.HasPaths)
+            {
+                DrawPreviewRow("Script", snapshot.Paths.ScriptFilePath);
+                DrawPreviewRow("Prefab", snapshot.Paths.PrefabFilePath);
+                DrawPreviewRow("Configuration", snapshot.Paths.ConfigFilePath);
+                if (snapshot.Request.UseMvp)
+                {
+                    DrawPreviewRow("View", snapshot.Paths.ViewInterfaceFilePath);
+                    DrawPreviewRow("Presenter", snapshot.Paths.PresenterFilePath);
+                }
+            }
+
+            if (snapshot.ExistingFiles.Length > 0)
+            {
+                DrawAlert("Output conflict", "The creator will not overwrite the following assets:");
+                for (int i = 0; i < snapshot.ExistingFiles.Length; i++)
+                {
+                    EditorGUILayout.LabelField(snapshot.ExistingFiles[i], _previewValueStyle);
+                }
+            }
+            else if (!string.IsNullOrEmpty(snapshot.ValidationMessage))
+            {
+                DrawAlert("Creation blocked", snapshot.ValidationMessage);
+            }
+
+            DrawCreateButton(snapshot.CanCreate);
+            EditorGUILayout.HelpBox(
+                "Preflight runs before writes. Immediate failures remove every asset created by the operation. Script binding is persisted in UserSettings and resumes after compilation or domain reload.",
+                MessageType.Info);
+            DrawPostCompileControls();
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawCreateButton(bool canCreate)
+        {
+            EditorGUILayout.Space(6f);
+            Rect outer = EditorGUILayout.GetControlRect(false, 52f);
+            bool hovered = canCreate && outer.Contains(Event.current.mousePosition);
+            Color border = canCreate ? new Color(0.08f, 0.30f, 0.14f) : new Color(0.18f, 0.18f, 0.18f);
+            Color fill = canCreate
+                ? hovered ? new Color(0.27f, 0.67f, 0.37f) : new Color(0.20f, 0.57f, 0.30f)
+                : new Color(0.27f, 0.27f, 0.27f);
+            EditorGUI.DrawRect(outer, border);
+            Rect inner = new Rect(outer.x + 1f, outer.y + 1f, outer.width - 2f, outer.height - 2f);
+            EditorGUI.DrawRect(inner, fill);
+            EditorGUI.DrawRect(new Rect(inner.x, inner.y, 5f, inner.height), canCreate ? new Color(0.52f, 0.90f, 0.60f) : OptionalColor);
+            EditorGUI.LabelField(
+                new Rect(inner.x, inner.y + 7f, inner.width, 20f),
+                "Create " + GetSafeWindowName("UIWindow"),
+                _createTitleStyle);
+            EditorGUI.LabelField(
+                new Rect(inner.x, inner.y + 29f, inner.width, 16f),
+                canCreate
+                    ? "Generate, validate, bind, and select the resulting prefab"
+                    : "Resolve the validation messages to enable creation",
+                _createSubtitleStyle);
+
+            if (canCreate)
+            {
+                EditorGUIUtility.AddCursorRect(outer, MouseCursor.Link);
+                if (GUI.Button(outer, GUIContent.none, GUIStyle.none))
+                {
+                    CreateWindow();
+                }
+            }
+        }
+
+        private void DrawFeedback()
+        {
+            if (_feedbackKind == FeedbackKind.None)
+            {
+                return;
+            }
+
+            Color color;
+            MessageType type;
+            switch (_feedbackKind)
+            {
+                case FeedbackKind.Success:
+                    color = ReadyColor;
+                    type = MessageType.Info;
+                    break;
+                case FeedbackKind.Pending:
+                    color = PendingColor;
+                    type = MessageType.Warning;
+                    break;
+                default:
+                    color = InvalidColor;
+                    type = MessageType.Error;
+                    break;
+            }
+
+            EditorGUILayout.Space(8f);
+            DrawSectionHeader("Last Operation", _feedbackTitle, color);
+            EditorGUILayout.HelpBox(_feedbackMessage, type);
+        }
+
+        private void DrawPostCompileSummary()
+        {
+            UIWindowCreatorPostCompileProcessor.GetStatus(
+                out int pendingCount,
+                out int failedCount,
+                out _);
+            if (pendingCount == 0 && failedCount == 0)
+            {
+                return;
+            }
+
+            string value = failedCount > 0
+                ? $"{failedCount} failed binding operation(s) require attention"
+                : $"{pendingCount} binding operation(s) waiting for compilation";
+            DrawStatusRow(
+                "Binding",
+                value,
+                failedCount > 0 ? "Failed" : "Pending",
+                failedCount > 0 ? InvalidColor : PendingColor);
+        }
+
+        private void DrawPostCompileControls()
+        {
+            UIWindowCreatorPostCompileProcessor.GetStatus(
+                out int pendingCount,
+                out int failedCount,
+                out string lastError);
+            if (pendingCount == 0 && failedCount == 0)
+            {
+                return;
+            }
+
+            EditorGUILayout.Space(6f);
+            if (pendingCount > 0)
+            {
+                EditorGUILayout.HelpBox(
+                    $"{pendingCount} generated window binding operation(s) are waiting for compilation.",
+                    MessageType.Info);
+            }
+            if (failedCount > 0)
+            {
+                EditorGUILayout.HelpBox(
+                    string.IsNullOrEmpty(lastError)
+                        ? $"{failedCount} post-compile binding operation(s) failed."
+                        : $"{failedCount} post-compile binding operation(s) failed. Last error: {lastError}",
+                    MessageType.Error);
+                EditorGUILayout.BeginHorizontal();
+                if (GUILayout.Button("Retry Failed Bindings"))
+                {
+                    UIWindowCreatorPostCompileProcessor.RetryFailed();
+                    Repaint();
+                }
+                if (GUILayout.Button("Remove Failed Records"))
+                {
+                    if (EditorUtility.DisplayDialog(
+                            "Remove Failed Binding Records",
+                            "This removes failed queue records only. Generated assets are not deleted.",
+                            "Remove",
+                            "Cancel"))
+                    {
+                        UIWindowCreatorPostCompileProcessor.RemoveFailed();
+                        Repaint();
+                    }
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+        }
+
+        private void DrawFolderCard(
+            string title,
+            string description,
+            ref DefaultAsset folder,
+            string fileName,
+            bool required)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            bool valid = IsValidFolder(folder);
+            DrawCardHeader(
+                title,
+                folder == null ? required ? "Missing" : "Optional" : valid ? "Ready" : "Invalid",
+                folder == null ? required ? MissingColor : OptionalColor : valid ? ReadyColor : InvalidColor,
+                required);
+            EditorGUILayout.LabelField(description + " Drag a Project folder here or use the object picker.", _helpStyle);
+
+            DefaultAsset newFolder = (DefaultAsset)EditorGUILayout.ObjectField(
+                "Folder",
+                folder,
+                typeof(DefaultAsset),
+                false);
+            if (newFolder != folder)
+            {
+                folder = newFolder;
+                MarkSnapshotDirty(true);
+            }
+
+            if (folder == null)
+            {
+                DrawPreviewRow("Status", "No folder selected");
+            }
+            else
+            {
+                string assetPath = AssetDatabase.GetAssetPath(folder);
+                DrawPreviewRow("Folder", assetPath);
+                if (valid)
+                {
+                    DrawPreviewRow("Output", assetPath + "/" + fileName);
+                }
+                else
+                {
+                    DrawAlert("Invalid output folder", "Select a folder asset inside the Unity project, not a file asset.");
+                }
+            }
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(6f);
+        }
+
+        private void DrawSectionHeader(string title, string subtitle, Color color)
+        {
+            EditorGUILayout.Space(4f);
+            Rect rect = EditorGUILayout.GetControlRect(false, 28f);
+            EditorGUI.DrawRect(rect, color);
+            EditorGUI.DrawRect(new Rect(rect.x, rect.yMax - 1f, rect.width, 1f), new Color(0f, 0f, 0f, 0.18f));
+            EditorGUI.LabelField(
+                new Rect(rect.x + 9f, rect.y + 3f, rect.width - 18f, 19f),
+                title,
+                _sectionTitleStyle);
+            if (!string.IsNullOrEmpty(subtitle))
+            {
+                EditorGUILayout.LabelField(subtitle, _heroSubtitleStyle);
+            }
+            EditorGUILayout.Space(3f);
+        }
+
+        private static void DrawCardHeader(
+            string title,
+            string status,
+            Color statusColor,
+            bool? required = null)
+        {
+            Rect rect = EditorGUILayout.GetControlRect(false, 21f);
+            float reserved = StatusBadgeWidth;
+            if (required.HasValue)
+            {
+                reserved += RequirementBadgeWidth + BadgeSpacing;
+            }
+
+            EditorGUI.LabelField(
+                new Rect(rect.x, rect.y, rect.width - reserved - 8f, rect.height),
+                title,
+                _cardTitleStyle);
+
+            Rect statusRect = new Rect(
+                rect.xMax - StatusBadgeWidth,
+                rect.y + 2f,
+                StatusBadgeWidth,
+                rect.height - 4f);
+            if (required.HasValue)
+            {
+                Rect requirementRect = new Rect(
+                    statusRect.x - RequirementBadgeWidth - BadgeSpacing,
+                    statusRect.y,
+                    RequirementBadgeWidth,
+                    statusRect.height);
+                DrawBadge(
+                    requirementRect,
+                    required.Value ? "Required" : "Optional",
+                    required.Value ? RequiredColor : OptionalColor);
+            }
+            DrawBadge(statusRect, status, statusColor);
+        }
+
+        private static void DrawStatusRow(string label, string value, bool ready)
+        {
+            DrawStatusRow(label, value, ready ? "OK" : "Need", ready ? ReadyColor : MissingColor);
+        }
+
+        private static void DrawStatusRow(
+            string label,
+            string value,
+            string status,
+            Color statusColor)
+        {
+            Rect rect = EditorGUILayout.GetControlRect(false, 19f);
+            const float badgeWidth = 67f;
+            const float labelWidth = 88f;
+            const float gap = 8f;
+            DrawBadge(
+                new Rect(rect.x, rect.y + 2f, badgeWidth, rect.height - 4f),
+                status,
+                statusColor);
+            float labelX = rect.x + badgeWidth + gap;
+            EditorGUI.LabelField(
+                new Rect(labelX, rect.y, labelWidth, rect.height),
+                label,
+                EditorStyles.miniBoldLabel);
+            float valueX = labelX + labelWidth + gap;
+            EditorGUI.LabelField(
+                new Rect(valueX, rect.y, Mathf.Max(32f, rect.xMax - valueX), rect.height),
+                value,
+                _previewValueStyle);
+        }
+
+        private static void DrawBadge(Rect rect, string label, Color color)
+        {
+            EditorGUI.DrawRect(rect, color);
+            EditorGUI.LabelField(rect, label, _badgeStyle);
+        }
+
+        private static void DrawPreviewRow(string label, string value)
+        {
+            Rect rect = EditorGUILayout.GetControlRect(false, 19f);
+            float labelWidth = Mathf.Min(PreviewLabelWidth, Mathf.Max(76f, rect.width * 0.36f));
+            EditorGUI.LabelField(
+                new Rect(rect.x + 4f, rect.y, labelWidth, rect.height),
+                label,
+                _previewKeyStyle);
+            float valueX = rect.x + labelWidth + 12f;
+            EditorGUI.LabelField(
+                new Rect(valueX, rect.y, Mathf.Max(32f, rect.xMax - valueX), rect.height),
+                string.IsNullOrEmpty(value) ? "-" : value,
+                _previewValueStyle);
+        }
+
+        private static void DrawAlert(string title, string body)
+        {
+            EditorGUILayout.Space(3f);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            Rect accent = GUILayoutUtility.GetRect(1f, 3f, GUILayout.ExpandWidth(true));
+            EditorGUI.DrawRect(accent, InvalidColor);
+            EditorGUILayout.LabelField(title, _alertTitleStyle);
+            EditorGUILayout.LabelField(body, _alertBodyStyle);
+            EditorGUILayout.EndVertical();
+        }
+
+        private CreatorSnapshot GetSnapshot()
+        {
+            if (!_snapshotDirty && _snapshot != null)
+            {
+                return _snapshot;
+            }
+
+            UIWindowCreationRequest request = BuildRequest();
+            string validation = UIWindowCreationValidator.Validate(request, _validationErrors);
+            bool hasPaths = UIWindowCreationValidator.TryBuildPaths(
+                request,
+                out UIWindowCreationPaths paths,
+                out _);
+            _existingFiles.Clear();
+            UIWindowCreationValidator.GetExistingFiles(request, _existingFiles);
+
+            bool templateValid = GetTemplateInspection().IsValid || _templatePrefab == null;
+            PipelineStatus status;
+            if (HasMissingInput(request))
+            {
+                status = PipelineStatus.NeedsInput;
+            }
+            else if (!HasValidIdentity(request) || !AreRequiredFoldersReady() || !templateValid || !IsSourceReady(request))
+            {
+                status = PipelineStatus.Invalid;
+            }
+            else if (_existingFiles.Count > 0)
+            {
+                status = PipelineStatus.Conflict;
+            }
+            else
+            {
+                status = string.IsNullOrEmpty(validation) ? PipelineStatus.Ready : PipelineStatus.Invalid;
+            }
+
+            _snapshot = new CreatorSnapshot
+            {
+                Request = request,
+                Paths = paths,
+                HasPaths = hasPaths,
+                TemplateValid = templateValid,
+                CanCreate = string.IsNullOrEmpty(validation) && templateValid,
+                Status = status,
+                ValidationMessage = validation,
+                ExistingFiles = _existingFiles.ToArray()
+            };
+            _snapshotDirty = false;
+            return _snapshot;
+        }
+
+        private void MarkSnapshotDirty(bool saveImmediately = false)
+        {
+            _snapshotDirty = true;
+            if (saveImmediately)
+            {
+                SaveSettings();
+            }
+            Repaint();
+        }
+
+        private static bool HasMissingInput(UIWindowCreationRequest request)
+        {
+            return string.IsNullOrEmpty(request.WindowName) ||
+                   request.ScriptFolder == null ||
+                   request.PrefabFolder == null ||
+                   request.ConfigFolder == null ||
+                   request.Layer == null ||
+                   (request.UseMvp && request.PresenterFolder == null) ||
+                   !IsSourceReady(request);
+        }
+
+        private static bool HasValidIdentity(UIWindowCreationRequest request)
+        {
+            return UIWindowCreationValidator.IsValidCSharpIdentifier(request.WindowName) &&
+                   UIWindowCreationValidator.IsValidNamespace(request.NamespaceName);
+        }
+
+        private static bool IsSourceReady(UIWindowCreationRequest request)
+        {
+            // AssetReference derives its provider location at creation time from the registered asset
+            // management integration, so an explicit runtime location is an optional override rather
+            // than a prerequisite.
+            if (request.SourceMode == UIWindowConfiguration.PrefabSource.PathLocation &&
+                !request.AutoFillLocationFromPrefabPath)
+            {
+                return !string.IsNullOrWhiteSpace(request.RuntimeLocation);
+            }
+
+            return true;
+        }
+
+        private bool AreRequiredFoldersReady()
+        {
+            return IsValidFolder(_scriptFolder) &&
+                   IsValidFolder(_prefabFolder) &&
+                   IsValidFolder(_configFolder) &&
+                   (!_useMvp || IsValidFolder(_presenterFolder));
+        }
+
+        private static bool IsValidFolder(DefaultAsset folder)
+        {
+            return folder != null && AssetDatabase.IsValidFolder(AssetDatabase.GetAssetPath(folder));
+        }
+
+        private string GetFolderSummary()
+        {
+            return _useMvp
+                ? "Script, prefab, configuration, and Presenter folders"
+                : "Script, prefab, and configuration folders";
+        }
+
+        private static string GetPipelineStatusLabel(PipelineStatus status)
+        {
+            switch (status)
+            {
+                case PipelineStatus.Ready:
+                    return "Ready";
+                case PipelineStatus.NeedsInput:
+                    return "Needs Input";
+                case PipelineStatus.Invalid:
+                    return "Invalid";
+                case PipelineStatus.Conflict:
+                    return "Conflict";
+                default:
+                    return "Blocked";
+            }
+        }
+
+        private static Color GetPipelineStatusColor(PipelineStatus status)
+        {
+            switch (status)
+            {
+                case PipelineStatus.Ready:
+                    return ReadyColor;
+                case PipelineStatus.NeedsInput:
+                    return MissingColor;
+                case PipelineStatus.Invalid:
+                case PipelineStatus.Conflict:
+                    return InvalidColor;
+                default:
+                    return OptionalColor;
+            }
+        }
+
+        private string GetSourceModeSummary(CreatorSnapshot snapshot)
+        {
+            switch (_sourceMode)
+            {
+                case UIWindowConfiguration.PrefabSource.PrefabReference:
+                    return "Direct generated prefab reference";
+                case UIWindowConfiguration.PrefabSource.AssetReference:
+                    return string.IsNullOrWhiteSpace(_runtimeLocation)
+                        ? "Auto-derived provider location"
+                        : "Provider location: " + _runtimeLocation.Trim();
+                case UIWindowConfiguration.PrefabSource.PathLocation:
+                    if (_autoFillPathLocation)
+                    {
+                        return snapshot.HasPaths
+                            ? "Project path: " + snapshot.Paths.PrefabFilePath
+                            : "Generated prefab project path";
+                    }
+                    return string.IsNullOrWhiteSpace(_runtimeLocation)
+                        ? "Runtime path required"
+                        : "Runtime path: " + _runtimeLocation.Trim();
+                default:
+                    return _sourceMode.ToString();
+            }
+        }
+
+        private string GetTemplateSummary()
+        {
+            if (_templatePrefab == null)
+            {
+                return "Minimal full-screen UI root";
+            }
+
+            TemplateInspection inspection = GetTemplateInspection();
+            return inspection.IsValid
+                ? _templatePrefab.name + " (cloned and processed)"
+                : "Selected template requires attention";
+        }
+
+        private string GetSafeWindowName(string fallback)
+        {
+            string trimmed = _windowName != null ? _windowName.Trim() : string.Empty;
+            return string.IsNullOrEmpty(trimmed) ? fallback : trimmed;
+        }
+
+        private UIWindowCreationRequest BuildRequest()
+        {
+            return new UIWindowCreationRequest(
+                _windowName,
+                _namespaceName,
+                _scriptFolder,
+                _prefabFolder,
+                _configFolder,
+                _presenterFolder,
+                _layer,
+                _useMvp,
+                _sourceMode,
+                _autoFillPathLocation,
+                _runtimeLocation);
+        }
+
+        private TemplateInspection GetTemplateInspection()
+        {
+            if (!_templateInspectionDirty)
+            {
+                return _templateInspection;
+            }
+
+            _templateInspection = InspectTemplate(_templatePrefab);
+            _templateInspectionDirty = false;
+            return _templateInspection;
+        }
+
+        internal static TemplateInspection InspectTemplate(GameObject template)
+        {
+            if (template == null)
+            {
+                return default;
+            }
+
+            UIWindow[] windows = template.GetComponentsInChildren<UIWindow>(true);
+            Transform[] transforms = template.GetComponentsInChildren<Transform>(true);
+            TemplateInspection inspection = new TemplateInspection
+            {
+                IsPrefab = PrefabUtility.GetPrefabAssetType(template) != PrefabAssetType.NotAPrefab,
+                HasRootRectTransform = template.transform is RectTransform,
+                HasCanvasGroup = template.GetComponent<CanvasGroup>() != null,
+                HasWindowComponent = windows.Length > 0,
+                HasRootWindowComponent = template.GetComponent<UIWindow>() != null,
+                WindowComponentCount = windows.Length,
+                ObjectCount = transforms.Length,
+            };
+
+            for (int i = 0; i < transforms.Length; i++)
+            {
+                inspection.MissingScriptCount +=
+                    GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(transforms[i].gameObject);
+            }
+
+            Component[] components = template.GetComponentsInChildren<Component>(true);
+            for (int i = 0; i < components.Length; i++)
+            {
+                Component component = components[i];
+                if (component == null)
+                {
+                    continue;
+                }
+
+                if (component is Graphic)
+                {
+                    inspection.GraphicCount++;
+                }
+                if (component is Selectable)
+                {
+                    inspection.SelectableCount++;
+                }
+                if (component is LayoutGroup)
+                {
+                    inspection.LayoutGroupCount++;
+                }
+                if (component is ContentSizeFitter)
+                {
+                    inspection.ContentSizeFitterCount++;
+                }
+                if (component is Mask || component is RectMask2D)
+                {
+                    inspection.MaskCount++;
+                }
+                if (component is Canvas)
+                {
+                    inspection.CanvasCount++;
+                }
+                if (UITextBackendRegistry.TryMatch(component.GetType(), out _))
+                {
+                    inspection.TextCount++;
+                }
+            }
+            return inspection;
+        }
+
+        private void SetTemplate(GameObject template, bool saveImmediately)
+        {
+            _templatePrefab = template;
+            _templateSelectionExplicit = true;
+            _templateInspectionDirty = true;
+            MarkSnapshotDirty(saveImmediately);
+        }
+
+        private void UseDefaultTemplate(bool saveImmediately)
+        {
+            string templatePath = AssetDatabase.GUIDToAssetPath(DefaultTemplateGuid);
+            GameObject defaultTemplate = string.IsNullOrEmpty(templatePath)
+                ? null
+                : AssetDatabase.LoadAssetAtPath<GameObject>(templatePath);
+            SetTemplate(defaultTemplate, saveImmediately);
+        }
+
+        private void CreateWindow()
+        {
+            CreatorSnapshot snapshot = GetSnapshot();
+            if (!snapshot.CanCreate)
+            {
+                _feedbackKind = FeedbackKind.Failure;
+                _feedbackTitle = "Preflight blocked";
+                _feedbackMessage = string.IsNullOrEmpty(snapshot.ValidationMessage)
+                    ? "Resolve the highlighted template or output validation issue."
+                    : snapshot.ValidationMessage;
+                Repaint();
+                return;
+            }
+
+            UIWindowCreationRequest request = BuildRequest();
+            UIWindowAssemblyValidator.InvalidateCache();
+            _templateInspectionDirty = true;
+            string freshValidation = UIWindowCreationValidator.Validate(request, _validationErrors);
+            bool freshTemplateValid = _templatePrefab == null || GetTemplateInspection().IsValid;
+            bool pathsBuilt = UIWindowCreationValidator.TryBuildPaths(
+                request,
+                out UIWindowCreationPaths paths,
+                out string pathError);
+            if (!freshTemplateValid ||
+                !string.IsNullOrEmpty(freshValidation) ||
+                !pathsBuilt)
+            {
+                _feedbackKind = FeedbackKind.Failure;
+                _feedbackTitle = "Transaction preflight blocked";
+                _feedbackMessage = !freshTemplateValid
+                    ? "The selected template changed and no longer passes validation."
+                    : !string.IsNullOrEmpty(freshValidation)
+                        ? freshValidation
+                        : pathError;
+                MarkSnapshotDirty();
+                return;
+            }
+
+            var createdAssets = new List<CreatedAssetRecord>(5);
+            CreatedAssetRecord generatedWindowScript = null;
+            bool committed = false;
             try
             {
-                // === Pre-creation Safety Validation ===
-                // Validate all paths and check for existing files before proceeding
-                string validationError = ValidateBeforeCreate();
-                if (!string.IsNullOrEmpty(validationError))
+                SaveSettings();
+                EditorUtility.DisplayProgressBar("Create UIWindow", "Writing generated scripts...", 0.12f);
+
+                generatedWindowScript = WriteAssetText(
+                    paths.ScriptFilePath,
+                    BuildWindowScript(request.WindowName, request.NamespaceName, request.UseMvp));
+                createdAssets.Add(generatedWindowScript);
+
+                if (request.UseMvp)
                 {
-                    EditorUtility.DisplayDialog("Validation Failed", validationError, "OK");
-                    return;
+                    createdAssets.Add(WriteAssetText(
+                        paths.ViewInterfaceFilePath,
+                        BuildViewInterface(request.WindowName, request.NamespaceName)));
+                    createdAssets.Add(WriteAssetText(
+                        paths.PresenterFilePath,
+                        BuildPresenter(request.WindowName, request.NamespaceName)));
                 }
 
-                // Get paths (Unity API expects paths starting with "Assets/")
-                string scriptPath = AssetDatabase.GetAssetPath(scriptFolder);
-                string soPath = AssetDatabase.GetAssetPath(soFolder);
-                string prefabPath = AssetDatabase.GetAssetPath(prefabFolder);
-                string presenterPath = useMVP && presenterFolder != null ? AssetDatabase.GetAssetPath(presenterFolder) : "";
-
-                // Ensure paths start with "Assets/"
-                if (!scriptPath.StartsWith("Assets/"))
-                    scriptPath = "Assets/" + scriptPath;
-                if (!soPath.StartsWith("Assets/"))
-                    soPath = "Assets/" + soPath;
-                if (!prefabPath.StartsWith("Assets/"))
-                    prefabPath = "Assets/" + prefabPath;
-                if (useMVP && !string.IsNullOrEmpty(presenterPath) && !presenterPath.StartsWith("Assets/"))
-                    presenterPath = "Assets/" + presenterPath;
-
-                // Ensure paths end with "/"
-                if (!scriptPath.EndsWith("/"))
-                    scriptPath += "/";
-                if (!soPath.EndsWith("/"))
-                    soPath += "/";
-                if (!prefabPath.EndsWith("/"))
-                    prefabPath += "/";
-                if (useMVP && !string.IsNullOrEmpty(presenterPath) && !presenterPath.EndsWith("/"))
-                    presenterPath += "/";
-
-                // Create script name
-                string scriptName = windowName;
-                string scriptFileName = scriptName + ".cs";
-                string fullScriptPath = scriptPath + scriptFileName;
-
-                // Create prefab name
-                string prefabName = windowName + ".prefab";
-                string fullPrefabPath = prefabPath + prefabName;
-
-                // Create SO name with _Config suffix to avoid YooAsset Location conflicts
-                string soName = windowName + "_Config.asset";
-                string fullSoPath = soPath + soName;
-
-                // MVP file paths
-                string fullViewInterfacePath = useMVP ? scriptPath + "I" + windowName + "View.cs" : "";
-                string fullPresenterPath = useMVP ? presenterPath + windowName + "Presenter.cs" : "";
-
-                // Create scripts (including MVP if enabled)
-                CreateScript(fullScriptPath, scriptName, namespaceName, useMVP);
-                
-                if (useMVP)
-                {
-                    CreateViewInterface(fullViewInterfacePath, scriptName, namespaceName);
-                    CreatePresenter(fullPresenterPath, scriptName, namespaceName);
-                }
-                
+                EditorUtility.DisplayProgressBar("Create UIWindow", "Importing scripts...", 0.38f);
                 AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
 
-                GameObject prefabInstance = CreatePrefab(fullPrefabPath, scriptName, null);
-                CreateConfiguration(
-                    fullSoPath,
-                    prefabInstance,
-                    selectedLayer,
-                    configSourceMode,
-                    autoFillLocationFromPrefabPath);
+                EditorUtility.DisplayProgressBar("Create UIWindow", "Creating prefab from template...", 0.56f);
+                GameObject prefab = CreatePrefab(
+                    paths.PrefabFilePath,
+                    request.WindowName,
+                    out string prefabGuid);
+                createdAssets.Add(new CreatedAssetRecord(paths.PrefabFilePath, prefabGuid));
 
-                System.Type scriptType = GetScriptType(scriptName, namespaceName);
+                EditorUtility.DisplayProgressBar("Create UIWindow", "Creating runtime configuration...", 0.72f);
+                string configGuid = UIWindowConfigurationWriter.Create(
+                    paths.ConfigFilePath,
+                    prefab,
+                    request.Layer,
+                    request.SourceMode,
+                    request.AutoFillLocationFromPrefabPath,
+                    request.RuntimeLocation);
+                createdAssets.Add(new CreatedAssetRecord(paths.ConfigFilePath, configGuid));
 
-                bool scriptAdded = false;
-                if (scriptType != null)
+                EditorUtility.DisplayProgressBar("Create UIWindow", "Binding generated window component...", 0.88f);
+                Type generatedType = FindLoadedType(request.WindowName, request.NamespaceName);
+                bool bound = generatedType != null && UIWindowPrefabScriptBinder.AddScriptComponentToPrefab(
+                    paths.PrefabFilePath,
+                    generatedType,
+                    request.WindowName);
+                if (bound && request.SourceMode == UIWindowConfiguration.PrefabSource.PrefabReference)
                 {
-                    scriptAdded = AddScriptComponentToPrefab(fullPrefabPath, scriptType, scriptName);
+                    UIWindowConfigurationWriter.UpdatePrefabReference(
+                        paths.ConfigFilePath,
+                        paths.PrefabFilePath);
+                }
+                else if (!bound)
+                {
+                    UIWindowCreatorPostCompileProcessor.Schedule(
+                        request.WindowName,
+                        request.NamespaceName,
+                        paths.ScriptFilePath,
+                        generatedWindowScript.ExpectedGuid,
+                        paths.PrefabFilePath,
+                        prefabGuid,
+                        paths.ConfigFilePath,
+                        configGuid,
+                        request.SourceMode);
+                }
 
-                    if (scriptAdded && configSourceMode == UIWindowConfiguration.PrefabSource.PrefabReference)
+                committed = true;
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+
+                GameObject generatedPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(paths.PrefabFilePath);
+                Selection.activeObject = generatedPrefab;
+                if (generatedPrefab != null)
+                {
+                    EditorGUIUtility.PingObject(generatedPrefab);
+                }
+
+                _feedbackKind = bound ? FeedbackKind.Success : FeedbackKind.Pending;
+                _feedbackTitle = bound ? "Window created" : "Window created; binding pending";
+                _feedbackMessage =
+                    $"Script: {paths.ScriptFilePath}\n" +
+                    $"Prefab: {paths.PrefabFilePath}\n" +
+                    $"Configuration: {paths.ConfigFilePath}\n\n" +
+                    (bound
+                        ? "The generated component is bound and the prefab is ready for authoring."
+                        : "The generated component will be bound automatically after compilation. The operation is persisted across domain reloads.");
+                Log.Info(
+                    $"Created UIWindow '{request.WindowName}' at '{paths.PrefabFilePath}'.");
+            }
+            catch (Exception exception)
+            {
+                RollbackResult rollbackResult = default;
+                var compensationFailures = new List<string>(4);
+                if (exception is UIWindowCreatorAssetCommitException assetCommitException)
+                {
+                    for (int i = 0; i < assetCommitException.ResidualPaths.Length; i++)
                     {
-                        UpdateConfigurationPrefabReference(fullSoPath, fullPrefabPath);
+                        compensationFailures.Add(
+                            "Preserved unverified residual: " + assetCommitException.ResidualPaths[i]);
+                    }
+                }
+                if (!committed)
+                {
+                    try
+                    {
+                        UIWindowCreatorPostCompileProcessor.Cancel(paths.ConfigFilePath);
+                    }
+                    catch (Exception cancelException)
+                    {
+                        compensationFailures.Add(
+                            "Pending journal cancellation failed: " + cancelException.Message);
+                    }
+
+                    try
+                    {
+                        rollbackResult = RollbackCreatedPaths(createdAssets);
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        compensationFailures.Add(
+                            "Rollback orchestration failed: " + rollbackException.Message);
+                    }
+                }
+
+                _feedbackKind = FeedbackKind.Failure;
+                _feedbackTitle = "Window creation failed";
+                if (committed)
+                {
+                    _feedbackMessage = exception.Message +
+                        "\n\nGenerated assets were committed before the final failure. Inspect the paths above before retrying.";
+                }
+                else if (rollbackResult.IsComplete && compensationFailures.Count == 0)
+                {
+                    _feedbackMessage = exception.Message +
+                        "\n\nAll assets created by this operation were rolled back.";
+                }
+                else
+                {
+                    var report = new StringBuilder(exception.Message);
+                    report.Append("\n\nRollback completed with residual risk.");
+                    string[] residualPaths = rollbackResult.ResidualPaths ?? Array.Empty<string>();
+                    string[] rollbackFailures = rollbackResult.Failures ?? Array.Empty<string>();
+                    for (int i = 0; i < residualPaths.Length; i++)
+                    {
+                        report.Append("\nResidual: ").Append(residualPaths[i]);
+                    }
+                    for (int i = 0; i < rollbackFailures.Length; i++)
+                    {
+                        report.Append("\nRollback error: ").Append(rollbackFailures[i]);
+                    }
+                    for (int i = 0; i < compensationFailures.Count; i++)
+                    {
+                        report.Append("\nCompensation error: ").Append(compensationFailures[i]);
+                    }
+                    _feedbackMessage = report.ToString();
+                }
+                Log.Error(
+                    exception,
+                    "Window creation failed.");
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+                MarkSnapshotDirty();
+            }
+        }
+
+        private GameObject CreatePrefab(
+            string prefabPath,
+            string windowName,
+            out string prefabGuid)
+        {
+            prefabGuid = string.Empty;
+            GameObject instance = null;
+            string temporaryPath = string.Empty;
+            bool movedToFinalPath = false;
+            try
+            {
+                if (_templatePrefab != null)
+                {
+                    TemplateInspection inspection = GetTemplateInspection();
+                    if (!inspection.IsValid)
+                    {
+                        throw new InvalidOperationException(
+                            "The selected template is not a valid UI prefab with a RectTransform root.");
+                    }
+
+                    instance = PrefabUtility.InstantiatePrefab(_templatePrefab) as GameObject;
+                    if (instance == null)
+                    {
+                        throw new InvalidOperationException("Template prefab could not be instantiated.");
+                    }
+                    PrefabUtility.UnpackPrefabInstance(
+                        instance,
+                        PrefabUnpackMode.OutermostRoot,
+                        InteractionMode.AutomatedAction);
+                    _templateProcessor.Process(instance, windowName);
+                    if (instance.GetComponent<CanvasGroup>() == null)
+                    {
+                        instance.AddComponent<CanvasGroup>();
                     }
                 }
                 else
                 {
-                    ScheduleAsyncScriptCheck(scriptName, namespaceName, fullPrefabPath, fullSoPath, configSourceMode);
+                    instance = new GameObject(windowName, typeof(RectTransform), typeof(CanvasGroup));
+                    RectTransform rect = instance.GetComponent<RectTransform>();
+                    rect.anchorMin = Vector2.zero;
+                    rect.anchorMax = Vector2.one;
+                    rect.offsetMin = Vector2.zero;
+                    rect.offsetMax = Vector2.zero;
                 }
 
-                AssetDatabase.Refresh();
-
-                string message = $"UIWindow '{windowName}' created successfully!\n\n" +
-                               $"Script: {fullScriptPath}\n" +
-                               $"Prefab: {fullPrefabPath}\n" +
-                               $"Config: {fullSoPath}\n";
-
-                if (useMVP)
+                instance.name = windowName;
+                if (instance.GetComponent<UIWindow>() == null)
                 {
-                    message += $"\nMVP Files:\n" +
-                               $"View Interface: {fullViewInterfacePath}\n" +
-                               $"Presenter: {fullPresenterPath}\n";
+                    instance.AddComponent<UIWindow>();
                 }
 
-                message += "\n";
-
-                if (!scriptAdded)
+                if (!UIWindowCreationValidator.TryEnsureOutputAvailable(
+                        prefabPath,
+                        ".prefab",
+                        out _,
+                        out string collisionError))
                 {
-                    message += $"⚠ Note: The script component was not added automatically because the script is still compiling.\n" +
-                              $"Please wait for Unity to finish compiling, then manually add the {scriptName} component to the prefab.";
+                    throw new IOException(
+                        $"Prefab output became unavailable before creation: {collisionError}");
                 }
 
-                EditorUtility.DisplayDialog("Success", message, "OK");
+                temporaryPath = AllocateTemporaryAssetPath(prefabPath, ".prefab");
+                GameObject temporaryPrefab = PrefabUtility.SaveAsPrefabAsset(instance, temporaryPath);
+                if (temporaryPrefab == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Failed to save temporary prefab '{temporaryPath}'.");
+                }
 
-                Selection.activeObject = AssetDatabase.LoadAssetAtPath<GameObject>(fullPrefabPath);
+                prefabGuid = AssetDatabase.AssetPathToGUID(temporaryPath);
+                VerifyUnityAssetIdentity(temporaryPath, prefabGuid, "Temporary prefab");
+
+                if (!UIWindowCreationValidator.TryEnsureOutputAvailable(
+                        prefabPath,
+                        ".prefab",
+                        out _,
+                        out collisionError))
+                {
+                    throw new IOException(
+                        $"Prefab output became unavailable before commit: {collisionError}");
+                }
+
+                string moveError = AssetDatabase.MoveAsset(temporaryPath, prefabPath);
+                if (!string.IsNullOrEmpty(moveError))
+                {
+                    throw new IOException(
+                        $"Failed to commit prefab without replacing another asset: {moveError}");
+                }
+
+                movedToFinalPath = true;
+                VerifyUnityAssetIdentity(prefabPath, prefabGuid, "Committed prefab");
+                GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
+                return prefab != null
+                    ? prefab
+                    : throw new InvalidOperationException(
+                        $"Failed to reload committed prefab '{prefabPath}'.");
             }
-            catch (Exception e)
+            catch (Exception exception)
             {
-                EditorUtility.DisplayDialog("Error", $"Failed to create UIWindow: {e.Message}\n\n{e.StackTrace}", "OK");
-                Debug.LogError($"UIWindow Creator Error: {e}");
+                string ownedPath = movedToFinalPath ? prefabPath : temporaryPath;
+                if (!string.IsNullOrEmpty(ownedPath) &&
+                    TryGetExistingAssetFile(ownedPath, out _))
+                {
+                    string cleanupError = "Prefab GUID was not captured.";
+                    if (string.IsNullOrEmpty(prefabGuid) ||
+                        !TryDeleteOwnedUnityAsset(ownedPath, prefabGuid, out cleanupError))
+                    {
+                        throw new UIWindowCreatorAssetCommitException(
+                            exception.Message +
+                            $" Cleanup preserved unverified prefab residual '{ownedPath}': {cleanupError}",
+                            exception,
+                            ownedPath);
+                    }
+                }
+
+                throw;
+            }
+            finally
+            {
+                if (instance != null)
+                {
+                    DestroyImmediate(instance);
+                }
             }
         }
 
-        private void CreateScript(string scriptPath, string className, string namespaceName, bool useMVP = false)
+        private static string AllocateTemporaryAssetPath(string finalAssetPath, string extension)
         {
-            EnsureDirectoryExists(scriptPath);
-
-            // Generate script content based on MVP mode
-            string scriptContent;
-            string viewInterface = useMVP ? $"I{className}View" : "";
-            string baseClass = "UIWindow";
-            string implementsView = useMVP ? $", {viewInterface}" : "";
-
-            if (string.IsNullOrEmpty(namespaceName))
+            string directory = Path.GetDirectoryName(finalAssetPath)?.Replace('\\', '/');
+            if (string.IsNullOrEmpty(directory))
             {
-                if (useMVP)
-                {
-                    scriptContent = $@"using CycloneGames.UIFramework.Runtime;
-
-public class {className} : {baseClass}{implementsView}
-{{
-    // Add your UI element references here
-    // Example:
-    // [SerializeField] private Button closeButton;
-    
-    protected override void Awake()
-    {{
-        base.Awake();
-        // Initialize your UI elements here
-    }}
-
-    #region {viewInterface} Implementation
-
-    // TODO: Implement your View interface methods here
-    // Example:
-    // public void ShowLoading(bool show) {{ loadingPanel.SetActive(show); }}
-
-    #endregion
-}}";
-                }
-                else
-                {
-                    scriptContent = $@"using CycloneGames.UIFramework.Runtime;
-
-public class {className} : {baseClass}
-{{
-    // Add your UI element references here
-    // Example:
-    // [SerializeField] private Button closeButton;
-    
-    protected override void Awake()
-    {{
-        base.Awake();
-        // Initialize your UI elements here
-    }}
-}}";
-                }
+                throw new InvalidOperationException(
+                    $"Asset path '{finalAssetPath}' has no parent folder.");
             }
-            else
+
+            for (int attempt = 0; attempt < 32; attempt++)
             {
-                if (useMVP)
+                string candidate =
+                    directory + "/__UIWindowCreator_" + Guid.NewGuid().ToString("N") + extension;
+                if (UIWindowCreationValidator.TryEnsureOutputAvailable(
+                        candidate,
+                        extension,
+                        out _,
+                        out _))
                 {
-                    scriptContent = $@"using CycloneGames.UIFramework.Runtime;
-
-namespace {namespaceName}
-{{
-    public class {className} : {baseClass}{implementsView}
-    {{
-        // Add your UI element references here
-        // Example:
-        // [SerializeField] private Button closeButton;
-        
-        protected override void Awake()
-        {{
-            base.Awake();
-            // Initialize your UI elements here
-        }}
-
-        #region {viewInterface} Implementation
-
-        // TODO: Implement your View interface methods here
-        // Example:
-        // public void ShowLoading(bool show) {{ loadingPanel.SetActive(show); }}
-
-        #endregion
-    }}
-}}";
-                }
-                else
-                {
-                    scriptContent = $@"using CycloneGames.UIFramework.Runtime;
-
-namespace {namespaceName}
-{{
-    public class {className} : {baseClass}
-    {{
-        // Add your UI element references here
-        // Example:
-        // [SerializeField] private Button closeButton;
-        
-        protected override void Awake()
-        {{
-            base.Awake();
-            // Initialize your UI elements here
-        }}
-    }}
-}}";
+                    return candidate;
                 }
             }
 
-            WriteScriptFile(scriptPath, scriptContent);
+            throw new IOException(
+                $"Could not allocate a unique temporary asset beside '{finalAssetPath}'.");
         }
 
-        private void CreateViewInterface(string scriptPath, string className, string namespaceName)
+        private static void VerifyUnityAssetIdentity(
+            string assetPath,
+            string expectedGuid,
+            string label)
         {
-            EnsureDirectoryExists(scriptPath);
-
-            string interfaceName = $"I{className}View";
-            string scriptContent;
-
-            if (string.IsNullOrEmpty(namespaceName))
+            string currentGuid = AssetDatabase.AssetPathToGUID(assetPath);
+            string resolvedPath = AssetDatabase.GUIDToAssetPath(expectedGuid);
+            if (string.IsNullOrEmpty(expectedGuid) ||
+                !string.Equals(currentGuid, expectedGuid, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(resolvedPath, assetPath, StringComparison.Ordinal))
             {
-                scriptContent = $@"/// <summary>
-/// View interface for {className}.
-/// Define all UI-related methods that the Presenter can call.
-/// The {className} class implements this interface.
-/// </summary>
-public interface {interfaceName}
-{{
-    // TODO: Add your view methods here
-    // Example:
-    // void ShowLoading(bool show);
-    // void SetTitle(string title);
-    // void SetButtonInteractable(bool interactable);
-}}";
-            }
-            else
-            {
-                scriptContent = $@"namespace {namespaceName}
-{{
-    /// <summary>
-    /// View interface for {className}.
-    /// Define all UI-related methods that the Presenter can call.
-    /// The {className} class implements this interface.
-    /// </summary>
-    public interface {interfaceName}
-    {{
-        // TODO: Add your view methods here
-        // Example:
-        // void ShowLoading(bool show);
-        // void SetTitle(string title);
-        // void SetButtonInteractable(bool interactable);
-    }}
-}}";
-            }
-
-            WriteScriptFile(scriptPath, scriptContent);
-        }
-
-        private void CreatePresenter(string scriptPath, string className, string namespaceName)
-        {
-            EnsureDirectoryExists(scriptPath);
-
-            string presenterName = $"{className}Presenter";
-            string viewInterface = $"I{className}View";
-            string scriptContent;
-
-            if (string.IsNullOrEmpty(namespaceName))
-            {
-                scriptContent = $@"using CycloneGames.UIFramework.Runtime;
-
-/// <summary>
-/// Presenter for {className}.
-/// Handles business logic and communicates with the View through {viewInterface}.
-/// </summary>
-public class {presenterName} : UIPresenter<{viewInterface}>
-{{
-    protected override void OnViewBound()
-    {{
-        // Called when View is first bound (during UIWindow.Awake)
-        // Use for early initialization
-    }}
-
-    public override void OnViewOpening()
-    {{
-        // Called when window starts opening
-        // Use for preparing data or starting loading operations
-    }}
-
-    public override void OnViewOpened()
-    {{
-        // Called when window is fully opened and interactive
-        // Use for populating UI with data
-    }}
-
-    public override void OnViewClosing()
-    {{
-        // Called when window starts closing
-        // Use for saving state or cancelling ongoing operations
-    }}
-
-    public override void OnViewClosed()
-    {{
-        // Called when window finishes closing
-        // Use for final cleanup before destruction
-    }}
-
-    public override void Dispose()
-    {{
-        // Cleanup resources
-        base.Dispose();
-    }}
-}}";
-            }
-            else
-            {
-                scriptContent = $@"using CycloneGames.UIFramework.Runtime;
-
-namespace {namespaceName}
-{{
-    /// <summary>
-    /// Presenter for {className}.
-    /// Handles business logic and communicates with the View through {viewInterface}.
-    /// </summary>
-    public class {presenterName} : UIPresenter<{viewInterface}>
-    {{
-        protected override void OnViewBound()
-        {{
-            // Called when View is first bound (during UIWindow.Awake)
-            // Use for early initialization
-        }}
-
-        public override void OnViewOpening()
-        {{
-            // Called when window starts opening
-            // Use for preparing data or starting loading operations
-        }}
-
-        public override void OnViewOpened()
-        {{
-            // Called when window is fully opened and interactive
-            // Use for populating UI with data
-        }}
-
-        public override void OnViewClosing()
-        {{
-            // Called when window starts closing
-            // Use for saving state or cancelling ongoing operations
-        }}
-
-        public override void OnViewClosed()
-        {{
-            // Called when window finishes closing
-            // Use for final cleanup before destruction
-        }}
-
-        public override void Dispose()
-        {{
-            // Cleanup resources
-            base.Dispose();
-        }}
-    }}
-}}";
-            }
-
-            WriteScriptFile(scriptPath, scriptContent);
-        }
-
-        private void EnsureDirectoryExists(string scriptPath)
-        {
-            string directory = Path.GetDirectoryName(scriptPath);
-            if (!Directory.Exists(directory))
-            {
-                string parentDir = Path.GetDirectoryName(directory);
-                string dirName = Path.GetFileName(directory);
-                if (!string.IsNullOrEmpty(parentDir) && AssetDatabase.IsValidFolder(parentDir))
-                {
-                    AssetDatabase.CreateFolder(parentDir, dirName);
-                }
-                else
-                {
-                    Directory.CreateDirectory(directory);
-                }
-                AssetDatabase.Refresh();
+                throw new InvalidOperationException(
+                    $"{label} identity validation failed. Expected GUID '{expectedGuid}' at " +
+                    $"'{assetPath}', current GUID='{currentGuid}', current path='{resolvedPath}'.");
             }
         }
 
-        private void WriteScriptFile(string scriptPath, string content)
+        private static bool TryDeleteOwnedUnityAsset(
+            string assetPath,
+            string expectedGuid,
+            out string error)
         {
-            byte[] bytes = Encoding.UTF8.GetBytes(content);
-            using var nativeBytes = new NativeArray<byte>(bytes, Allocator.Temp);
-            NativeFile.WriteAllBytes(scriptPath, nativeBytes);
-
-            AssetDatabase.ImportAsset(scriptPath, ImportAssetOptions.ForceUpdate);
-            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
-        }
-
-        private string pendingScriptName;
-        private string pendingNamespaceName;
-        private string pendingPrefabPath;
-        private string pendingConfigPath;
-        private UIWindowConfiguration.PrefabSource pendingConfigSourceMode;
-        private int asyncCheckAttempts = 0;
-        private const int MAX_ASYNC_ATTEMPTS = 100; // Check for up to 20 seconds (100 * 0.2s)
-
-        private void ScheduleAsyncScriptCheck(string scriptName, string namespaceName, string prefabPath, string configPath, UIWindowConfiguration.PrefabSource sourceMode)
-        {
-            pendingScriptName = scriptName;
-            pendingNamespaceName = namespaceName;
-            pendingPrefabPath = prefabPath;
-            pendingConfigPath = configPath;
-            pendingConfigSourceMode = sourceMode;
-            asyncCheckAttempts = 0;
-
-            EditorApplication.update += OnAsyncScriptCheck;
-        }
-
-        private void OnAsyncScriptCheck()
-        {
-            asyncCheckAttempts++;
-
-            System.Type scriptType = GetScriptType(pendingScriptName, pendingNamespaceName);
-
-            if (scriptType != null)
+            error = string.Empty;
+            string currentGuid = AssetDatabase.AssetPathToGUID(assetPath);
+            string resolvedPath = AssetDatabase.GUIDToAssetPath(expectedGuid);
+            if (string.IsNullOrEmpty(expectedGuid) ||
+                !string.Equals(currentGuid, expectedGuid, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(resolvedPath, assetPath, StringComparison.Ordinal))
             {
-                EditorApplication.update -= OnAsyncScriptCheck;
-
-                bool scriptAdded = AddScriptComponentToPrefab(pendingPrefabPath, scriptType, pendingScriptName);
-
-                if (scriptAdded && pendingConfigSourceMode == UIWindowConfiguration.PrefabSource.PrefabReference)
-                {
-                    UpdateConfigurationPrefabReference(pendingConfigPath, pendingPrefabPath);
-                    Debug.Log($"✓ Script {pendingScriptName} compiled and component added successfully!");
-                }
-
-                pendingScriptName = null;
-                pendingNamespaceName = null;
-                pendingPrefabPath = null;
-                pendingConfigPath = null;
-                pendingConfigSourceMode = UIWindowConfiguration.PrefabSource.PrefabReference;
-                asyncCheckAttempts = 0;
-            }
-            else if (asyncCheckAttempts >= MAX_ASYNC_ATTEMPTS)
-            {
-                EditorApplication.update -= OnAsyncScriptCheck;
-                Debug.LogWarning($"⚠ Script {pendingScriptName} did not compile within timeout. Please manually add the component to the prefab.");
-
-                pendingScriptName = null;
-                pendingNamespaceName = null;
-                pendingPrefabPath = null;
-                pendingConfigPath = null;
-                pendingConfigSourceMode = UIWindowConfiguration.PrefabSource.PrefabReference;
-                asyncCheckAttempts = 0;
-            }
-        }
-
-        private GameObject CreatePrefab(string prefabPath, string scriptName, System.Type scriptType)
-        {
-            string directory = Path.GetDirectoryName(prefabPath);
-            if (!Directory.Exists(directory))
-            {
-                string parentDir = Path.GetDirectoryName(directory);
-                string dirName = Path.GetFileName(directory);
-                if (!string.IsNullOrEmpty(parentDir) && AssetDatabase.IsValidFolder(parentDir))
-                {
-                    AssetDatabase.CreateFolder(parentDir, dirName);
-                }
-                else
-                {
-                    Directory.CreateDirectory(directory);
-                }
-                AssetDatabase.Refresh();
-            }
-
-            GameObject prefabInstance;
-
-            if (templatePrefab != null && PrefabUtility.GetPrefabAssetType(templatePrefab) != PrefabAssetType.NotAPrefab)
-            {
-                prefabInstance = PrefabUtility.InstantiatePrefab(templatePrefab) as GameObject;
-                prefabInstance.name = scriptName;
-
-                PrefabUtility.UnpackPrefabInstance(prefabInstance, PrefabUnpackMode.OutermostRoot, InteractionMode.AutomatedAction);
-
-                UIWindow existingWindow = prefabInstance.GetComponent<UIWindow>();
-                if (existingWindow != null)
-                {
-                    DestroyImmediate(existingWindow);
-                }
-            }
-            else
-            {
-                prefabInstance = new GameObject(scriptName);
-
-                RectTransform rectTransform = prefabInstance.AddComponent<RectTransform>();
-                rectTransform.anchorMin = Vector2.zero;
-                rectTransform.anchorMax = Vector2.one;
-                rectTransform.sizeDelta = Vector2.zero;
-                rectTransform.anchoredPosition = Vector2.zero;
-            }
-
-            if (scriptType != null)
-            {
-                if (prefabInstance.GetComponent(scriptType) == null)
-                {
-                    prefabInstance.AddComponent(scriptType);
-                    Debug.Log($"✓ Added {scriptName} component to prefab instance before saving.");
-                }
-            }
-            GameObject savedPrefab = PrefabUtility.SaveAsPrefabAsset(prefabInstance, prefabPath);
-
-            DestroyImmediate(prefabInstance);
-
-            AssetDatabase.Refresh();
-            AssetDatabase.ImportAsset(prefabPath, ImportAssetOptions.ForceUpdate);
-
-            savedPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
-
-            return savedPrefab;
-        }
-
-        private bool AddScriptComponentToPrefab(string prefabPath, System.Type scriptType, string scriptName)
-        {
-            GameObject savedPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
-            if (savedPrefab == null || scriptType == null)
-                return false;
-
-            if (savedPrefab.GetComponent(scriptType) != null)
-            {
-                Debug.Log($"✓ {scriptName} component already exists on prefab.");
-                return true;
-            }
-
-            string prefabPathFull = AssetDatabase.GetAssetPath(savedPrefab);
-            GameObject prefabRoot = PrefabUtility.LoadPrefabContents(prefabPathFull);
-
-            if (prefabRoot == null)
-            {
-                Debug.LogWarning($"⚠ Failed to load prefab contents for {prefabPathFull}");
+                error =
+                    $"Ownership mismatch. Expected GUID '{expectedGuid}', current GUID='{currentGuid}', " +
+                    $"current path='{resolvedPath}'.";
                 return false;
             }
 
-            prefabRoot.AddComponent(scriptType);
-
-            PrefabUtility.SaveAsPrefabAsset(prefabRoot, prefabPathFull);
-            PrefabUtility.UnloadPrefabContents(prefabRoot);
-
-            AssetDatabase.Refresh();
-
-            savedPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
-            if (savedPrefab != null && savedPrefab.GetComponent(scriptType) != null)
+            try
             {
-                Debug.Log($"✓ Successfully added {scriptName} component to prefab.");
+                if (!AssetDatabase.DeleteAsset(assetPath))
+                {
+                    error = "AssetDatabase refused to delete the owned asset.";
+                    return false;
+                }
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
+            }
+
+            if (TryGetExistingAssetFile(assetPath, out _) ||
+                string.Equals(
+                    AssetDatabase.GUIDToAssetPath(expectedGuid),
+                    assetPath,
+                    StringComparison.Ordinal))
+            {
+                error = "Owned asset still exists after deletion.";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool TryGetExistingAssetFile(string assetPath, out string absolutePath)
+        {
+            return UIWindowCreationValidator.TryGetAbsoluteAssetPath(
+                       assetPath,
+                       out absolutePath,
+                       out _) &&
+                   (File.Exists(absolutePath) || File.Exists(absolutePath + ".meta"));
+        }
+
+        private static string BuildWindowScript(string className, string namespaceName, bool useMvp)
+        {
+            string view = useMvp ? $", I{className}View" : string.Empty;
+            string body =
+                $"public sealed class {className} : UIWindow{view}\n" +
+                "{\n" +
+                "    protected override void OnOpened()\n" +
+                "    {\n" +
+                "        base.OnOpened();\n" +
+                "    }\n" +
+                "}\n";
+            return WrapInNamespace(
+                "using CycloneGames.UIFramework.Runtime;\n\n" + body,
+                namespaceName);
+        }
+
+        private static string BuildViewInterface(string className, string namespaceName)
+        {
+            return WrapInNamespace($"public interface I{className}View\n{{\n}}\n", namespaceName);
+        }
+
+        private static string BuildPresenter(string className, string namespaceName)
+        {
+            string presenterName = className + "Presenter";
+            string body =
+                $"public sealed class {presenterName} : UIPresenter<I{className}View>\n" +
+                "{\n" +
+                "    protected override void OnViewBound()\n" +
+                "    {\n" +
+                $"        // Register in the composition root with presenterBinder.Register<{presenterName}>(\"{className}\");\n" +
+                "    }\n" +
+                "}\n";
+            return WrapInNamespace(
+                "using CycloneGames.UIFramework.Runtime;\n\n" + body,
+                namespaceName);
+        }
+
+        private static string WrapInNamespace(string source, string namespaceName)
+        {
+            if (string.IsNullOrWhiteSpace(namespaceName))
+            {
+                return source;
+            }
+
+            string[] lines = source.Replace("\r\n", "\n").Split('\n');
+            var builder = new StringBuilder(source.Length + namespaceName.Length + 32);
+            builder.Append("namespace ").Append(namespaceName).Append("\n{\n");
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (lines[i].Length > 0)
+                {
+                    builder.Append("    ").Append(lines[i]);
+                }
+                builder.Append('\n');
+            }
+            builder.Append("}\n");
+            return builder.ToString();
+        }
+
+        internal static CreatedAssetRecord WriteAssetText(
+            string assetPath,
+            string content,
+            bool importForOwnership = true)
+        {
+            if (!UIWindowCreationValidator.TryEnsureOutputAvailable(
+                    assetPath,
+                    ".cs",
+                    out string absolutePath,
+                    out string validationError))
+            {
+                throw new IOException(
+                    $"Generated script output '{assetPath}' is unavailable: {validationError}");
+            }
+
+            string directory = Path.GetDirectoryName(absolutePath);
+            if (!Directory.Exists(directory))
+            {
+                throw new DirectoryNotFoundException(directory);
+            }
+
+            string temporaryPath = Path.Combine(
+                directory,
+                "." + Path.GetFileName(absolutePath) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+            byte[] bytes = new UTF8Encoding(false).GetBytes(
+                (content ?? string.Empty).Replace("\r\n", "\n"));
+            string expectedHash = ComputeSha256(bytes);
+            bool targetCommitted = false;
+            string committedGuid = string.Empty;
+            try
+            {
+                using (var stream = new FileStream(
+                           temporaryPath,
+                           FileMode.CreateNew,
+                           FileAccess.Write,
+                           FileShare.None,
+                           4096,
+                           FileOptions.WriteThrough))
+                {
+                    stream.Write(bytes, 0, bytes.Length);
+                    stream.Flush(true);
+                }
+
+                if (File.Exists(absolutePath + ".meta"))
+                {
+                    throw new IOException(
+                        $"Generated script output '{assetPath}' acquired an orphan .meta before commit.");
+                }
+
+                // File.Move without an overwrite option is the create-new commit point.
+                File.Move(temporaryPath, absolutePath);
+                targetCommitted = true;
+                if (File.Exists(absolutePath + ".meta"))
+                {
+                    var residuals = new List<string>(2);
+                    if (!TryDeleteMatchingFile(absolutePath, expectedHash, out string cleanupError))
+                    {
+                        residuals.Add(assetPath);
+                    }
+                    residuals.Add(assetPath + ".meta");
+                    throw new UIWindowCreatorAssetCommitException(
+                        $"Generated script output '{assetPath}' collided with metadata created during commit. " +
+                        $"The unknown metadata was preserved. {cleanupError}",
+                        null,
+                        residuals.ToArray());
+                }
+
+                if (importForOwnership)
+                {
+                    AssetDatabase.ImportAsset(
+                        assetPath,
+                        ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                    committedGuid = AssetDatabase.AssetPathToGUID(assetPath);
+                    VerifyUnityAssetIdentity(assetPath, committedGuid, "Generated script");
+                }
+                return new CreatedAssetRecord(assetPath, committedGuid);
+            }
+            catch (UIWindowCreatorAssetCommitException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                if (targetCommitted && File.Exists(absolutePath))
+                {
+                    var residuals = new List<string>(2);
+                    string cleanupError = string.Empty;
+                    bool cleaned = !string.IsNullOrEmpty(committedGuid) &&
+                                   TryDeleteOwnedUnityAsset(
+                                       assetPath,
+                                       committedGuid,
+                                       out cleanupError);
+                    if (!cleaned && !File.Exists(absolutePath + ".meta"))
+                    {
+                        cleaned = TryDeleteMatchingFile(
+                            absolutePath,
+                            expectedHash,
+                            out cleanupError);
+                    }
+
+                    if (!cleaned || File.Exists(absolutePath))
+                    {
+                        residuals.Add(assetPath);
+                    }
+                    if (File.Exists(absolutePath + ".meta"))
+                    {
+                        residuals.Add(assetPath + ".meta");
+                    }
+                    if (residuals.Count > 0)
+                    {
+                        throw new UIWindowCreatorAssetCommitException(
+                            $"Generated script commit failed. Cleanup preserved unverified residuals. {cleanupError}",
+                            exception,
+                            residuals.ToArray());
+                    }
+                }
+
+                throw;
+            }
+            finally
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
+            }
+        }
+
+        private static bool TryDeleteMatchingFile(
+            string absolutePath,
+            string expectedHash,
+            out string error)
+        {
+            error = string.Empty;
+            if (!File.Exists(absolutePath))
+            {
                 return true;
             }
 
-            Debug.LogWarning($"⚠ Failed to add {scriptName} component to prefab.");
-            return false;
-        }
-
-        private void UpdateConfigurationPrefabReference(string configPath, string prefabPath)
-        {
-            UIWindowConfiguration config = AssetDatabase.LoadAssetAtPath<UIWindowConfiguration>(configPath);
-            if (config == null)
-                return;
-
-            GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
-            if (prefab == null)
-                return;
-
-            SerializedObject serializedConfig = new SerializedObject(config);
-            SerializedProperty prefabProperty = serializedConfig.FindProperty("windowPrefab");
-            if (prefabProperty != null && prefabProperty.objectReferenceValue != prefab)
+            try
             {
-                prefabProperty.objectReferenceValue = prefab;
-                serializedConfig.ApplyModifiedProperties();
-                EditorUtility.SetDirty(config);
-                AssetDatabase.SaveAssets();
-                Debug.Log($"✓ Updated prefab reference in configuration.");
+                string currentHash = ComputeFileSha256(absolutePath);
+                if (!string.Equals(currentHash, expectedHash, StringComparison.Ordinal))
+                {
+                    error = "The committed file content changed before cleanup and was preserved.";
+                    return false;
+                }
+
+                File.Delete(absolutePath);
+                if (File.Exists(absolutePath))
+                {
+                    error = "The committed file remained after cleanup.";
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
             }
         }
 
-        private void CreateConfiguration(
-            string soPath,
-            GameObject prefab,
-            UILayerConfiguration layer,
-            UIWindowConfiguration.PrefabSource sourceMode,
-            bool autoFillLocation)
+        private static string ComputeFileSha256(string absolutePath)
         {
-            string directory = Path.GetDirectoryName(soPath);
-            if (!Directory.Exists(directory))
+            using (FileStream stream = new FileStream(
+                       absolutePath,
+                       FileMode.Open,
+                       FileAccess.Read,
+                       FileShare.Read))
+            using (SHA256 sha256 = SHA256.Create())
             {
-                string parentDir = Path.GetDirectoryName(directory);
-                string dirName = Path.GetFileName(directory);
-                if (!string.IsNullOrEmpty(parentDir) && AssetDatabase.IsValidFolder(parentDir))
+                return ToHex(sha256.ComputeHash(stream));
+            }
+        }
+
+        private static string ComputeSha256(byte[] bytes)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                return ToHex(sha256.ComputeHash(bytes));
+            }
+        }
+
+        private static string ToHex(byte[] bytes)
+        {
+            var builder = new StringBuilder(bytes.Length * 2);
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                builder.Append(bytes[i].ToString("x2"));
+            }
+            return builder.ToString();
+        }
+
+        private static Type FindLoadedType(string className, string namespaceName)
+        {
+            string fullName = string.IsNullOrWhiteSpace(namespaceName)
+                ? className
+                : namespaceName + "." + className;
+#if UNITY_6000_7_OR_NEWER
+            System.Collections.Generic.IReadOnlyList<System.Reflection.Assembly> assemblies =
+                UnityEngine.Assemblies.CurrentAssemblies.GetLoadedAssemblies();
+#else
+            System.Collections.Generic.IReadOnlyList<System.Reflection.Assembly> assemblies =
+                AppDomain.CurrentDomain.GetAssemblies();
+#endif
+            for (int i = 0; i < assemblies.Count; i++)
+            {
+                Type type = assemblies[i].GetType(fullName, false);
+                if (type != null)
                 {
-                    AssetDatabase.CreateFolder(parentDir, dirName);
+                    return type;
                 }
-                else
+            }
+            return null;
+        }
+
+        internal static RollbackResult RollbackCreatedPaths(
+            IReadOnlyList<CreatedAssetRecord> createdAssets)
+        {
+            var failures = new List<string>(4);
+            var residualPaths = new List<string>(4);
+            int attemptedCount = 0;
+            if (createdAssets == null)
+            {
+                return new RollbackResult(0, Array.Empty<string>(), Array.Empty<string>());
+            }
+
+            for (int i = createdAssets.Count - 1; i >= 0; i--)
+            {
+                attemptedCount++;
+                CreatedAssetRecord record = createdAssets[i];
+                string assetPath = record?.AssetPath ?? string.Empty;
+                if (record == null || string.IsNullOrEmpty(assetPath))
+                {
+                    failures.Add("Rollback ownership record or path is empty.");
+                    continue;
+                }
+
+                string extension = Path.GetExtension(assetPath);
+                if (!string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(extension, ".prefab", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(extension, ".asset", StringComparison.OrdinalIgnoreCase))
+                {
+                    failures.Add($"Refused rollback path '{assetPath}' with unsupported extension '{extension}'.");
+                    residualPaths.Add(assetPath);
+                    continue;
+                }
+
+                if (!record.TryVerifyOwnership(
+                        out _,
+                        out bool alreadyAbsent,
+                        out string ownershipError))
+                {
+                    failures.Add(
+                        $"Refused rollback for unowned or replaced output '{assetPath}': {ownershipError}");
+                    residualPaths.Add(assetPath);
+                    continue;
+                }
+                if (alreadyAbsent)
+                {
+                    continue;
+                }
+
+                if (!TryDeleteOwnedUnityAsset(
+                        assetPath,
+                        record.ExpectedGuid,
+                        out string deletionError))
+                {
+                    failures.Add(
+                        $"Owned asset deletion failed for '{assetPath}': {deletionError}");
+                    residualPaths.Add(assetPath);
+                }
+            }
+
+            try
+            {
+                AssetDatabase.Refresh();
+            }
+            catch (Exception exception)
+            {
+                failures.Add("AssetDatabase refresh after rollback failed: " + exception.Message);
+            }
+
+            return new RollbackResult(
+                attemptedCount,
+                failures.ToArray(),
+                residualPaths.ToArray());
+        }
+
+        private void LoadSettings()
+        {
+            if (!File.Exists(_settingsPath))
+            {
+                return;
+            }
+
+            try
+            {
+                string json = SystemFileStore.Default.ReadText(_settingsPath, MaxSettingsBytes);
+                UIWindowCreatorSettings settings = JsonUtility.FromJson<UIWindowCreatorSettings>(json);
+                if (settings == null || settings.schemaVersion != 1)
+                {
+                    throw new InvalidDataException("Unsupported window creator settings schema.");
+                }
+
+                _namespaceName = settings.namespaceName ?? string.Empty;
+                _useMvp = settings.useMvp;
+                _sourceMode = Enum.IsDefined(
+                    typeof(UIWindowConfiguration.PrefabSource),
+                    settings.configSourceMode)
+                    ? (UIWindowConfiguration.PrefabSource)settings.configSourceMode
+                    : UIWindowConfiguration.PrefabSource.PrefabReference;
+                _autoFillPathLocation = settings.autoFillLocationFromPrefabPath;
+                _runtimeLocation = settings.runtimeLocation ?? string.Empty;
+                _scriptFolder = LoadFolder(settings.scriptFolderPath);
+                _prefabFolder = LoadFolder(settings.prefabFolderPath);
+                _configFolder = LoadFolder(settings.configFolderPath);
+                _presenterFolder = LoadFolder(settings.presenterFolderPath);
+                _templateSelectionExplicit = settings.hasTemplateSelection;
+                if (_templateSelectionExplicit && !string.IsNullOrEmpty(settings.templatePrefabPath))
+                {
+                    _templatePrefab = AssetDatabase.LoadAssetAtPath<GameObject>(settings.templatePrefabPath);
+                    if (_templatePrefab == null)
+                    {
+                        Log.Warning(
+                            $"Saved UIWindow template was not found at '{settings.templatePrefabPath}'.");
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Log.Error(
+                    exception,
+                    "Window creator settings were not loaded.");
+            }
+        }
+
+        private void SaveSettings()
+        {
+            if (string.IsNullOrEmpty(_settingsPath))
+            {
+                return;
+            }
+
+            try
+            {
+                string directory = Path.GetDirectoryName(_settingsPath);
+                if (!Directory.Exists(directory))
                 {
                     Directory.CreateDirectory(directory);
                 }
-                AssetDatabase.Refresh();
-            }
 
-            if (prefab == null)
-            {
-                Debug.LogError("Cannot create configuration: Prefab is null!");
-                return;
-            }
-
-            string prefabPath = AssetDatabase.GetAssetPath(prefab);
-            GameObject reloadedPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
-            if (reloadedPrefab == null)
-            {
-                Debug.LogError($"Cannot create configuration: Failed to reload prefab at {prefabPath}!");
-                return;
-            }
-
-            UIWindowConfiguration config = ScriptableObject.CreateInstance<UIWindowConfiguration>();
-
-            SerializedObject serializedConfig = new SerializedObject(config);
-            var sourceProp = serializedConfig.FindProperty("source");
-            var prefabRefProp = serializedConfig.FindProperty("windowPrefab");
-            var assetRefProp = serializedConfig.FindProperty("prefabAssetRef");
-            var locationProp = serializedConfig.FindProperty("prefabLocation");
-
-            sourceProp.enumValueIndex = (int)sourceMode;
-
-            string prefabAssetPath = AssetDatabase.GetAssetPath(reloadedPrefab);
-            string guid = AssetDatabase.AssetPathToGUID(prefabAssetPath);
-
-            if (sourceMode == UIWindowConfiguration.PrefabSource.PrefabReference)
-            {
-                prefabRefProp.objectReferenceValue = reloadedPrefab;
-                if (assetRefProp != null)
+                var settings = new UIWindowCreatorSettings
                 {
-                    assetRefProp.FindPropertyRelative("m_Location").stringValue = string.Empty;
-                    assetRefProp.FindPropertyRelative("m_GUID").stringValue = string.Empty;
-                }
-                locationProp.stringValue = string.Empty;
+                    schemaVersion = 1,
+                    namespaceName = _namespaceName ?? string.Empty,
+                    scriptFolderPath = GetAssetPath(_scriptFolder),
+                    prefabFolderPath = GetAssetPath(_prefabFolder),
+                    configFolderPath = GetAssetPath(_configFolder),
+                    presenterFolderPath = GetAssetPath(_presenterFolder),
+                    useMvp = _useMvp,
+                    configSourceMode = (int)_sourceMode,
+                    autoFillLocationFromPrefabPath = _autoFillPathLocation,
+                    runtimeLocation = _runtimeLocation ?? string.Empty,
+                    hasTemplateSelection = _templateSelectionExplicit,
+                    templatePrefabPath = _templatePrefab != null
+                        ? AssetDatabase.GetAssetPath(_templatePrefab)
+                        : string.Empty
+                };
+                SystemFileStore.Default.WriteTextAtomically(
+                    _settingsPath,
+                    JsonUtility.ToJson(settings, true));
             }
-            else if (sourceMode == UIWindowConfiguration.PrefabSource.AssetReference)
+            catch (Exception exception)
             {
-                prefabRefProp.objectReferenceValue = null;
-                if (assetRefProp != null)
-                {
-                    assetRefProp.FindPropertyRelative("m_Location").stringValue = autoFillLocation ? prefabAssetPath : string.Empty;
-                    assetRefProp.FindPropertyRelative("m_GUID").stringValue = autoFillLocation ? guid : string.Empty;
-                }
-                locationProp.stringValue = string.Empty;
+                Log.Error(
+                    exception,
+                    "Window creator settings were not saved.");
             }
-            else // PathLocation
-            {
-                prefabRefProp.objectReferenceValue = null;
-                if (assetRefProp != null)
-                {
-                    assetRefProp.FindPropertyRelative("m_Location").stringValue = string.Empty;
-                    assetRefProp.FindPropertyRelative("m_GUID").stringValue = string.Empty;
-                }
-                locationProp.stringValue = autoFillLocation ? prefabAssetPath : string.Empty;
-            }
+        }
 
-            serializedConfig.FindProperty("layer").objectReferenceValue = layer;
-            serializedConfig.ApplyModifiedProperties();
+        private static DefaultAsset LoadFolder(string assetPath)
+        {
+            return string.IsNullOrEmpty(assetPath)
+                ? null
+                : AssetDatabase.LoadAssetAtPath<DefaultAsset>(assetPath);
+        }
 
-            AssetDatabase.CreateAsset(config, soPath);
-            AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
-
-            UIWindowConfiguration loadedConfig = AssetDatabase.LoadAssetAtPath<UIWindowConfiguration>(soPath);
-            if (loadedConfig != null)
-            {
-                string details = loadedConfig.Source == UIWindowConfiguration.PrefabSource.PrefabReference
-                    ? $"prefab='{loadedConfig.WindowPrefab?.name ?? "null"}'"
-                    : $"location='{loadedConfig.EffectiveLocation}'";
-                Debug.Log($"✓ Successfully created UIWindowConfiguration with source mode: {loadedConfig.Source} ({details}).");
-            }
+        private static string GetAssetPath(DefaultAsset asset)
+        {
+            return asset != null ? AssetDatabase.GetAssetPath(asset) : string.Empty;
         }
 
     }

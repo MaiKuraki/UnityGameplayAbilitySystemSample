@@ -1,1320 +1,722 @@
 # CycloneGames.InputSystem
 
-> 注意：CycloneGames.InputSystem 代码由项目开发者编写，本文档由 AI 辅助编写
+[English | 简体中文](README.md)
 
-基于 Unity Input System 的生产级响应式输入封装，支持上下文栈、多人设备配对、YAML 驱动配置，以及可选的录制回放、手势识别和反作弊时序验证工具。
+CycloneGames.InputSystem 是基于 Unity Input System 的 YAML 驱动输入层。它在提交前验证配置，为每个本地玩家创建独立的输入服务，通过优先级映射上下文路由 action，提供 R3 数据流、同步读取，并为配置和绑定 profile 持久化提供显式边界。
 
-[English](./README.md) | 简体中文
+## 目录
 
-## 快速上手
+- [概述](#概述)
+- [架构](#架构)
+- [快速开始](#快速开始)
+- [核心概念](#核心概念)
+- [使用指南](#使用指南)
+- [进阶主题](#进阶主题)
+- [常见场景](#常见场景)
+- [性能与内存](#性能与内存)
+- [故障排除](#故障排除)
 
-### 步骤 1：通过编辑器窗口生成默认配置
+## 概述
 
-打开编辑器窗口：`Tools → CycloneGames → Input System Editor`，点击 **Generate Default Config** 生成默认 YAML 配置文件。
+本模块将 authoring（在 Input System Editor 中编辑 YAML 配置）与 runtime dispatch（`InputManager` 提交不可变快照）以及 per-player delivery（`IInputPlayer` 持有 `InputUser`、action asset、active context 与 R3 stream）分离。在 YAML 中定义 context、action、binding、composite、interaction、processor 与 control scheme；manager 提交前根据当前 Unity Input System registry 验证；每个 joined player 获得独立构建的 action asset。
 
-### 步骤 2：配置代码生成（推荐）
-
-在编辑器窗口中：
-
-1. 设置**输出目录**（例如 `Assets/Scripts/Generated`）和**命名空间**（例如 `YourGame.Input.Generated`）
-2. 点击 **Save and Generate Constants** 保存配置并生成 `InputActions.cs`
-
-生成的文件将包含：
-
-- `InputActions.Contexts.*` — 上下文名称的字符串常量（如 `InputActions.Contexts.Gameplay`）
-- `InputActions.ActionMaps.*` — ActionMap 名称的字符串常量（如 `InputActions.ActionMaps.PlayerActions`）
-- `InputActions.Actions.*` — 动作的整型哈希 ID（如 `InputActions.Actions.Gameplay_Move`）
-
-这些常量支持类型安全、零 GC 的运行时输入访问。
-
-### 步骤 3：启动时初始化
-
-在游戏启动时（例如在 `MonoBehaviour.Start()` 或初始化脚本中）加载配置：
-
-```csharp
-using CycloneGames.Utility.Runtime;
-using CycloneGames.InputSystem.Runtime;
-using Cysharp.Threading.Tasks;
-
-// 在启动时调用
-var defaultUri = FilePathUtility.GetUnityWebRequestUri("input_config.yaml", UnityPathSource.StreamingAssets);
-var userUri = FilePathUtility.GetUnityWebRequestUri("user_input_settings.yaml", UnityPathSource.PersistentData);
-await InputSystemLoader.InitializeAsync(defaultUri, userUri);
-```
-
-`InputSystemLoader` 优先加载用户配置（`PersistentData`），若不存在则回退到默认配置（`StreamingAssets`）。首次运行时，自动将默认配置复制到用户配置目录。
-
-### 步骤 4：加入玩家并创建第一个上下文
-
-**使用生成的常量（推荐，零 GC）：**
-
-```csharp
-using R3;
-using YourGame.Input.Generated;               // 生成的常量命名空间
-using CycloneGames.InputSystem.Runtime;
-
-var svc = InputManager.Instance.JoinSinglePlayer(0);
-
-// 创建 Context（name 参数可选，默认使用 actionMapName）
-var ctx = new InputContext(InputActions.ActionMaps.PlayerActions)
-    .AddBinding(svc.GetVector2Observable(InputActions.Actions.Gameplay_Move), new MoveCommand(OnMove))
-    .AddBinding(svc.GetButtonObservable(InputActions.Actions.Gameplay_Confirm), new ActionCommand(OnConfirm));
-
-// 绑定生命周期到当前组件 — 组件销毁时自动从栈中移除
-// 注意：AddTo 返回 CancellationTokenRegistration，应单独调用，不要赋回给 ctx
-ctx.AddTo(this);
-
-svc.PushContext(ctx);
-```
-
-**使用字符串 API（兼容模式）：**
-
-```csharp
-var svc = InputManager.Instance.JoinSinglePlayer(0);
-// ActionMap 必需，name 默认为 "PlayerActions"
-var ctx = new InputContext("PlayerActions")
-    .AddBinding(svc.GetVector2Observable("PlayerActions", "Move"), new MoveCommand(dir => { /* ... */ }))
-    .AddBinding(svc.GetButtonObservable("PlayerActions", "Confirm"), new ActionCommand(() => { /* ... */ }));
-
-svc.PushContext(ctx);
-```
-
-**完整 SimplePlayer 示例：**
-
-```csharp
-using UnityEngine;
-using CycloneGames.InputSystem.Runtime;
-using R3;
-
-public class SimplePlayer : MonoBehaviour
-{
-    private IInputPlayer _input;
-    private InputContext _context;
-
-    private void Start()
-    {
-        _input = InputManager.Instance.JoinSinglePlayer(0);
-
-        _context = new InputContext("PlayerActions")
-            .AddBinding(_input.GetVector2Observable("PlayerActions", "Move"), new MoveCommand(OnMove))
-            .AddBinding(_input.GetButtonObservable("PlayerActions", "Confirm"), new ActionCommand(OnConfirm))
-            .AddBinding(_input.GetLongPressObservable("PlayerActions", "Confirm"), new ActionCommand(OnConfirmLongPress));
-
-        _context.AddTo(this);
-        _input.PushContext(_context);
-    }
-
-    private void OnMove(Vector2 dir)
-    {
-        transform.position += new Vector3(dir.x, 0f, dir.y) * Time.deltaTime * 5f;
-    }
-
-    private void OnConfirm()
-    {
-        Debug.Log("Confirm 按下");
-    }
-
-    private void OnConfirmLongPress()
-    {
-        Debug.Log("Confirm 长按");
-    }
-}
-```
-
-## 核心概念
-
-### 4.1 上下文栈（Context Stack）
-
-`InputSystem` 使用**Context 对象引用**作为唯一标识来管理输入栈：
-
-**核心特性：**
-
-1. **独立实例**：每次 `new InputContext(...)` 创建独立对象。即使名称相同（如 "Gameplay"），也是不同实例
-2. **栈管理**：`PushContext(ctx)` 将对象推入栈，栈顶的 Context 为活动状态
-3. **自动置顶**：若 `PushContext` 一个已在栈中的 Context 对象，它会自动移至栈顶（聚焦行为）
-4. **精确移除**：`RemoveContext(ctx)` 只移除指定对象实例，不会误删同名 Context
-
-**Push / Pop / AddTo 生命周期：**
-
-```csharp
-using R3;
-
-// Push 推入栈顶（若已在栈中，移至栈顶）
-inputService.PushContext(menuContext);          // 栈：[Gameplay, Menu]
-
-// ⚠️ 使用 AddTo(this) 时不推荐 PopContext！
-// PopContext 无脑移除栈顶。若栈顺序因动态 UI 发生变化，可能移除错误的 Context
-// 请使用 RemoveContext(context) 或 AddTo(this) 代替
-
-// 推荐：通过对象引用精确移除
-inputService.RemoveContext(menuContext);
-
-// 或者绑定生命周期（组件销毁时自动移除）
-menuContext.AddTo(this);
-
-// 查看当前活动上下文
-string currentContext = inputService.ActiveContextName.CurrentValue;
-
-// 订阅上下文变化
-inputService.ActiveContextName.Subscribe(ctxName => Debug.Log($"当前上下文: {ctxName}"));
-```
-
-**UI 叠加场景示例：**
-
-```csharp
-using R3;
-
-// UI A
-public class UIWindowA : MonoBehaviour
-{
-    private InputContext _context;
-
-    private void OnEnable()
-    {
-        var input = InputManager.Instance.GetInputPlayer(0);
-        _context = new InputContext("UIActions", "UI")
-            .AddBinding(input.GetButtonObservable("UIActions", "Confirm"), new ActionCommand(OnConfirmA));
-
-        _context.AddTo(this);
-        input.PushContext(_context);            // 栈：[A]
-    }
-}
-
-// UI B（叠加在 A 上）
-public class UIWindowB : MonoBehaviour
-{
-    private InputContext _context;
-
-    private void OnEnable()
-    {
-        var input = InputManager.Instance.GetInputPlayer(0);
-        _context = new InputContext("UIActions", "UI")  // 名称相同也没关系，不同实例
-            .AddBinding(input.GetButtonObservable("UIActions", "Confirm"), new ActionCommand(OnConfirmB));
-
-        _context.AddTo(this);
-        input.PushContext(_context);            // 栈：[A, B]，B 在栈顶，A 被暂停
-    }
-    // B 关闭时，AddTo 自动移除，A 自动恢复
-}
-```
-
-**多个 Context 共享相同 ActionMap：**
-
-✅ 多个 Context 可以安全地共享相同的 ActionMap 名称
-✅ 每个 Context 的绑定独立存储
-✅ 切换 Context 时，仅激活栈顶 Context 的绑定
-✅ Context 之间不会产生冲突
-
-```csharp
-using R3;
-
-// 游戏 Context
-public class GameplayController : MonoBehaviour
-{
-    private void Start()
-    {
-        var input = InputManager.Instance.GetInputPlayer(0);
-        var gameplay = new InputContext("PlayerActions", "Gameplay")
-            .AddBinding(input.GetVector2Observable("PlayerActions", "Move"), new MoveCommand(OnMove))
-            .AddBinding(input.GetButtonObservable("PlayerActions", "Jump"), new ActionCommand(OnJump));
-
-        gameplay.AddTo(this);
-        input.PushContext(gameplay);            // 栈：[Gameplay]
-    }
-}
-
-// 暂停菜单 Context — 同样使用 "PlayerActions"
-public class PauseMenu : MonoBehaviour
-{
-    private void OnEnable()
-    {
-        var input = InputManager.Instance.GetInputPlayer(0);
-        var pause = new InputContext("PlayerActions", "PauseMenu")
-            .AddBinding(input.GetVector2Observable("PlayerActions", "Move"), new MoveCommand(OnMenuNavigate))
-            .AddBinding(input.GetButtonObservable("PlayerActions", "Confirm"), new ActionCommand(OnMenuConfirm))
-            .AddBinding(input.GetButtonObservable("PlayerActions", "Cancel"), new ActionCommand(OnMenuCancel));
-
-        pause.AddTo(this);
-        input.PushContext(pause);               // 栈：[Gameplay, PauseMenu]，仅 PauseMenu 绑定生效
-    }
-    // PauseMenu 销毁时，Gameplay Context 自动恢复
-}
-```
-
-### 4.2 InputPlayer 与 IInputPlayer
-
-**IInputPlayer** 是单个玩家的输入服务接口，提供响应式流、上下文管理和运行时键位修改。
-
-**关键属性：**
-
-| 属性 | 类型 | 描述 |
-|------|------|------|
-| `ActiveContextName` | `ReadOnlyReactiveProperty<string>` | 当前活动上下文名称 |
-| `ActiveDeviceKind` | `ReadOnlyReactiveProperty<InputDeviceKind>` | 当前活动设备类型（键鼠/手柄/触控） |
-| `OnContextChanged` | `event Action<string>` | 上下文切换事件 |
-
-**加入玩家：**
-
-```csharp
-// 单人模式 — 自动加入并将所有必需设备锁定给单个玩家
-var svc = InputManager.Instance.JoinSinglePlayer(0);
-
-// 若玩家已加入，JoinSinglePlayer 返回现有服务，不触发 OnPlayerInputReady
-var svc2 = InputManager.Instance.JoinSinglePlayer(0);  // 返回同一服务，无事件触发
-
-// 如需在玩家已加入后刷新绑定，使用 RefreshPlayerInput
-InputManager.Instance.RefreshPlayerInput(0);            // 触发 OnPlayerInputReady 激活新绑定
-```
-
-**ActiveDeviceKind — 活动设备检测：**
-
-```csharp
-// 实时追踪玩家最后一次使用的设备是键鼠还是手柄
-inputPlayer.ActiveDeviceKind.Subscribe(kind =>
-{
-    switch (kind)
-    {
-        case InputDeviceKind.KeyboardMouse:
-            ShowKeyboardPrompts();
-            break;
-        case InputDeviceKind.Gamepad:
-            ShowGamepadPrompts();
-            break;
-    }
-});
-```
-
-### 4.3 命令模式
-
-所有输入绑定通过命令模式回调，支持四种命令类型：
-
-| 命令 | 接口 | Observable 类型 | 签名 | 典型用途 |
-|------|------|-----------------|------|----------|
-| **ActionCommand** | `IActionCommand` | `Observable<Unit>` | `() => void` | 按钮确认、跳跃、攻击 |
-| **MoveCommand** | `IMoveCommand` | `Observable<Vector2>` | `(Vector2) => void` | 移动、菜单导航 |
-| **ScalarCommand** | `IScalarCommand` | `Observable<float>` | `(float) => void` | 扳机轴、长按进度 |
-| **BoolCommand** | `IBoolCommand` | `Observable<bool>` | `(bool) => void` | 按下/释放状态 |
-
-```csharp
-var ctx = new InputContext("PlayerActions")
-    .AddBinding(svc.GetButtonObservable("PlayerActions", "Jump"), new ActionCommand(OnJump))
-    .AddBinding(svc.GetVector2Observable("PlayerActions", "Move"), new MoveCommand(OnMove))
-    .AddBinding(svc.GetScalarObservable("PlayerActions", "FireTrigger"), new ScalarCommand(OnFireTrigger))
-    .AddBinding(svc.GetPressStateObservable("PlayerActions", "Sprint"), new BoolCommand(OnSprintState));
-```
-
-### 4.4 响应式输入流
-
-`IInputPlayer` 提供七种 Observable 流，均支持**字符串**和**整型哈希（零 GC）** 两种调用方式：
-
-| Observable | 返回类型 | 适用动作类型 | 描述 |
-|------------|----------|-------------|------|
-| `GetButtonObservable` | `Observable<Unit>` | Button | 按下时触发 |
-| `GetVector2Observable` | `Observable<Vector2>` | Vector2 | 持续输出二维向量（摇杆/WASD） |
-| `GetScalarObservable` | `Observable<float>` | Float | 持续输出标量值（扳机轴） |
-| `GetLongPressObservable` | `Observable<Unit>` | Button（配置 longPressMs） | 按住达到时长后触发一次 |
-| `GetLongPressProgressObservable` | `Observable<float>` | Button（配置 longPressMs） | 持续输出 0~1 进度，取消时输出 -1 |
-| `GetPressStateObservable` | `Observable<bool>` | Button | 按下=true，释放=false |
-| `GetChordObservable` | `Observable<Unit>` | Button ×2 | 两个按钮在时间窗口内同时按下 |
-
-**字符串 vs 整型哈希：**
-
-```csharp
-// 字符串（兼容模式，运行时字符串查找）
-svc.GetButtonObservable("PlayerActions", "Jump");
-
-// 整型哈希（推荐，零 GC，编译时常量）
-svc.GetButtonObservable(InputActions.Actions.Gameplay_Jump);
-```
-
-## 功能指南
-
-### 5.1 运行时键位修改
-
-支持运行时重新绑定、重置和查询当前绑定：
-
-```csharp
-var player = InputManager.Instance.GetInputPlayer(0);
-
-// 重新绑定 — 将旧绑定路径替换为新路径
-bool ok = player.RebindAction("PlayerActions", "Jump", "<Keyboard>/space", "<Keyboard>/j");
-
-// 重置单个动作的绑定（移除所有覆写）
-bool reset = player.ResetActionBinding("PlayerActions", "Jump");
-
-// 重置所有动作的绑定
-player.ResetAllActionBindings();
-
-// 获取当前生效的绑定路径（含覆写）
-string[] bindings = player.GetActionBindings("PlayerActions", "Jump");
-// 例如输出: ["<Keyboard>/space", "<Gamepad>/buttonSouth"]
-
-// 通过 InputManager 代理调用
-InputManager.Instance.RebindAction(0, "PlayerActions", "Jump", "<Keyboard>/space", "<Keyboard>/j");
-InputManager.Instance.ResetActionBinding(0, "PlayerActions", "Jump");
-string[] paths = InputManager.Instance.GetActionBindings(0, "PlayerActions", "Jump");
-```
-
-### 5.2 复合键（Chord）检测
-
-检测两个按钮在指定时间窗口内同时按下（如 A+B 组合技）。零 GC 实现，发射路径无分配。
-
-```csharp
-using YourGame.Input.Generated;
-using CycloneGames.InputSystem.Runtime;
-
-var ctx = new InputContext(InputActions.ActionMaps.PlayerActions, InputActions.Contexts.Gameplay)
-    .AddBinding(
-        // A+B 同时按下，300ms 窗口
-        _input.GetChordObservable(
-            InputActions.Actions.Gameplay_Punch,
-            InputActions.Actions.Gameplay_Kick,
-            windowMs: 300f),
-        new ActionCommand(OnPunchAndKickCombo))
-    .AddBinding(
-        // 快速按下技：50ms 严格窗口
-        _input.GetChordObservable(
-            InputActions.Actions.Gameplay_LightAttack,
-            InputActions.Actions.Gameplay_HeavyAttack,
-            windowMs: 50f),
-        new ActionCommand(OnRapidCombo));
-
-// 字符串 API
-_input.GetChordObservable("PlayerActions", "Punch", "Kick", 300f);
-```
-
-**行为说明：** 当两个按钮都按下且在 `windowMs` 内时发射一次 `Unit`。任一按钮释放后重置，可再次触发。适用于 A+B 组合技、快速连续技、音游双押等场景。
-
-### 5.3 长按与进度条
-
-**配置长按（YAML）：**
-
-```yaml
-playerSlots:
-  - playerId: 0
-    contexts:
-      - name: Gameplay
-        actionMap: PlayerActions
-        bindings:
-          - type: Button
-            action: Confirm
-            longPressMs: 500          # 按住 500ms 触发长按
-            deviceBindings:
-              - "<Keyboard>/space"
-              - "<Gamepad>/buttonSouth"
-```
-
-**运行时：**
-
-```csharp
-using YourGame.Input.Generated;
-
-// 长按完成事件
-var ctx = new InputContext(InputActions.ActionMaps.PlayerActions)
-    .AddBinding(
-        _input.GetLongPressObservable(InputActions.Actions.Gameplay_Confirm),
-        new ActionCommand(OnActionCharged));
-
-// 长按进度条（UI 显示 0~1）
-public class ChargeSkillUI : MonoBehaviour
-{
-    [SerializeField] private Image _progressBar;
-
-    private void Start()
-    {
-        var input = InputManager.Instance.GetInputPlayer(0);
-        var ctx = new InputContext(InputActions.ActionMaps.PlayerActions, InputActions.Contexts.Gameplay)
-            .AddBinding(
-                input.GetLongPressProgressObservable(InputActions.Actions.Gameplay_Confirm),
-                new ScalarCommand(progress =>
-                {
-                    if (progress < 0f)
-                    {
-                        _progressBar.gameObject.SetActive(false);   // 取消
-                    }
-                    else
-                    {
-                        _progressBar.gameObject.SetActive(true);
-                        _progressBar.fillAmount = progress;         // 进度 0~1
-                        if (progress >= 1f)
-                            OnSkillReady();                          // 长按完成
-                    }
-                }));
-
-        ctx.AddTo(this);
-        input.PushContext(ctx);
-    }
-
-    private void OnSkillReady() { /* 蓄力完成 */ }
-}
-```
-
-**进度值含义：**
-
-| 值 | 含义 |
-|----|------|
-| `0 ~ 1` | 长按进度（0% → 100%） |
-| `1.0` | 长按完成（**仅触发一次**） |
-| `-1` | 取消（在完成前松开） |
-
-### 5.4 上下文特定的短按 / 长按互斥
-
-如果同一按键在不同情景下分别需要"短按触发"和"长按触发"且互斥，定义两个 Context 分别配置：
-
-```yaml
-playerSlots:
-  - playerId: 0
-    contexts:
-      - name: Inspect
-        actionMap: PlayerActions
-        bindings:
-          - type: Button
-            action: Confirm
-            # 仅短按（不配置 longPressMs）
-            deviceBindings:
-              - "<Keyboard>/space"
-              - "<Gamepad>/buttonSouth"
-      - name: Charge
-        actionMap: PlayerActions
-        bindings:
-          - type: Button
-            action: Confirm
-            longPressMs: 600          # 仅长按
-            deviceBindings:
-              - "<Keyboard>/space"
-              - "<Gamepad>/buttonSouth"
-```
-
-```csharp
-// Inspect 上下文：仅绑定短按
-var ctxInspect = new InputContext("PlayerActions", "Inspect")
-    .AddBinding(_input.GetButtonObservable("PlayerActions", "Confirm"), new ActionCommand(OnInspectConfirm));
-
-// Charge 上下文：仅绑定长按
-var ctxCharge = new InputContext("PlayerActions", "Charge")
-    .AddBinding(_input.GetLongPressObservable("PlayerActions", "Confirm"), new ActionCommand(OnChargeConfirm));
-
-if (enteredChargeZone)
-    _input.PushContext(ctxCharge);
-else
-    _input.PushContext(ctxInspect);
-```
-
-### 5.5 输入阻塞
-
-临时禁用所有输入（例如暂停菜单、过场动画）：
-
-```csharp
-inputService.BlockInput();    // 阻塞所有输入
-inputService.UnblockInput();  // 恢复输入（恢复当前活动上下文的 ActionMap）
-```
-
-### 5.6 设备图标自动切换
-
-`InputDeviceIconSet` 是 ScriptableObject 资产，映射 `InputDeviceKind` 到对应的 UI 精灵。
-
-**创建资产：** `Create → CycloneGames → Input → Device Icon Set`
-
-**InputDeviceIconSet：**
-
-```csharp
-// ScriptableObject 引用
-[SerializeField] private InputDeviceIconSet _iconSet;
-
-// 运行时获取对应设备图标
-Sprite icon = _iconSet.GetIcon(InputDeviceKind.Gamepad);    // 手柄图标
-Sprite icon2 = _iconSet.GetIcon(InputDeviceKind.KeyboardMouse); // 键鼠图标
-```
-
-**InputDeviceIconSwitcher** 是 MonoBehaviour 组件，自动订阅 `ActiveDeviceKind` 并切换 `Image.sprite`：
-
-```csharp
-// 挂载到带有 Image 组件的 GameObject 上
-// [RequireComponent(typeof(Image))]
-// 在 Inspector 中指定 iconSet 引用即可
-// 运行时自动根据输入端切换图标（无需额外代码）
-```
-
-### 5.7 鼠标按键轮询
-
-在热路径中可直接轮询鼠标按钮状态，无需通过 Observable 订阅：
-
-```csharp
-var player = InputManager.Instance.GetInputPlayer(0);
-
-if (player.IsLeftMouseButtonPressed)    { /* 左键按下 */ }
-if (player.IsRightMouseButtonPressed)   { /* 右键按下 */ }
-if (player.IsMiddleMouseButtonPressed)  { /* 中键按下 */ }
-```
-
-## YAML 配置
-
-完整的 Schema 如下：
-
-```yaml
-# 加入动作 — 大厅阶段玩家按此键加入
-joinAction:
-  type: Button
-  action: JoinGame
-  deviceBindings:
-    - "<Keyboard>/enter"
-    - "<Gamepad>/start"
-
-# 玩家槽位 — 每个槽位可配置多个上下文（Context）
-playerSlots:
-  - playerId: 0
-    contexts:
-      - name: Gameplay                         # Context 名称（用于调试）
-        actionMap: PlayerActions               # Unity Input System ActionMap 名称
-        bindings:
-          # === Vector2 类型（摇杆/移动键） ===
-          - type: Vector2
-            action: Move
-            deviceBindings:
-              - "<Gamepad>/leftStick"
-              - "2DVector(mode=2,up=<Keyboard>/w,down=<Keyboard>/s,left=<Keyboard>/a,right=<Keyboard>/d)"
-              - "<Mouse>/delta"
-
-          # === Button 类型（按键/短按/长按） ===
-          - type: Button
-            action: Jump
-            deviceBindings:
-              - "<Gamepad>/buttonSouth"
-              - "<Keyboard>/space"
-
-          - type: Button
-            action: Confirm
-            longPressMs: 500                    # 可选，配置后触发长按事件
-            deviceBindings:
-              - "<Gamepad>/buttonSouth"
-              - "<Keyboard>/space"
-
-          # === Float 类型（扳机轴） ===
-          - type: Float
-            action: FireTrigger
-            longPressMs: 600                    # 可选：浮点长按
-            longPressValueThreshold: 0.6        # 阈值（0~1），达到后视为按下
-            deviceBindings:
-              - "<Gamepad>/leftTrigger"
-```
-
-**字段说明：**
-
-| 字段 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| `joinAction.type` | `Button` | 是 | 加入动作类型（固定为 Button） |
-| `joinAction.action` | `string` | 是 | 加入动作名称 |
-| `joinAction.deviceBindings` | `string[]` | 是 | 加入按钮的绑定路径 |
-| `playerSlots[].playerId` | `int` | 是 | 玩家 ID |
-| `contexts[].name` | `string` | 是 | Context 显示名称 |
-| `contexts[].actionMap` | `string` | 是 | Unity Input System ActionMap 名称 |
-| `bindings[].type` | `Vector2` / `Button` / `Float` | 是 | 动作值类型 |
-| `bindings[].action` | `string` | 是 | 动作名称 |
-| `bindings[].longPressMs` | `int` | 否 | 长按触发时间（毫秒），仅 Button/Float 类型有效 |
-| `bindings[].longPressValueThreshold` | `float` | 否 | Float 类型的按下阈值（0~1），默认 0.5 |
-| `bindings[].deviceBindings` | `string[]` | 是 | 设备绑定路径，支持 `2DVector(...)` 复合绑定 |
-
-## 多人游戏模式
-
-### 单人模式（自动锁定设备）
-
-```csharp
-var svc = InputManager.Instance.JoinSinglePlayer(0);
-
-// 若玩家已加入，返回现有服务而不触发 OnPlayerInputReady
-var svc2 = InputManager.Instance.JoinSinglePlayer(0); // 同一服务，无事件
-
-// 若需在玩家已加入后重新绑定 Context，使用 RefreshPlayerInput
-InputManager.Instance.RefreshPlayerInput(0);
-```
-
-### 大厅模式 — 设备锁定
-
-第一个设备加入成为玩家 0，后续设备自动配对给该玩家。适合单人玩家在键鼠和手柄间切换：
-
-```csharp
-InputManager.Instance.OnPlayerInputReady += HandlePlayerInputReady;
-InputManager.Instance.StartListeningForPlayers(true); // true = 设备锁定模式
-```
-
-### 大厅模式 — 设备共享
-
-每个新设备加入创建一个新玩家（玩家 0, 1, 2...），适合本地多人合作：
-
-```csharp
-InputManager.Instance.OnPlayerInputReady += HandlePlayerInputReady;
-InputManager.Instance.StartListeningForPlayers(false); // false = 设备共享模式
-```
-
-### 批量加入
-
-```csharp
-// 同步批量加入
-var players = InputManager.Instance.JoinPlayersBatch(new List<int> { 0, 1, 2 });
-
-// 异步批量加入（带超时）
-var players = await InputManager.Instance.JoinPlayersBatchAsync(
-    new List<int> { 0, 1, 2 },
-    timeoutPerPlayerInSeconds: 5
-);
-```
-
-### 异步加入（等待设备连接）
-
-```csharp
-var svc = await InputManager.Instance.JoinSinglePlayerAsync(0, timeoutInSeconds: 5);
-if (svc != null)
-{
-    // 玩家成功加入
-}
-```
-
-### 手动锁定设备
-
-```csharp
-// 将特定设备锁定给特定玩家
-var svc = InputManager.Instance.JoinPlayerAndLockDevice(0, Keyboard.current);
-
-// 多个玩家共享键盘（适合回合制游戏）
-var player0 = InputManager.Instance.JoinPlayerOnSharedDevice(0);
-var player1 = InputManager.Instance.JoinPlayerOnSharedDevice(1);
-```
-
-## 运行时配置管理
-
-### 热重载
-
-```csharp
-bool success = await InputManager.Instance.ReloadConfigurationAsync();
-if (success)
-{
-    Debug.Log("配置已重新加载");
-    // 新加入的玩家将使用新配置
-}
-```
-
-### 保存用户配置
-
-```csharp
-await InputManager.Instance.SaveUserConfigurationAsync();
-```
-
-### 重置为默认配置
-
-```csharp
-using CycloneGames.Utility.Runtime;
-using CycloneGames.InputSystem.Runtime;
-
-var defaultUri = FilePathUtility.GetUnityWebRequestUri("input_config.yaml", UnityPathSource.StreamingAssets);
-var userUri = FilePathUtility.GetUnityWebRequestUri("user_input_settings.yaml", UnityPathSource.PersistentData);
-
-bool success = await InputSystemLoader.ResetToDefaultAsync(defaultUri, userUri);
-if (success)
-{
-    Debug.Log("配置已重置为默认值");
-}
-```
-
-### 事件回调
-
-```csharp
-// 玩家输入就绪事件
-InputManager.Instance.OnPlayerInputReady += (IInputPlayer playerInput) =>
-{
-    Debug.Log($"玩家 {(playerInput as InputPlayer)?.PlayerId} 输入已就绪");
-};
-
-// 配置重载事件
-InputManager.Instance.OnConfigurationReloaded += () =>
-{
-    Debug.Log("配置已重新加载");
-};
-
-// 刷新已加入玩家的输入绑定（跨场景使用时）
-// 场景：LaunchScene 初始化输入系统 → GameplayScene 绑定 Context
-// 在 GameplayScene 中绑定 Context 后触发刷新：
-InputManager.Instance.OnPlayerInputReady += HandlePlayerInputReady;
-// ...在绑定 Context 之后...
-if (InputManager.Instance.GetInputPlayer(0) != null)
-{
-    InputManager.Instance.RefreshPlayerInput(0);
-}
-
-// 上下文切换事件
-inputService.OnContextChanged += (string contextName) =>
-{
-    Debug.Log($"上下文切换到: {contextName}");
-};
-```
-
-## 输入工具集（Runtime/Tools/）
-
-工具集位于独立 asmdef `CycloneGames.InputSystem.Tools.Runtime`，需额外引用。
-
-### 9.1 InputRecorder — 录制回放
-
-录制玩家的输入操作，将时序数据导出为 `InputRecording` 对象，支持将录制内容重放为 Observable 流。
-
-```csharp
-using CycloneGames.InputSystem.Runtime;
-using R3;
-
-var recorder = new InputRecorder();
-
-// 注册要录制的动作
-recorder.RecordAction("PlayerActions", "Move");
-recorder.RecordAction("PlayerActions", "Jump");
-recorder.RecordAction("PlayerActions", "Attack");
-
-// 开始录制
-recorder.StartRecording(player);
-
-// ...玩游戏...
-
-// 停止录制
-InputRecording recording = recorder.StopRecording();
-
-Debug.Log($"录制时长: {recording.Duration}s, 帧数: {recording.FrameCount}");
-
-// 重放为 Observable（可像普通输入一样绑定到 Context）
-recording.CreateReplayVector2Observable()
-    .Subscribe(v => Debug.Log($"重放移动: {v}"));
-
-recording.CreateReplayObservable()
-    .Subscribe(_ => Debug.Log("重放按钮事件"));
-
-recording.CreateReplayFloatObservable()
-    .Subscribe(f => Debug.Log($"重放浮点值: {f}"));
-
-// 用完释放
-recorder.Dispose();
-```
-
-**典型应用：** 教程演示、AI 训练数据录制、Bug 复现、自动化测试。
-
-### 9.2 InputSequenceMatcher — 序列匹配与手势识别
-
-在录制数据中检测特定输入序列（如格斗游戏出招表）和手势模式。
-
-#### 序列匹配
-
-```csharp
-using CycloneGames.InputSystem.Runtime;
-
-var recording = /* 来自 InputRecorder */;
-
-// 定义要检测的序列（如：波动拳 ↓↘→ + P）
-var hadouken = new SequenceStep[]
-{
-    new SequenceStep { ActionName = "Move", ExpectedType = ActionValueType.Vector2,
-        ExpectedDirection = new Vector2(0, -1), DirectionTolerance = 0.3f, MaxDelayMs = 200f },
-    new SequenceStep { ActionName = "Move", ExpectedType = ActionValueType.Vector2,
-        ExpectedDirection = new Vector2(1, -1).normalized, DirectionTolerance = 0.3f, MaxDelayMs = 200f },
-    new SequenceStep { ActionName = "Move", ExpectedType = ActionValueType.Vector2,
-        ExpectedDirection = new Vector2(1, 0), DirectionTolerance = 0.3f, MaxDelayMs = 200f },
-    new SequenceStep { ActionName = "Punch", ExpectedType = ActionValueType.Button, MaxDelayMs = 150f },
-};
-
-SequenceMatchResult result = InputSequenceMatcher.DetectSequence(recording, hadouken);
-
-if (result.Matched)
-{
-    Debug.Log($"检测到招式! 出现 {result.OccurrenceCount} 次, "
-            + $"最佳时长: {result.BestTotalDuration:F3}s, 平均: {result.AverageDuration:F3}s");
-
-    foreach (var occ in result.Occurrences)
-    {
-        Debug.Log($"  出招时间: {occ.StartTime:F3}s ~ {occ.EndTime:F3}s");
-    }
-}
-```
-
-#### 手势识别（内置格斗游戏出招表）
-
-```csharp
-using CycloneGames.InputSystem.Runtime;
-
-var recording = /* 来自 InputRecorder */;
-
-// 使用内置手势定义
-var result1 = InputGestureRecognizer.DetectGesture(recording, GestureDefinition.QuarterCircleForward);
-var result2 = InputGestureRecognizer.DetectGesture(recording, GestureDefinition.DragonPunch);
-var result3 = InputGestureRecognizer.DetectGesture(recording, GestureDefinition.HalfCircleForward);
-
-if (result1.Matched) Debug.Log($"波动拳! 时长: {result1.Duration:F3}s, "
-                                + $"方向切换数: {result1.DirectionTransitions.Length}");
-
-// 自定义手势
-var myGesture = new GestureDefinition(
-    "我的必杀技",
-    new[] { Direction8Way.Left, Direction8Way.Right, Direction8Way.Up },
-    timeWindowSec: 0.3f,
-    inputDeadZone: 0.3f
-);
-var customResult = InputGestureRecognizer.DetectGesture(recording, myGesture);
-```
-
-**内置手势定义：**
-
-| 手势 | 名称 | 方向序列 | 时间窗口 |
-|------|------|----------|----------|
-| `QuarterCircleForward` | 波动拳（↓↘→） | ↓ → ↘ → → | 0.4s |
-| `QuarterCircleBack` | 反波动拳（↓↙←） | ↓ → ↙ → ← | 0.4s |
-| `DragonPunch` | 升龙拳（→↓↘） | → → ↓ → ↘ | 0.35s |
-| `HalfCircleForward` | 半圆前（←↙↓↘→） | ← → ↙ → ↓ → ↘ → → | 0.6s |
-| `HalfCircleBack` | 半圆后（→↘↓↙←） | → → ↘ → ↓ → ↙ → ← | 0.6s |
-| `FullCircle` | 全圆 360° | 8 方向全周 | 0.8s |
-| `DashForward` | 前冲 | → → 回中 → → | 0.2s |
-| `DashBack` | 后退 | ← → 回中 → ← | 0.2s |
-
-### 9.3 InputTimingValidator — 反作弊时序验证
-
-通过多层统计分析检测非人类输入模式。两级判定机制：
-
-- **Tier 1（硬判定）**：物理上人类不可能达到的模式 — 近零误判
-- **Tier 2（软评分）**：统计异常指标加权计算 `HumanLikenessScore`（0~1）
-
-```csharp
-using CycloneGames.InputSystem.Runtime;
-
-var recording = /* 来自 InputRecorder */;
-
-// 定义节拍时间点（秒）
-float[] beatTimings = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f };
-
-// 使用默认配置（Normal）
-TimingValidationResult result = InputTimingValidator.ValidateTiming(
-    recording, beatTimings,
-    actionMapName: "PlayerActions",
-    actionName: "Hit",
-    timingWindowMs: 100f);
-
-// 分析结果
-if (result.IsDefinitivelyBot)
-{
-    Debug.LogWarning($"机器人判定! "
-        + $"Perfect: {result.IsSuspiciousPerfect}, "
-        + $"SubFrame: {result.IsSuspiciousSubFrame}, "
-        + $"Uniform: {result.IsSuspiciousUniform}");
-}
-else
-{
-    Debug.Log($"人类相似度: {result.HumanLikenessScore:P2}, "
-            + $"平均偏差: {result.MeanDeviationMs:F1}ms, "
-            + $"标准差: {result.StdDeviationMs:F1}ms, "
-            + $"自相关(lag1): {result.AutocorrelationLag1:F3}, "
-            + $"漂移斜率: {result.DriftSlopeMsPerBeat:F4}ms/beat");
-}
-
-if (result.IsHumanLikely)
-{
-    Debug.Log("✅ 通过人类验证");
-}
-```
-
-### 9.4 InputBindingValidator — Context 感知的绑定冲突检测
-
-在 Editor 或运行时检测单个 Context 内的绑定冲突，按严重程度分级。
-
-```csharp
-using CycloneGames.InputSystem.Runtime;
-
-// 从配置中检测所有 Context 的冲突
-var config = /* 来自 InputConfiguration 的 PlayerSlotConfig */;
-List<BindingConflict> conflicts = InputBindingValidator.DetectConflicts(config);
-
-// 按 Context 名称过滤
-List<BindingConflict> gameplayConflicts = InputBindingValidator.DetectConflicts(config, "Gameplay");
-
-// 格式化冲突报告
-string report = InputBindingValidator.FormatConflictsReport(conflicts);
-Debug.Log(report);
-// 输出示例:
-// === Binding Conflict Report (3 total: 1 critical, 1 warning, 1 info) ===
-// Context: "Gameplay" (3 conflicts)
-//   Critical  | <Keyboard>/space
-//     └─ "Jump"(Button) vs "Confirm"(Button)
-//   Warning   | <Gamepad>/leftStick
-//     └─ "Move"(Vector2) vs "Look"(Vector2)
-//   Info      | <Keyboard>/f
-//     └─ "QuickUse"(Button) vs "HoldUse"(Button)
-```
-
-**严重程度：**
-
-| 级别 | 含义 | 触发条件 |
-|------|------|----------|
-| `Critical` | 必须修复 | 同一绑定路径上两个**相同类型**的动作，且无长按区分 |
-| `Warning` | 建议检查 | 同一绑定路径上两个**不同类型**的动作 |
-| `Info` | 可忽略 | 同一绑定路径上有长按时间区分（短按 vs 长按属于预期行为） |
-
-## UGUI 集成：ItemNavigator
-
-`ItemNavigator` 是一套零 GC、生产级的 UGUI 导航组件，专为手柄和键盘导航设计，同时完美支持鼠标和触控交互。
-
-<img src="./Documents~/Input_IntegrateSample.gif" alt="Input integrate preview" style="width: 100%; height: auto; max-width: 854px;" />
+本模块面向可审阅的 YAML authoring、有界验证、per-player `InputUser` 与设备所有权（本地多人）、优先级 context（Gameplay、Vehicle、Menu、Modal）、事件驱动和轮询读取、长按和 chord、具有版本化模块自有 JSON profile 的运行时 rebind、以及显式配置 source 和 store。
 
 ### 核心特性
 
-- **零 GC 分配**：所有操作在运行时不产生垃圾回收
-- **多控件支持**：Button、Toggle、Slider、自定义 Transform
-- **双向导航**：MenuNavigatorVertical（垂直）和 MenuNavigatorHorizontal（水平）
-- **智能焦点管理**：可移动的焦点指示器、自动跳过禁用项
-- **触控确认门**：手柄切换到触控时，首次点击仅聚焦，二次点击确认
-- **Slider 灵活配置**：步进模式、平滑模式、混合模式
-- **统一事件处理**：无需额外绑定 UGUI 的 OnClick 等事件
+- **已验证的 YAML authoring**：有界形状预检、schema validation、以及提交前的 Unity Input System registry/graph preflight。
+- **Per-player ownership**：每个 joined player 获得自己的 `InputUser`、action asset、context、stream 和 binding override。
+- **优先级映射 context**：`InputContext` 支持 priority 和 `BlocksLowerPriority`；capture 和全局 blocking scope。
+- **R3 stream 和同步读取**：`GetButtonObservable`、`GetVector2Observable`、`GetScalarObservable`、`TryReadValue<T>`、长按进度和 chord。
+- **Context-qualified identity**：`InputHashUtility.GetActionId(context, map, action)` 生成确定性 FNV-1a 32 位 hash。
+- **运行时 rebind**：`RebindAction` 应用选定路径；per-player 和 manager 级 JSON profile，支持 import/export 和有界预算。
+- **显式配置存储**：`IInputConfigurationSource`（读取）和 `IInputConfigurationStore`（读/写/删除）；内置 `UriInputConfigurationSource` 和 `FileInputConfigurationStore`。
+- **Editor 工具和代码生成**：Input System Editor 窗口、validation、确定性 `InputActions.cs` 生成，含 context-qualified action ID。
+- **可选集成**：UGUI adapter、VContainer composition、AssetManagement 支持的 package loading、诊断 `InputRecorder`/`InputReplayCursor`。
 
-### 无需绑定 UGUI 原生事件
+## 架构
 
-使用 `MenuNavigator` 后，所有交互（手柄确认键、键盘回车、鼠标点击、触控点击）统一通过 `NavigableItemSetup.OnConfirm` 回调处理：
+| Assembly | Path | 用途 |
+| --- | --- | --- |
+| `CycloneGames.InputSystem.Runtime` | `Runtime/Scripts/` | 配置、manager、player、context、响应式输入、存储边界。依赖 Unity Input System、UniTask、R3、VYaml、CycloneGames.Hash 与 `CycloneGames.Logging.Core`。 |
+| `CycloneGames.InputSystem.Editor` | `Editor/` | YAML authoring、validation、安全写入、常量生成。仅 Editor。 |
+| `CycloneGames.InputSystem.Runtime.Integrations.UGUI` | `Runtime/Scripts/Integrations/UGUI/` | `InputDeviceIconSet`、`InputDeviceIconSwitcher`、菜单导航组件。`autoReferenced: false`。 |
+| `CycloneGames.InputSystem.Runtime.Integrations.VContainer` | `Runtime/Scripts/Integrations/DI/VContainer/Base/` | 容器持有的 manager、async startup、resolver adapter。无 AssetManagement 依赖。 |
+| `CycloneGames.InputSystem.Runtime.Integrations.VContainer.AssetManagement` | sibling package | Package-configuration loader adapter；由 `CycloneGames.InputSystem.AssetManagement` 提供。 |
+| `CycloneGames.InputSystem.Tools.Runtime` | `Runtime/Tools/` | `InputRecorder` 和 `InputReplayCursor` 诊断工具。 |
+| `CycloneGames.InputSystem.Sample` | `Samples/` | 可选的 scene 和 bootstrap 示例。 |
+| `CycloneGames.InputSystem.Tests.Editor` | `Tests/Editor/` | EditMode validation 和回归覆盖。 |
 
-| 控件类型 | UGUI 原生事件 | MenuNavigator 处理方式 |
-|----------|---------------|------------------------|
-| **Button** | ~~onClick~~ | `OnConfirm` 回调 |
-| **Toggle** | ~~onValueChanged~~ | `OnConfirm` 回调（需手动控制 `isOn`） |
-| **Slider** | ~~onValueChanged~~ | `SliderConfig.OnValueChanged` 或直接读取 `slider.value` |
-| **CustomTransform** | 无 | `OnConfirm` 回调 |
+可选 assembly 设置 `autoReferenced: false`。仅在用到对应功能时添加显式 asmdef 引用。UGUI 和 VContainer 使用 package 派生的 `versionDefines` 和 `defineConstraints` 激活；缺少对应 package 时排除该 assembly。AssetManagement 支持物理上位于同级 `CycloneGames.InputSystem.AssetManagement` package 中。
 
-### 快速上手：垂直导航
+InputSystem 通过以 `CycloneGames.InputSystem` 为根的稳定 `LogChannel` category 输出诊断。logging writer 生命周期由 host 负责。`com.cyclone-games.logging` 提供安全的 `NullLogWriter` 默认实现；应用 composition root 可以安装 `com.cyclone-games.logging.pipeline`，按需加入 `com.cyclone-games.logging.unity`，也可以提供任意其他 `ILogWriter` backend。
+
+每个产生诊断的 asmdef 都在 `Diagnostics/` 下持有唯一命名的 internal `<FeatureName>Log` facade。Facade 统一定义 `Category`、ambient `Channel` 和严格绑定的 `Create(ILogWriter logWriter)`；消费端以 `Log` 表示 class-local ambient channel，以 `_log` 表示显式注入的实例 channel。
+
+可选 sample asmdef 通过 `Samples/Diagnostics/InputSystemSampleLog.cs` 遵循同一约定，并保留 `CycloneGames.InputSystem.Sample`。
+
+```mermaid
+flowchart LR
+    A["Default IInputConfigurationSource"] --> L["InputSystemLoader"]
+    U["User IInputConfigurationStore"] --> L
+    L --> S["Bounded shape preflight"]
+    S --> V["Clone, prepare, validate schema"]
+    V --> P["Input System registry and temporary-graph preflight"]
+    P -->|success| M["Immutable InputManager snapshot"]
+    S -->|failure| F["Typed failure; no commit"]
+    V -->|failure| F
+    P -->|failure| F
+    M --> P1["IInputPlayer 0 / owned action asset"]
+    M --> P2["IInputPlayer N / owned action asset"]
+    P1 --> C["Prioritized active InputContexts"]
+    C --> R["R3 streams, commands, synchronous reads"]
+```
+
+初始化路径是事务性的：先执行有界形状预检再 clone，然后对 clone 进行 schema preparation 和语义 validation。在 Unity main thread 上根据当前 Input System registry 验证 layout、path、interaction、processor、composite 和 control scheme，构建并解析临时 action graph，然后释放这些 graph。只有成功的 preflight 才允许 immutable runtime snapshot 生效。之后每个 joined player 会收到一份独立构建的 action asset。
+
+## 快速开始
+
+打开 `Tools > CycloneGames > Input System Editor` 生成或编辑配置。`Assets/StreamingAssets` 下不需要项目级默认文件。产品 composition root 决定配置来自 serialized `TextAsset`、StreamingAssets、asset package、有界远程 source、user store 还是显式 in-memory content。
+
+最简单的 scene 级集成使用 serialized `TextAsset` 直接提供已验证的 YAML：
 
 ```csharp
+using CycloneGames.InputSystem.Runtime;
+using CycloneGames.Logging;
 using UnityEngine;
-using UnityEngine.UI;
-using CycloneGames.InputSystem.Runtime;
-using R3;
 
-public class SettingsMenu : MonoBehaviour
+public sealed class PlayerInputBootstrap : MonoBehaviour
 {
-    [SerializeField] private Slider _volumeSlider;
-    [SerializeField] private Slider _brightnessSlider;
-    [SerializeField] private Toggle _fullscreenToggle;
-    [SerializeField] private Button _backButton;
-    [SerializeField] private Transform _focusIndicator;
+    private static readonly LogChannel Log = LogChannel.Create("Game.Input");
 
-    private MenuNavigatorVertical _navigator;
-    private IInputPlayer _input;
-    private InputContext _context;
+    [SerializeField] private TextAsset _configuration;
 
-    private void Start()
+    private InputManager _manager;
+    private InputContext _gameplay;
+
+    private void Awake()
     {
-        _navigator = gameObject.AddComponent<MenuNavigatorVertical>();
-        _input = InputManager.Instance.GetInputPlayer(0);
+        _manager = new InputManager();
+        InputManagerInitializationResult initialized =
+            _manager.InitializeWithResult(_configuration.text);
 
-        _navigator.Initialize(
-            setupData: new NavigableItemSetup[]
-            {
-                new NavigableItemSetup
-                {
-                    Slider = _volumeSlider,
-                    SliderConfig = SliderConfig.Default,    // Step=0.1
-                    OnFocused = t => Debug.Log("音量聚焦"),
-                    OnConfirm = () => Debug.Log("音量确认")
-                },
-                new NavigableItemSetup
-                {
-                    Slider = _brightnessSlider,
-                    SliderConfig = new SliderConfig { Step = 0.05f },
-                    OnFocused = t => Debug.Log("亮度聚焦")
-                },
-                new NavigableItemSetup
-                {
-                    Toggle = _fullscreenToggle,
-                    OnConfirm = () =>
-                    {
-                        _fullscreenToggle.isOn = !_fullscreenToggle.isOn;
-                        ApplyFullscreen(_fullscreenToggle.isOn);
-                    }
-                },
-                new NavigableItemSetup
-                {
-                    Button = _backButton,
-                    OnConfirm = () => CloseMenu()
-                }
-            },
-            focusIndicator: _focusIndicator,
-            defaultFocusIndex: 0,
-            allowLooping: true,
-            focusIndicatorOnTop: true,
-            inputPlayer: _input                 // 启用触控确认门
-        );
-
-        _context = new InputContext("UIActions", "Settings")
-            .AddBinding(_input.GetVector2Observable("UIActions", "Navigate"),
-                new MoveCommand(dir => _navigator.Navigate(dir)))
-            .AddBinding(_input.GetButtonObservable("UIActions", "Confirm"),
-                new ActionCommand(() => _navigator.ConfirmSelection()))
-            .AddBinding(_input.GetButtonObservable("UIActions", "Cancel"),
-                new ActionCommand(() => _navigator.TryCancelEdit()));
-
-        _context.AddTo(this);
-        _input.PushContext(_context);
-    }
-
-    private void Update()
-    {
-        Vector2 navDir = _input.GetVector2Observable("UIActions", "Navigate")
-            .ToReadOnlyReactiveProperty().CurrentValue;
-        _navigator.UpdateSmoothSlider(navDir);
-    }
-
-    private void ApplyFullscreen(bool isOn) { /* ... */ }
-    private void CloseMenu() { /* ... */ }
-}
-```
-
-### SliderConfig 配置
-
-| 模式 | Step | SmoothSpeed | 行为描述 |
-|------|------|-------------|----------|
-| **Step（默认）** | 0.1 | 0 | 按方向键 = 离散步进 ±0.1 |
-| **Smooth** | 0 | 1.0 | 按住方向键 = 持续变化 ±1.0/s |
-| **Hybrid** | 0.1 | 0.5 | 按一次 = ±0.1，按住 = 持续 ±0.5/s |
-
-```csharp
-SliderConfig.Default   // Step=0.1, SmoothSpeed=0（最常用）
-SliderConfig.Smooth    // Step=0, SmoothSpeed=1.0（进度条、时间轴）
-SliderConfig.Hybrid    // Step=0.1, SmoothSpeed=0.5（音量等需精细微调）
-
-// 自定义 + 防误触编辑模式
-new NavigableItemSetup
-{
-    Slider = _masterVolume,
-    SliderConfig = new SliderConfig
-    {
-        Step = 0.1f,
-        RequireConfirmToEdit = true,    // 需按确认键进入编辑模式
-        OnValueChanged = v => ApplyVolume(v)
-    }
-};
-```
-
-### 水平导航
-
-```csharp
-var navigator = gameObject.AddComponent<MenuNavigatorHorizontal>();
-
-navigator.Initialize(
-    setupData: new HorizontalNavItemSetup[]
-    {
-        new HorizontalNavItemSetup
+        if (!initialized.IsSuccess)
         {
-            Button = _tab1,
-            OnConfirm = () => SwitchToTab(0),
-            OnFocused = t => Debug.Log("Tab 1 聚焦"),
-            OnNavigateUp = () => _verticalNav.SetFocusByIndex(0),
-            OnNavigateDown = () => _verticalNav.SetFocusByIndex(0)
-        },
-        // ...
-    },
-    focusIndicator: _tabIndicator,
-    defaultFocusIndex: 0,
-    allowLooping: true,
-    inputPlayer: InputManager.Instance.GetInputPlayer(0)
-);
-```
+            Log.Error($"Input initialization failed: {initialized.Status}: {initialized.Message}");
+            enabled = false;
+            return;
+        }
 
-### API 参考
+        IInputPlayer player = _manager.JoinSinglePlayer(0);
+        if (player == null)
+        {
+            Log.Error("No declared control scheme can be matched for player 0.");
+            enabled = false;
+            return;
+        }
 
-#### NavigableItemSetup（垂直）
+        _gameplay = new InputContext("PlayerActions", "Gameplay")
+            .AddBinding(
+                player.GetVector2Observable("Gameplay", "PlayerActions", "Move"),
+                new MoveCommand(OnMove));
 
-| 属性 | 类型 | 描述 |
-|------|------|------|
-| `Button` | Button | 按钮控件 |
-| `Toggle` | Toggle | 开关控件 |
-| `Slider` | Slider | 滑块控件 |
-| `CustomTransform` | Transform | 自定义组件 Transform |
-| `SliderConfig` | SliderConfig | Slider 控制配置 |
-| `OnConfirm` | Action | 确认回调 |
-| `OnNavigateLeft` | Action | 左导航回调 |
-| `OnNavigateRight` | Action | 右导航回调 |
-| `OnFocused` | Action\<Transform\> | 聚焦回调 |
-| `OnUnfocused` | Action\<Transform\> | 失焦回调 |
+        player.PushContext(_gameplay);
+    }
 
-#### MenuNavigatorVertical
-
-| 方法 | 描述 |
-|------|------|
-| `Initialize(...)` | 初始化导航器 |
-| `Navigate(Vector2)` | 处理导航输入 |
-| `ConfirmSelection()` | 确认当前选择 |
-| `TryCancelEdit()` | 尝试退出 Slider 编辑模式 |
-| `UpdateSmoothSlider(Vector2)` | 更新平滑 Slider（每帧调用） |
-| `StopSmoothSlider()` | 停止平滑调整 |
-| `SetFocusByIndex(int)` | 设置焦点索引 |
-| `RefreshFocus()` | 刷新当前焦点 |
-
-#### MenuNavigatorHorizontal
-
-| 方法 | 描述 |
-|------|------|
-| `Initialize(...)` | 初始化导航器 |
-| `Navigate(Vector2)` | 处理导航输入 |
-| `ConfirmSelection()` | 确认当前选择 |
-| `SetFocusByIndex(int)` | 设置焦点索引 |
-| `RefreshFocus()` | 刷新当前焦点 |
-
-### 最佳实践
-
-1. **优先使用 SliderConfig.Default**：大多数场景下步进模式足够
-2. **平滑模式需要每帧调用**：别忘记在 Update 中调用 `UpdateSmoothSlider()`
-3. **启用触控确认门**：防止手柄用户切换到触控时误触
-4. **使用 AllowLooping**：允许循环导航提升用户体验
-5. **焦点指示器可加动画**：添加 Animator 或 DOTween 实现平滑过渡
-
-## VContainer 集成
-
-### 安装
-
-```csharp
-using VContainer;
-using VContainer.Unity;
-using CycloneGames.InputSystem.Runtime.Integrations.VContainer;
-
-public class GameLifetimeScope : LifetimeScope
-{
-    protected override void Configure(IContainerBuilder builder)
+    private void OnMove(Vector2 direction)
     {
-        var inputSystemInstaller = new InputSystemVContainerInstaller(
-            defaultConfigFileName: "input_config.yaml",
-            userConfigFileName: "user_input_settings.yaml",
-            postInitCallback: async resolver =>
-            {
-                var inputResolver = resolver.Resolve<IInputPlayerResolver>();
-                var player0Input = inputResolver.GetInputPlayer(0);
-            }
-        );
-        inputSystemInstaller.Install(builder);
+        // Forward the value to a gameplay-owned movement service.
+    }
 
-        builder.Register<PlayerController>(Lifetime.Scoped);
+    private void OnDestroy()
+    {
+        _gameplay?.Dispose();
+        _manager?.Dispose();
     }
 }
 ```
 
-### 使用模式：注入 IInputPlayerResolver（推荐）
+`InputManager` 的 owner 应在 composition root 中显式持有。`InputManager.Instance` 是全局入口；显式构造使 shutdown、测试、多 scope 和 DI ownership 更为清晰。已 dispose 的 manager 不能再次初始化，应构造新实例。配置定义了可用 context 但不推送 gameplay state —— 在对应产品状态开始时创建并 push `InputContext` 对象。
+
+更多内容参见 [Documents~](Documents~/GettingStarted.md) 文件夹。
+
+## 核心概念
+
+| 概念 | 表示形式 | 职责 |
+| --- | --- | --- |
+| Action | `ActionBindingConfig` 和内部 Unity `InputAction` | 为一个或多个 binding 赋予逻辑名称和值类型。 |
+| Mapping Context | YAML `ContextDefinitionConfig` 加 runtime `InputContext` | 按优先级和低优先级阻止策略组织 action 和 command binding。 |
+| Interaction | Action 级 `interactions` | 使用 Unity Input System interaction 语法决定 action 何时 started、performed 或 cancelled。composite part 的 interaction 会被拒绝；将表达式放在 action 上。 |
+| Processor | `processors` 或 composite-part `processors` | 使用 Unity Input System processor 语法在 consumer 读取前转换值。 |
+| Composite | `CompositeBindingConfig` | 从命名 part 构建如 `2DVector` 等值，无需将 composite 编码为 control path。 |
+| Control Scheme | `ControlSchemeConfig` | 声明 binding group 及必需、可选或替代 device layout 用于匹配。 |
+| Player | `IInputPlayer` 由 `InputUser` 支持 | 持有配对设备、内部 action asset、active context、stream 和 binding override。 |
+| Binding Profile | `InputBindingOverrideProfile` 或 per-player override JSON | 独立于配置存储，持久化稳定的 context/map/action binding selector。 |
+
+[Unity Input System 手册](https://docs.unity3d.com/Manual/com.unity.inputsystem.html) 是底层 Unity action、binding、interaction、processor 和 device 语义的权威参考。
+
+### Mapping context 仲裁
+
+`PushContext` 将 runtime context 放入普通 context set 中。Active normal context 按降序 priority 排序；相同 priority 保持栈顺序。Evaluation 从该顺序的顶部开始，直到某个 active context 的 `BlocksLowerPriority` 为 `true`。这使得非阻塞 overlay 可以与 Gameplay 共存，而 Menu 可以阻止 Gameplay。
+
+双参数 `InputContext(actionMapName, name)` 构造从匹配的 YAML context 获取 priority 和 blocking policy。四参数构造提供显式 runtime policy：
 
 ```csharp
+var gameplay = new InputContext("PlayerActions", "Gameplay");
+var menu = new InputContext("UIActions", "Menu", priority: 100, blocksLowerPriority: true);
+```
+
+名称区分大小写。
+
+### Capture 和全局 blocking
+
+`CaptureContext` 临时选择一个 capture context 排在所有 normal context 之前。它返回幂等的 `IDisposable`；dispose scope 后揭示下一个 capture 或 normal priority set。
+
+`BlockInputScope` 禁用 player 的所有 action map，同样返回幂等 scope。block 按深度计数，只有所有匹配 scope 或 `UnblockInput` 调用都释放后输入才会恢复。异步加载和转场场景优先使用 scoped form。
+
+```csharp
+using IDisposable modalCapture = player.CaptureContext(modalContext);
+using IDisposable loadingBlock = player.BlockInputScope();
+```
+
+不要保留 scope 超出其持有流程的声明周期，并在 Unity main thread 上 dispose。
+
+### Event stream、polling 和读取
+
+`EventDriven` 值 action 在 performed 时发射，cancel 时发射中性值。`Polling` `Vector2` 和 `Float` action 在 map enabled 时由 player 的单个 update pump 读取。需要连续采样的值用 polling，离散状态变化用 event-driven。每个 subscription 需要可见的 lifetime；由 `InputContext`、`CompositeDisposable` 或 owning component 负责 dispose。
+
+生成或计算出的 action ID 避免重复 string lookup 并包含 context identity：
+
+```csharp
+int moveId = InputHashUtility.GetActionId("Gameplay", "PlayerActions", "Move");
+player.GetVector2Observable(moveId).Subscribe(MoveCharacter);
+
+if (player.TryReadValue(moveId, out Vector2 move))
+{
+    ApplyMove(move);
+}
+```
+
+简短的 action-only 和 map/action 重载仍可用，但在请求 identity 不明确时返回空 observable。Context-qualified API 是稳定选择。
+
+## 使用指南
+
+### Context、priority、capture 和 blocking
+
+Push context 前先绑定 command。Context 持有 command mapping；player 持有该 context active 期间的 live subscription。
+
+```csharp
+InputContext gameplay = new InputContext("PlayerActions", "Gameplay")
+    .AddBinding(
+        player.GetVector2Observable("Gameplay", "PlayerActions", "Move"),
+        new MoveCommand(MoveCharacter))
+    .AddBinding(
+        player.GetButtonObservable("Gameplay", "PlayerActions", "Confirm"),
+        new ActionCommand(Confirm));
+
+InputContext menu = new InputContext("UIActions", "Menu")
+    .AddBinding(
+        player.GetVector2Observable("Menu", "UIActions", "Navigate"),
+        new MoveCommand(NavigateMenu));
+
+player.PushContext(gameplay);
+player.PushContext(menu); // YAML priority 100 和 blocking policy 使 Menu 成为权威。
+
+player.RemoveContext(menu); // Gameplay 恢复 active。
+gameplay.Dispose();
+menu.Dispose();
+```
+
+`ActiveContextName` 报告最高 active context。产品状态应作为推送哪些 context 的事实来源。
+
+Context stack/capture 变更先提交 model，再重建 Unity action-map projection。如果 map enablement 或自定义 observable subscription 抛出异常，model 变更保持提交，所有 projected map/subscription 故障关闭，`ActiveContextName` 被清空，发起 API 重新抛出。移除失败的 binding/subscriber，然后调用 `RefreshActiveContext()` 重试。同步重入刷新被合并，上限 16 次；超过上限也会禁用输入而非让 main thread 自旋。
+
+### 本地多人和设备 ownership
+
+| API | 设备策略 | 典型用途 |
+| --- | --- | --- |
+| `JoinSinglePlayer` / `JoinSinglePlayerAsync` | 从 unclaimed device 匹配首选再剩余 control scheme。 | 标准本地 player 创建。 |
+| `JoinPlayerAndLockDevice` | 要求提供设备参与有效 declared scheme；声明所有匹配 scheme device。 | 用户从已知 gamepad 加入。 |
+| `JoinPlayerOnSharedDevice` | 配对当前键盘，存在 mouse 时配对 mouse，不独占声明。 | 明确的共享键盘模式。 |
+| `StartListeningForPlayers` | 合并配置的 join path。Join binding 从第一个未注册的 slot 创建新 player；只有当所有 slot 都已占用时，才把设备扩展到 primary player 的设备集合。 | Lobby join flow。 |
+| `PairAdditionalDevice` | 显式为已加入的 player 再配对一台声明过 layout 的设备，绝不创建新 player。设备不可声明或 layout 未声明时 fail closed。 | 单人热插拔第二台设备。 |
+| `RemovePlayer` | Dispose player、unpair 其 `InputUser`、释放声明。 | 离开、slot reset 或重新初始化前关闭。 |
+
+**设备白名单与 locked / mixed 的区别。** 每个 player 都会把 action asset 关联到自己的 `InputUser`，因此 `InputActionAsset.devices` 始终是该 player 自己的配对设备白名单。锁定 slot 会额外激活 control scheme，把 binding mask 收窄到该 scheme 的 group。设置 `pairAllMatchingDevices: true` 的 slot 保持 scheme 未激活：所有 binding 都保持可用，但只作用于该 player 白名单内的设备。这既让单个 player 在键鼠与手柄之间无缝切换而无需重新 join，也让第二个本地 player 仍能认领剩余设备。per-binding `deviceBindingGroups` 与该 slot 自身的 `controlSchemes` 都依赖一个已激活的 scheme，因此该模式按设计忽略它们；此时设备白名单是唯一边界。
+
+`maxDevicesPerLayout`（默认 `1`，钳制到 `1..8`）限制此类 slot 对每个被引用 layout 可认领的设备数量；没有它，一个 player 会吃光所有键盘、鼠标和手柄。`deviceSwitchDebounceMs`（默认 `0`，钳制到 `0..5000`）设置 `ActiveDeviceKind` 再次切换前的最小驻留时间，把快速设备交替合并成一次呈现更新。`InputPlayer.NotifyDeviceActivity(InputDevice)` 是可选显式入口，供在 action callback 之外观察设备活动的产品代码使用。
+
+Async 重载接受 `CancellationToken`。单 player 超时返回 `null`；caller cancellation 被传播。Batch aggregate timeout 或 manager shutdown 返回成功 joined 前缀。Caller cancellation 仅回滚该 batch 创建的 player，保留已有 registration，然后抛出。Join 方法对已注册 player ID 幂等，返回该 player。
+
+`JoinPlayersBatchAsync` 把 batch 分摊到多帧：除最后一个 player 外，每完成一个就 yield 一次，因此 *N* 个 player 的 batch 最多跨 *N* 帧，每帧承担一个 player 的构造成本。分帧限制的是单帧内落下多少工作，但在参考配置（8 player、3 context、每 context 32 action）下，每个 player 的构造仍需几十毫秒（EditMode 基准实测总计 739.9 ms、每 player 92.5 ms、最差单帧 114.8 ms）。应在加载画面期间执行 batch，并在目标平台上实测。最后一个 player 不额外多等一帧。返回的列表只在 task 完成时才完整，因此调用方不能在自己发起调用的那一帧读取结果。
+
+分帧不改变超时、取消与关闭语义：batch aggregate timeout 或 manager shutdown 仍返回成功 joined 的前缀；caller cancellation 仍只回滚该 batch 创建的 player，然后抛出。同步版本 `JoinPlayersBatch` 未变，仍在发起调用的那一帧内完成；只在整批成本可接受于单帧时使用它，例如加载画面期间。
+
+Control-scheme 匹配由 `deviceRequirements` 驱动。`isOptional` 允许缺失设备。`isOr` 按 Unity Input System scheme 顺序表达替代要求。Binding 应使用同一 player slot 声明的 group。如未声明 scheme，从 configured direct 和 composite-part path 派生的 layout 作为替代：选择首个可声明的匹配 device。当选中的 device 是 keyboard 或 mouse 时，另一个可声明的 keyboard/mouse 设备作为 companion 加入。推荐使用显式 scheme，因为可审计。
+
+每个 player 暴露配对设备生命周期变化：
+
+```csharp
+private void ObserveDevices(IInputPlayer player)
+{
+    player.OnDeviceStatusChanged += status =>
+    {
+        switch (status.ChangeKind)
+        {
+            case InputPlayerDeviceChangeKind.Lost:
+                PauseForMissingDevice(status.DeviceId);
+                break;
+            case InputPlayerDeviceChangeKind.Regained:
+                ResumeAfterDeviceReturn(status.DeviceId);
+                break;
+            case InputPlayerDeviceChangeKind.Paired:
+            case InputPlayerDeviceChangeKind.Unpaired:
+                RefreshDevicePresentation(status.DeviceKind, status.Layout);
+                break;
+        }
+    };
+}
+```
+
+`ActiveDeviceKind` 在观察到有意义 action 活动时变化；用于 glyph 展示。非零的 `deviceSwitchDebounceMs` 会抑制快速交替，产品 UI 无需再自己做去抖。
+
+### 设备活动与提示替换
+
+`ActiveDeviceKind` 是粗粒度、带去抖的呈现状态。要做精确的提示替换，`InputPlayer.DeviceActivity` 会为该 player 自己设备上的每次可观察活动发布一个 `InputDeviceActivity`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `PlayerId`、`DeviceId` | 所属 slot 与具体 Unity device id。 |
+| `DeviceLayout` | 具体 layout，例如 `DualShockGamepad`、`XInputController`。 |
+| `Family` | 细粒度 `InputDeviceFamily`：`Keyboard`、`Mouse`、`Gamepad`、`Touchscreen`、`Joystick`、`Other`。 |
+| `PromptKind` | 旧的粗粒度 `InputDeviceKind`，保证现有消费者不受影响。 |
+| `ControlPath` | 已知时给出来源 control 的完整 path。 |
+| `Timestamp` | Player 帧时间戳，由 `UpdateRuntimeState` 推进。 |
+
+该流由 Unity 的 `onAnyButtonPress` 自动驱动，并过滤到该 player 自己的设备白名单，因此其他本地 player 无法劫持提示。连续量活动（鼠标移动、摇杆漂移）可通过 `NotifyDeviceActivity(device)` 或 `NotifyDeviceActivity(device, control)` 显式上报。`InputDeviceIconSet.GetIcon(kind, deviceLayout)` 优先按 layout 解析 sprite（Xbox 与 PlayStation 图标），未命中再回退到粗粒度 kind；`GetIcon(InputDeviceActivity)` 是便捷重载。`DeviceActivity` 是原始流、不去抖——产品 UI 应按 `Family` 或 `DeviceLayout` 自行去重；`ActiveDeviceKind` 仍是带去抖的粗粒度状态。`IInputPlayer` 与 `InputDeviceKind` 均未改动，因此这是 additive 能力。
+
+### 设备断连恢复
+
+Control scheme 只在 join 时选择一次。若某 player 的配对设备全部断开，该 player 仍保持注册，但白名单变空、所有 action 解析到 0 个 control，且 scheme 与 binding mask 保持不变。调用 `InputManager.ReassignPlayerDevices(playerId)` 会移除并按当前可用设备重新 join 该 player，同时刷新 scheme、binding mask 与白名单。产品通常在 `OnDeviceStatusChanged` 收到 `Lost`/`Unpaired` 且 `User.pairedDevices.Count == 0` 时调用它，并延迟一帧以避免在自己的回调里 dispose player。`InputManager.AutoReassignOnDeviceLoss`（默认 `false`）会在拓扑变化时自动执行同样的恢复；当 `OnPlayerInputReady` 通知时机需要由产品显式控制时请保持关闭。
+
+### Interaction、processor、long press 和 chord
+
+Action-level `interactions` 和 `processors` 在创建内部 action 时转发给 Unity Input System。Composite part 可添加 `processors`；part-level `interactions` 会被拒绝。初始化 preflight 根据当前注册的 Unity Input System 环境解析 expression name/参数、layout、control path、composite 和 composite part。在调用 `InitializeWithResult` 或 `ReinitializeWithResult` 之前注册产品定义的 layout、interaction、processor 和 composite。
+
+模块的 long-press completion stream 支持 `Button` 和 `Float`，由 `longPressMs > 0` 启用，与 Unity `hold(...)` interaction 独立。长按进度仅适用于 `Button` action：
+
+```csharp
+player.GetLongPressObservable("Gameplay", "PlayerActions", "Confirm")
+    .Subscribe(_ => OpenConfirmDetails());
+
+player.GetLongPressProgressObservable("Gameplay", "PlayerActions", "Confirm")
+    .Subscribe(progress => UpdateHoldMeter(progress));
+```
+
+Button 进度在按下期间为 `0..1`。未完成释放时发射 `-1`。对于 `Float` 长按，`longPressValueThreshold` 必须在 `(0,1]` 且有限；长按禁用时接受范围为 `0..1`。
+
+Chord 需要两个已配置的 button action。名称可能复用时使用 context-qualified ID：
+
+```csharp
+int first = InputHashUtility.GetActionId("Gameplay", "PlayerActions", "Confirm");
+int second = InputHashUtility.GetActionId("Gameplay", "PlayerActions", "Cancel");
+
+player.GetChordObservable(first, second, windowMs: 200f)
+    .Subscribe(_ => OpenShortcut());
+```
+
+Chord stream 在请求窗口内识别两次按下，释放后重置。
+
+### Rebind 和 binding profile
+
+Rebind 操作 player 内部 Unity action。推荐使用 context-qualified 重载并传入原始配置路径：
+
+```csharp
+bool changed = player.RebindAction(
+    "Gameplay", "PlayerActions", "Confirm",
+    "<Keyboard>/space",
+    "<Keyboard>/f");
+
+string[] effectivePaths = player.GetActionBindings("Gameplay", "PlayerActions", "Confirm");
+
+player.ResetActionBinding("Gameplay", "PlayerActions", "Confirm");
+player.ResetAllActionBindings();
+```
+
+此 API 应用已选定的路径。产品拥有的 rebind UI 负责捕获候选 control、执行保留键和可访问性策略、与当前有效路径比较、向用户询问冲突解决方案，最后应用 override。`CheckBindingConflicts` 是 configured direct binding 的 authoring diagnostic；不评估待定候选或 runtime override。
+
+Per-player JSON 使用模块自有 schema，含 context/map/action identity 加 binding ordinal 和原始 binding metadata。Import 先分段验证文档再替换 active override。Per-player document 上限 128 条 override record 和 1 MiB strict UTF-8。Manager profile 聚合 per-player JSON，总预算 4 MiB，可在 player join 前 import；待处理条目在 player 构造时应用。
+
+Binding-profile 持久化属于产品 composition root。使用 `CycloneGames.Persistence` 时，注入产品选择的 `IPersistenceStorage` 和 `IPersistenceCodec<string>`，然后将导出的 profile 作为 opaque JSON 存储。Codec 可以将字符串编码为 strict UTF-8，但不能解析或重写 InputSystem schema。`InputManager` 是唯一的 profile validator。
+
+以下类属于产品代码或产品自有 integration assembly：
+
+```csharp
+using System.Threading;
+using System.Threading.Tasks;
 using CycloneGames.InputSystem.Runtime;
-using CycloneGames.InputSystem.Runtime.Integrations.VContainer;
-using VContainer;
+using CycloneGames.Persistence;
 
-public class PlayerController
+public sealed class InputBindingProfilePersistence
 {
-    private readonly IInputPlayerResolver _inputResolver;
-    private IInputPlayer _input;
+    private const int StoredContentVersion = 1;
+    private const int MaximumPayloadBytes = 1024 * 1024;
 
-    [Inject]
-    public PlayerController(IInputPlayerResolver inputResolver)
+    private readonly InputManager _manager;
+    private readonly PersistenceStore<string> _store;
+
+    public InputBindingProfilePersistence(
+        InputManager manager,
+        IPersistenceStorage storage,
+        IPersistenceCodec<string> strictUtf8Codec)
     {
-        _inputResolver = inputResolver;
+        _manager = manager;
+        _store = new PersistenceStore<string>(
+            storage,
+            new PersistenceProfile<string>(
+                strictUtf8Codec,
+                new PersistenceLimits(MaximumPayloadBytes)));
     }
 
-    public void Initialize(int playerId)
+    public async Task<PersistenceOperationResult> SaveAsync(
+        CancellationToken cancellationToken)
     {
-        _input = _inputResolver.GetInputPlayer(playerId);
-
-        var ctx = new InputContext("PlayerActions", "Gameplay")
-            .AddBinding(_input.GetVector2Observable("Move"), new MoveCommand(OnMove))
-            .AddBinding(_input.GetButtonObservable("Confirm"), new ActionCommand(OnConfirm));
-
-        _input.PushContext(ctx);
+        string opaqueJson = _manager.ExportBindingOverrideProfileJson();
+        return await _store.SaveAsync(
+            in opaqueJson,
+            StoredContentVersion,
+            cancellationToken);
     }
 
-    private void OnMove(Vector2 dir) { /* ... */ }
-    private void OnConfirm() { /* ... */ }
+    public async Task<string> LoadAndApplyAsync(CancellationToken cancellationToken)
+    {
+        PersistenceLoadResult<string> loaded = await _store.LoadAsync(
+            StoredContentVersion,
+            cancellationToken);
+        if (loaded.Status == PersistenceLoadStatus.Missing)
+            return null;
+
+        if (!loaded.IsSuccess)
+            return loaded.ErrorCode.ToString();
+
+        if (!_manager.ImportBindingOverrideProfileJson(loaded.Value))
+            return "The binding profile does not match the active input configuration.";
+
+        return null;
+    }
 }
 ```
+
+在 composition root 构造一次，player join 前加载，仅在显式 settings commit 或生命周期检查点保存。预算耗尽是可预期失败路径时使用 `TryExportBindingOverridesJson` 或 `TryExportBindingOverrideProfile`。Profile JSON 包含输入偏好而非敏感信息，但其存储、账户关联、保留、完整性、加密和平台提供者仍属于产品 save policy。
+
+### 配置加载和持久化
+
+`IInputConfigurationSource` 为只读。`IInputConfigurationStore` 增加 save 和 delete。`FileInputConfigurationStore` 接受固定 root 和相对 Unicode Form C 的逻辑 key。`/` 是唯一的逻辑段分隔符；`\` 被拒绝。Store 拒绝 rooted path、URI、traversal、不安全字符、以及在操作边界包含可检测符号链接或 reparse point 的路径，限制 strict UTF-8 content，通过临时文件写入，并保留一个固定 `.bak` 用于恢复。
+
+`UriInputConfigurationSource` 从本地 `StreamingAssets`、Android `jar:file`、same-origin StreamingAssets web URL 或显式提供给 allowlist 的 HTTPS host 读取默认配置。逻辑 URI 上限 4,096 字符。HTTPS allowlist 最多接受 64 个有界 DNS/IPv4 host，每个不超过 253 字符。本地路径必须保持在 `StreamingAssets` 内。Allowlisted HTTPS endpoint 必须使用 port 443 且不含凭据或 fragment。Redirect 被禁用，读取有 byte budget 和 timeout。
+
+```csharp
+using System.IO;
+using CycloneGames.InputSystem.Runtime;
+using CycloneGames.Logging;
+using UnityEngine;
+
+LogChannel log = LogChannel.Create("Game.Input");
+var manager = new InputManager();
+var defaults = new UriInputConfigurationSource();
+var users = new FileInputConfigurationStore(Application.persistentDataPath);
+
+string defaultUri = Path.Combine(Application.streamingAssetsPath, "input_config.yaml");
+InputSystemLoadResult load = await InputSystemLoader.LoadAndInitializeAsync(
+    new InputSystemBootstrapOptions(
+        InputSystemBootstrapMode.Optional,
+        defaults,
+        defaultUri,
+        users,
+        "input/user_input_settings.yaml",
+        persistDefaultToUser: true),
+    manager,
+    forceReinitialize: false,
+    cancellationToken: cancellationToken);
+
+if (!load.IsBootstrapComplete)
+{
+    log.Error($"Input load failed: {load.Status}: {load.Error}");
+}
+```
+
+`Disabled`：不执行读取。`Optional`：user 和 default content 都缺失时返回 `NotConfigured`；`Required`：无可用配置时报告 `DefaultConfigurationUnavailable`。User file 有效时直接使用；缺失时使用已验证的 default 并复制到 user store；存在但无效时保留并暂用有效 default。主文件缺失但 `.bak` 可读时 store 报告 backup recovery。只有在 schema validation 和 Input System preflight 都成功后配置才会被 commit。
+
+`InputManager` 只持有经过验证的 runtime state，不保留 URI、source 或 store。Composition root 持有配置持久化所有权，并通过显式 `IInputConfigurationSource` 与 `IInputConfigurationStore` 实例执行后续 load、save、reset 或 delete。
+
+更换配置需要生命周期决策。`ReinitializeWithResult` 在 player 活跃时拒绝替换。移除 player、释放 context、reinitialize，然后重建 player service 并重新应用已接受的 binding profile。Reinitialize 失败时保留当前已提交的配置。
+
+## 进阶主题
+
+### 配置参考
+
+| 层级 | 字段 | 含义 |
+| --- | --- | --- |
+| Root | `schemaVersion` | Runtime schema 权威。新文件使用值 `1` 编写。 |
+| Root | `schemaFingerprint` | 可选 Editor diagnostic。不批准也不拒绝 runtime data。 |
+| Root | `joinAction` | 可选共享 join binding。Player-slot join binding 也会考虑。 |
+| Root | `playerSlots` | 经过验证的 player template，由唯一非负 `playerId` 标识。 |
+| Player | `controlSchemes` | 可选确定性设备匹配 scheme。 |
+| Player | `defaultControlScheme` | 首选 scheme；无法匹配时尝试其他声明的 scheme。 |
+| Player | `pairAllMatchingDevices` | 为每个被引用的 layout 认领设备并保持 control scheme 未激活。Action asset 仍受该 player 设备白名单约束。 |
+| Player | `maxDevicesPerLayout` | 启用 `pairAllMatchingDevices` 时，每个被引用 layout 可认领设备的上限。默认 `1`，钳制到 `1..8`。 |
+| Player | `deviceSwitchDebounceMs` | `ActiveDeviceKind` 再次切换前的最小驻留时间。默认 `0`（沿用旧的立即切换行为），钳制到 `0..5000`。 |
+| Player | `contexts` | 该 player 的命名 mapping context。 |
+| Context | `name`、`actionMap` | Context identity 和公开 action-map identity。 |
+| Context | `priority` | 值越高优先考虑。默认限制接受 `-100000..100000`。 |
+| Context | `blocksLowerPriority` | `true` 时阻止低于此 context 的 activation。 |
+| Action | `type` | `Button`、`Vector2` 或 `Float`。 |
+| Action | `action` | 逻辑 action 名称。Context、map 和 action 构成稳定 identity。 |
+| Action | `expectedControlType` | Unity 预期 control layout（`Button`、`Vector2`、`Axis`）。 |
+| Action | `deviceBindings` | 直接 Unity control path。 |
+| Action | `deviceBindingGroups` | 可选逐 binding 的 control-scheme group，与 `deviceBindings` 按位置对齐。省略列表或某项为空时回退到 `bindingGroups`，因此旧配置行为不变。 |
+| Action | `compositeBindings` | 结构化 composite name、parameters、groups 和 parts。 |
+| Action | `bindingGroups` | 分号分隔的 action 级 control-scheme binding group。 |
+
+`deviceBindingGroups` 是精确形式。Unity Input System 的 binding group 是 binding 级概念：当一个 action 同时存在键盘和手柄 binding 时，为每条 binding 指定各自的 scheme group，能让激活 scheme 的 `bindingMask` 成为独立于 `InputUser` 设备白名单的第二道防线。若缺少它，携带 `KeyboardMouse;Gamepad` 的手柄 binding 在白名单放宽（例如调用 `PairAdditionalDevice` 后）仍会在 `KeyboardMouse` scheme 下被解析，设备隔离就只剩白名单一层。该列表必须与 `deviceBindings` 条目数完全一致；非空条目必须引用已声明的 scheme group；空条目显式回退到 action 级值。
+| Action | `interactions`、`processors` | 应用于 action 的 Unity Input System 表达式。 |
+| Composite part | `name`、`path`、`processors` | Named part control path，可选 part-local processor。非空 part `interactions` 值被拒绝。 |
+| Action | `updateMode` | `EventDriven` 或 `Polling`。Delta path 视为 polling。 |
+| Action | `longPressMs` | `Button` 或 `Float` 的模块级长按完成时长；`0` 禁用。 |
+| Action | `longPressValueThreshold` | `Float` actuation threshold。Float 长按启用时必须在 `(0,1]`；长按禁用时可为 `0..1`。 |
+
+`deviceBindings` 仅包含直接 control path。Composite 必须使用 `compositeBindings`；不要将 `2DVector(...)` 放在 `deviceBindings` 中。Composite `parameters` 省略外层括号。Composite part 仅支持 `processors`；非空 part `interactions` 值导致 validation 失败。将 interaction 放在包含的 action 上。
+
+### Validation 预算
+
+默认 validation budget：8 players、每 player 32 contexts、每 context 128 actions、每 player 1,024 total actions、每 action 16 total direct/composite-part binding entries、每 action 16 composites、每 composite 16 parts、每 player 16 control schemes、每 scheme 16 device requirements、每技术字符串 256 字符。可在 `InputManager` 构造注入更严格的 `InputConfigurationLimits`。
+
+VYaml materialization 前，runtime 和 Editor YAML 入口还将输入限制为 1 MiB strict UTF-8 without BOM、16,384 lines、4,096 characters/line、64 indentation spaces、65,536 structural tokens、nesting depth 64。YAML anchor、alias、explicit tag、directive/document marker、block scalar、tab indentation、禁止的 control/format/private-use character、以及非 CR/LF 行分隔符不在此严格子集中。
+
+一个动作序列化后约占十二行 YAML，因此 16,384 行预算把「所有玩家合计」的动作总数限制在约 1,300 个（`InputConfigurationLimits.ApproximateMaxSerializedTotalActions`）。上文的「每玩家动作上限」约束的是以编程方式构造的配置；在多人规模下，该上限无法通过 YAML 源达到。超出行业预算会在 preflight 阶段被拒绝，并返回指明行数上限的消息；因此编排配置时应按序列化后的动作总数做预算，而不是按每玩家上限。
+
+### Editor 工作流和代码生成
+
+打开 `Tools > CycloneGames > Input System Editor`。左侧 project-settings panel 显示 runtime 和代码生成路径，提供 reveal/ping 快捷方式。右侧 workspace 将 serialized configuration 与文件操作分离。彩色徽章区分 editable、valid、review、invalid 和 optional 状态。Validation error 阻止 persistence 但不禁用 working-copy 字段。
+
+1. 在 `Assets` 下选择 default-config folder；文件名为 `input_config.yaml`。
+2. 在 `Application.persistentDataPath` 下选择可选相对 user-config subdirectory。
+3. Load user 或 default file，或 generate 默认 working configuration。
+4. 编辑 join action、player slot、control scheme、context、direct binding、composite、interaction、processor、priority 和 blocking policy。
+5. 保存前解决 validation error。
+6. 根据目标 owner 使用 `Save User Config`、`Save User + Generate Code`、`Save Project Default` 或 `Restore User from Default`。
+7. 在 `Assets` 下选择 codegen folder 和 namespace，然后 generate `InputActions.cs`。
+
+Editor 使用隐藏的 in-memory `ScriptableObject` working copy 和 `SerializedObject`/`SerializedProperty`，因此 Undo/Redo 和 serialized-field 处理在 Editor path 中。
+
+生成的代码包含 `InputActions.Contexts`、`InputActions.ActionMaps` 和 `InputActions.Actions` 下的 context-qualified ID。每个 signed `int` action ID 是 `context/map/action` 的确定性 FNV-1a 32 位 hash。Context、map 或 action identity 变更后应重新生成。
+
+### 可选集成
+
+**UGUI** — 添加 asmdef 引用到 `CycloneGames.InputSystem.Runtime.Integrations.UGUI`，使用 `InputDeviceIconSet`、`InputDeviceIconSwitcher` 和 horizontal/vertical menu-navigation 组件。Assembly 仅拥有 presentation adapter；core runtime 不引用 UGUI。
+
+**VContainer** — 基础集成注册容器持有的 `InputManager`、`IInputPlayerResolver`、`IInputSystemInitializer`、diagnostics，以及 auto-initialization enabled 时的 `IAsyncStartable`。向 `InputSystemVContainerInstaller` 传入显式 `InputSystemBootstrapOptions`；`Optional` 和 `Disabled` 在 auto-start 时不抛出异常。该 scope 中所有 consumer 必须 resolve/inject 相同的 manager；同时使用 `InputManager.Instance` 会创建独立 session。
+
+AssetManagement-backed package loading 需要安装同级 `CycloneGames.InputSystem.AssetManagement` package 并引用 `CycloneGames.InputSystem.Runtime.Integrations.VContainer.AssetManagement`：
+
+```csharp
+var packageLoader =
+    InputSystemAssetManagementVContainerAdapter.CreatePackageConfigurationLoader();
+
+builder.Install(new InputSystemVContainerInstaller(
+    "input_config.yaml",
+    "user_input_settings.yaml",
+    packageLoader));
+```
+
+**Tools** — `CycloneGames.InputSystem.Tools.Runtime` 是可选诊断工具。`InputRecorder` 将选定的 context-qualified stream 记录到固定容量 in-memory buffer。溢出递增 `DroppedSampleCount`；录制期间永不扩展 sample buffer。`StopRecording` 创建不可变快照，`InputReplayCursor` 允许 caller 按录制的 tick/order 消费 sample。
+
+**Sample** — Sample assembly、scene 和 fixture 是可选的，不会自动引用或添加到 Build Settings。参见 [Samples/README.md](Samples/README.md)。
+
+### 失败模型
+
+在操作有可恢复边界的地方，失败通过类型化 result 返回：
+
+- `InputConfigurationReadResult` 和 `InputConfigurationStoreResult` 报告 `NotFound`、`InvalidKey`、`TooLarge`、`Unsupported`、`AccessDenied` 或 `IoError`。
+- `InputSystemLoadResult` 区分 user/default success、unavailable defaults、invalid configuration 和 manager initialization failure。
+- `InputManagerInitializationResult` 报告 empty content、wrong thread、active players、disposed manager、parse failure、schema validation failure 或 `InputSystemPreflightFailed`。暴露 `Validation` 以及 registry/graph preflight 执行时的 `Preflight`。
+- Join 方法在 slot、device 或 scheme 无法解析时返回 `null`；caller cancellation 不转换为 success。
+- Rebind/profile API 对于 unknown identity、selector mismatch、unsupported schema、duplicate entry 或 budget violation 返回 `false`。
+
+`schemaVersion` 是权威来源。用 schema `1` 编写当前文件；负值和未来值被拒绝。Preparation 和 validation 在 clone 上操作，不重写 source file。only通过显式 Editor save 或产品自有 transaction 持久化配置，含 backup 和 rollback。
+
+## 常见场景
+
+### Bootstrap single player
+
+从 serialized `TextAsset` 构造 `InputManager`，用最佳匹配 control scheme join player 0，push Gameplay context（参见[快速开始](#快速开始)）。
+
+### 本地多人 with device locking
+
+本地合作游戏使用 `JoinPlayerAndLockDevice` 从已知 gamepad join 每个 player，或使用 `StartListeningForPlayers(lockDeviceOnJoin: true)` 让每个 unclaimed device 执行其 join binding 成为 primary player。`RemovePlayer` 在离开或 slot reset 时释放声明。
+
+```csharp
+IInputPlayer player1 = manager.JoinPlayerAndLockDevice(0, gamepad1);
+IInputPlayer player2 = manager.JoinPlayerAndLockDevice(1, gamepad2);
+```
+
+### Modal capture 和 input blocking
+
+Modal dialog 在其生命周期内 capture input；loading transition 在完成前 block 所有输入：
+
+```csharp
+IDisposable capture = player.CaptureContext(modalDialogContext);
+try
+{
+    // Drive the modal flow.
+}
+finally
+{
+    capture.Dispose();
+}
+
+using (player.BlockInputScope())
+{
+    // Synchronous transition。async code 在 try/finally 中持有 scope。
+}
+```
+
+### Long press 和 chord
+
+```csharp
+player.GetLongPressObservable("Gameplay", "PlayerActions", "Confirm")
+    .Subscribe(_ => OpenConfirmDetails());
+
+player.GetLongPressProgressObservable("Gameplay", "PlayerActions", "Confirm")
+    .Subscribe(progress => UpdateHoldMeter(progress));
+
+int confirm = InputHashUtility.GetActionId("Gameplay", "PlayerActions", "Confirm");
+int cancel = InputHashUtility.GetActionId("Gameplay", "PlayerActions", "Cancel");
+player.GetChordObservable(confirm, cancel, windowMs: 200f)
+    .Subscribe(_ => OpenShortcut());
+```
+
+### Rebind profile save 和 load
+
+```csharp
+using CycloneGames.Logging;
+
+LogChannel log = LogChannel.Create("Game.Input");
+PersistenceOperationResult saved = await profilePersistence.SaveAsync(cancellationToken);
+if (!saved.IsSuccess)
+    log.Warning($"Binding profile save failed: {saved.ErrorCode}");
+
+string loadError = await profilePersistence.LoadAndApplyAsync(cancellationToken);
+if (loadError != null)
+    log.Warning($"Binding profile load failed: {loadError}");
+```
+
+加载失败时保持 configured default active。缺失数据是正常的首次运行状态；损坏、未来版本或 schema 不兼容的数据不得静默应用。不要直接暴露 persistence exception message —— 将详细异常仅发送到产品拥有的日志管道进行脱敏和访问控制。
+
+## 性能与内存
+
+| 领域 | Runtime behavior | 工程指导 |
+| --- | --- | --- |
+| 初始化 | 有界形状检查、clone/migrate/validate DTO、验证 Input System registration、构建/解析/dispose temporary action graph、提交 immutable snapshot。 | 在输入敏感帧之外、所有自定义 Input System registration 后初始化。复用已提交的 manager。 |
+| Event-driven action | Action map enabled 时 Unity callback 转发到预创建的 subject。 | button 和离散值首选。Subscription callback 必须保持有界。 |
+| Polling 和 hold | 每 player 一个 update subscription 服务所有 polling action 和 hold progress。 | 仅在需要连续采样时使用 `Polling`。 |
+| Context 变更 | Dispose active command subscription、禁用 map、排序 active context、启用选定 map、重建 command subscription。 | 在状态转场时变更 context，不每帧变更。 |
+| Rebind/profile 操作 | Export、import、conflict check、report 时遍历 binding 并分配数组/JSON。Manager import 为每个 staged player 构建并 dispose 临时 action graph。 | 在 settings/save flow 中执行，不在 gameplay hot path。 |
+| 设备活动 | 使用 action activity 和 Input System device/user notification；`ActiveDeviceKind` 是展示提示。 | 如果 noisy hardware 导致快速 glyph change，debounce 产品 UI。 |
+| Tools recording | 录制时固定容量 list；snapshot 创建时拷贝 sample。`CancelRecording(maximumSamplesToDiscard)` 会停止 subscription，并在调用方限定的批次内释放 sample 引用而不导出 snapshot。 | 检查 `WasTruncated`/`DroppedSampleCount`；不无意间保持 diagnostics enabled。取消会丢弃诊断证据，因此必须由产品策略显式授权。 |
+
+使用 Unity Profiler marker `CycloneGames.Input.Initialize`、`CycloneGames.Input.JoinPlayer` 和 `CycloneGames.Input.BuildAsset` 分析初始化和 player 构造。
+
+### Ownership
+
+- Composition root 持有并 dispose `InputManager`。
+- Subsystem registration 使每个 still-active manager 失效，因此禁用 domain reload 的 play session 无法保留 user、action、listener 或静态 listening count；产品 owner 仍需在正常 teardown 时 dispose manager。
+- `InputManager` 持有 registered player，在 removal 或 manager disposal 时 dispose 它们。
+- `InputPlayer` 持有其 `InputUser`、生成的 `InputActionAsset`、subject、update subscription 和 device subscription。
+- 产品状态持有 `InputContext` 实例和 capture/block scope；dispose context 会将其从所有使用它的 player 中移除。
+- Subscription owner dispose 未通过 active `InputContext` 管理的 direct R3 subscription。
+- Storage owner 选择 root、key、retention、encryption、backup 和 format-update policy。
+
+`InputManager.GetMemoryStats()` 与 `InputPlayer.GetMemoryStats()` 提供 main-thread、allocation-free 的 count snapshot，recorder count/capacity/drop property 也是标量读取。Caller-owned adapter 可以使用这些 API；全局 telemetry 与 pressure callback 由 host 负责。
+
+可配置的 `InputConfigurationLimits` 还具有公开的绝对上限，避免调用方用 `int.MaxValue` allocation/iteration budget 替代实际产品预算。重复 capture scope 另受 `InputPlayer.MaximumContextCaptureDepth`（`1024`）限制；泄漏的 scope 会 fail closed，而不是让 capture stack 无限增长。
+
+### 线程
+
+Unity API 和 player/context 操作限制在 main thread。`UriInputConfigurationSource` 在使用 `UnityWebRequest` 前切换到 Unity main thread。`FileInputConfigurationStore` 暴露异步 I/O，但不使 `InputManager`、`IInputPlayer` 或 `InputContext` 线程安全。Carry cancellation through async loading，在 manager mutation 前返回 Unity main thread，并在该线程上 dispose Unity-owned state。
+
+### 平台支持
+
+| 目标 | Default configuration path | User persistence | 所需验证 |
+| --- | --- | --- | --- |
+| Windows Editor/Player | 通过 `UriInputConfigurationSource` 的本地 `StreamingAssets` | `FileInputConfigurationStore` under `persistentDataPath` | EditMode tests、Player build、unplug/replug、filesystem fault tests。 |
+| macOS Editor/Player | 本地 `StreamingAssets` file | `FileInputConfigurationStore` | Path casing、replacement/backup behavior、permissions、notarized build、device layouts。 |
+| Linux Editor/Player | 本地 `StreamingAssets` file | `FileInputConfigurationStore` | Case-sensitive paths、controller layouts、filesystem semantics、headless behavior。 |
+| Android | 通过 `UnityWebRequest` 的 `jar:file`/StreamingAssets | `FileInputConfigurationStore` under app persistent data | APK/AAB reads、cancellation、lifecycle resume、controller reconnect、IL2CPP。 |
+| iOS | 本地 StreamingAssets URI/file path | `FileInputConfigurationStore` under app persistent data | Sandbox backup policy、atomic replacement、controller lifecycle、stripping、device suspension。 |
+| WebGL | Same-origin StreamingAssets web URI | 产品提供的 `IInputConfigurationStore` | 实现有界浏览器持久化；测试 quota、corruption、format updates、refresh、cancellation。 |
+| Consoles | Platform-approved source adapter 或 packaged StreamingAssets path | Platform-approved store adapter | 根据 NDA review SDK storage、suspend/resume、user ownership、controller assignment、AOT/stripping、certification。 |
+| Remote HTTPS | Allowlisted HTTPS host、port 443、no credentials/fragments/redirects | 产品选择 store | Certificate policy、timeout、payload budget、offline fallback、update authenticity、rollout/rollback。 |
+
+Input control path 和 device layout 因平台和 package version 而异。使用 Unity Input Debugger 和代表性硬件验证每个 shipped scheme。
+
+### 持久化
+
+| 数据 | Owner | Default path/key | 格式 | Cleanup 和 recovery |
+| --- | --- | --- | --- | --- |
+| Default input configuration | 产品 composition root | 产品选择 source/key；StreamingAssets 可选 | YAML、schema-versioned | 仅在变更 bootstrap policy 或提供其他验证 source 后移除。 |
+| User input configuration | 产品 runtime via `IInputConfigurationStore` | `input/user_input_settings.yaml` under `persistentDataPath` | YAML 加一个同级 `.bak` | 缺失时从已验证 defaults 创建；invalid content 保留；`DeleteAsync` 移除 primary 和 `.bak`。 |
+| Binding override profile | 产品 composition root | 产品选择 bound entry | 模块自有 opaque JSON、schema `1`；产品选择可选外层 Persistence Record V1 | 重置 binding 并持久化新 profile，或通过选定 provider 删除 bound entry。Per-player：128 records/1 MiB；manager：4 MiB。 |
+| Editor-local settings | Input System Editor | `UserSettings/CycloneGames.InputSystem.EditorSettings.asset` | Unity serialized Editor settings | 关闭窗口并删除文件恢复默认值。 |
+| Generated constants | Project/code owner | `Assets/.../InputActions.cs` | Generated C# | 从 YAML 重新生成；不手动编辑。 |
+
+这些记录从不使用 `PlayerPrefs`、`EditorPrefs` 或 `SessionState`。
+
+## 故障排除
+
+| 症状 | 可能原因 | 解决方法 |
+| --- | --- | --- |
+| 初始化不成功 | Empty/oversized content、YAML parse error、schema error、invalid identity、duplicate、configured limit、unavailable Input System registration 或 graph-resolution failure | 检查 `InputManagerInitializationResult.Status`、`Message`、`Validation.Issues`、`Preflight.Issues`。在初始化前注册自定义 layout/interaction/processor/composite。 |
+| Valid user settings 被忽略 | 读取或验证失败 | 检查 `InputSystemLoadResult.UserStorageStatus`；保留 user file 并与 default 比较。 |
+| `JoinSinglePlayer` 返回 `null` | Unknown player ID、无成功 scheme match、所需设备缺失或设备已被声明 | 检查 Input Debugger 中的 player slot scheme 和当前已配对/保留设备。 |
+| 无 action stream event | Context 未 push、context/map/action 大小写不匹配、context blocked/captured、输入全局 blocked、错误的 value getter 或 action ambiguous | 使用 context-qualified getter 并检查 `ActiveContextName`。 |
+| Polling value 保持中性 | Map disabled、device not paired、binding 被 scheme 屏蔽、错误 control layout 或 value type mismatch | 验证 active context、scheme groups、paired devices 和 control path。 |
+| Long-press getter empty | `longPressMs` 为 `0`、action missing 或 identity ambiguous | 启用有界 duration 并使用 context-qualified getter。 |
+| Reinitialize 报告 `ActivePlayers` | Registered player 仍持有 action asset 和配置派生状态 | 移除 player 和 context，然后 reinitialize 并重建。 |
+| Binding-profile import 返回 `false` | Profile schema/size invalid，或 context/map/action/binding selector 不再匹配 | 保持 configured defaults、保留 profile、提供产品自有 reset。 |
+| File store 报告 `InvalidKey` | Rooted path、URI、traversal、empty segment、unsafe character 或 reparse-point path | 在 store 固定 root 下传入相对 logical key。 |
+| VContainer types unavailable | Package-derived define 缺失或 consumer asmdef 缺少可选引用 | 通过项目依赖源安装 package 并添加 integration asmdef 引用。 |
+| Constant generation 失败 | Invalid namespace/identifier、duplicate generated name、action-ID collision 或 unsafe output path | 修复 YAML identity 或 Editor settings；不编辑生成文件。 |
+
+## 验证
+
+从 Unity Test Runner 运行聚焦测试：
+
+```text
+<UnityEditor> -batchmode -nographics -projectPath <repo-root>/UnityStarter -runTests -testPlatform EditMode -assemblyNames CycloneGames.InputSystem.Tests.Editor -testResults <result-path> -quit
+```
+
+使用与 `UnityStarter/ProjectSettings/ProjectVersion.txt` 匹配的 Unity 可执行文件。通过 EditMode 运行不替代 PlayMode、Player、IL2CPP、hardware、persistence-fault 或 target-platform validation。
 
 ## API 参考
 
-### IInputPlayer
+| 类型 | 用途 |
+| --- | --- |
+| `InputManager` | 验证/提交配置、join/remove player、listen for joins、聚合 profile、持有 player service。 |
+| `InputManagerInitializationResult` | 通过 `Status`、`Validation`、`Preflight`、`WasMigrated` 检查 parse、schema validation、Input System preflight、lifecycle、preparation outcome。 |
+| `InputConfigurationPreflightResult` | 通过 `Status`、有界 `Issues`、`WasTruncated` 检查 main-thread registry 和 temporary action-graph validation。 |
+| `IInputPlayer` | 读取 action、管理 context、观察 device state、rebind、导入/导出 per-player override。 |
+| `InputContext` | 绑定 R3 stream 到 command；提供 priority/blocking policy。 |
+| `InputConfigurationValidator` / `InputConfigurationLimits` | 在显式 allocation/iteration budget 下验证 untrusted DTO。 |
+| `InputConfigurationYamlPreflight` / `InputConfigurationYamlCodec` | 强制严格 pre-materialization YAML subset；将准备好的配置序列化为有界 canonical YAML。 |
+| `IInputConfigurationSource` / `IInputConfigurationStore` | 实现显式 read 和 persistence adapter。 |
+| `UriInputConfigurationSource` / `FileInputConfigurationStore` | 内置有界 default-source 和 root-confined local-store 实现。 |
+| `InputSystemLoader` | 选择 user/default content、保留 invalid user data、仅从 validated content 初始化。 |
+| `InputHashUtility` | 生成确定性 map hash 和 context-qualified action ID。 |
+| `InputBindingValidator` | 检测 player 或 context 的 configured direct-binding conflict。 |
+| `InputRx` | 低级 R3 wrapper，用于 keyboard、pointer、gamepad、touch、users、actions、`PlayerInput`。 |
 
-| 方法 / 属性 | 签名 | 描述 |
-|-------------|------|------|
-| `ActiveContextName` | `ReadOnlyReactiveProperty<string>` | 当前活动上下文名称 |
-| `ActiveDeviceKind` | `ReadOnlyReactiveProperty<InputDeviceKind>` | 当前活动设备类型 |
-| `OnContextChanged` | `event Action<string>` | 上下文切换事件 |
-| `GetButtonObservable` | `(string/int) → Observable<Unit>` | 按钮按下流 |
-| `GetVector2Observable` | `(string/int) → Observable<Vector2>` | 二维向量流 |
-| `GetScalarObservable` | `(string/int) → Observable<float>` | 标量值流 |
-| `GetLongPressObservable` | `(string/int) → Observable<Unit>` | 长按完成事件 |
-| `GetLongPressProgressObservable` | `(string/int) → Observable<float>` | 长按进度流（0~1 及 -1 取消） |
-| `GetPressStateObservable` | `(string/int) → Observable<bool>` | 按下状态流 |
-| `GetChordObservable` | `(string×2/int×2, float) → Observable<Unit>` | 复合键检测流 |
-| `PushContext(ctx)` | `void` | 推入栈顶（已存在则移至栈顶） |
-| `RemoveContext(ctx)` | `bool` | 按对象引用精确移除 |
-| `PopContext()` | `void` | ⚠️ 不建议与 AddTo 混用 |
-| `RefreshActiveContext()` | `void` | 刷新当前上下文绑定 |
-| `RemoveBindingFromContext(ctx, obs)` | `bool` | 移除指定绑定 |
-| `BlockInput()` / `UnblockInput()` | `void` | 阻塞 / 恢复输入 |
-| `IsLeftMouseButtonPressed` | `bool` | 鼠标左键轮询 |
-| `IsRightMouseButtonPressed` | `bool` | 鼠标右键轮询 |
-| `IsMiddleMouseButtonPressed` | `bool` | 鼠标中键轮询 |
-| `RebindAction(map, action, old, new)` | `bool` | 运行时重新绑定 |
-| `ResetActionBinding(map, action)` | `bool` | 重置单个动作绑定 |
-| `ResetAllActionBindings()` | `void` | 重置所有动作绑定 |
-| `GetActionBindings(map, action)` | `string[]` | 获取当前有效绑定路径 |
+## 参考
 
-### InputManager
-
-| 方法 | 签名 | 描述 |
-|------|------|------|
-| `Instance` | `static InputManager` | 单例实例 |
-| `IsListeningForPlayers` | `static bool` | 是否正在监听玩家加入 |
-| `OnPlayerInputReady` | `event Action<IInputPlayer>` | 玩家输入就绪事件 |
-| `OnConfigurationReloaded` | `event Action` | 配置重载事件 |
-| `JoinSinglePlayer(id)` | `IInputPlayer` | 同步加入单人 |
-| `JoinSinglePlayerAsync(id, timeout)` | `UniTask<IInputPlayer>` | 异步加入单人 |
-| `JoinPlayersBatch(ids)` | `List<IInputPlayer>` | 批量加入 |
-| `JoinPlayersBatchAsync(ids, timeout)` | `UniTask<List<IInputPlayer>>` | 批量异步加入 |
-| `JoinPlayerOnSharedDevice(id)` | `IInputPlayer` | 共享设备加入 |
-| `JoinPlayerAndLockDevice(id, device)` | `IInputPlayer` | 锁定设备加入 |
-| `GetInputPlayer(id)` | `IInputPlayer` | 获取已加入玩家（null 表示未加入） |
-| `RefreshPlayerInput(id)` | `bool` | 刷新玩家输入（触发 OnPlayerInputReady） |
-| `StartListeningForPlayers(bool)` | `void` | 开始大厅监听 |
-| `StopListeningForPlayers()` | `void` | 停止大厅监听 |
-| `ReloadConfigurationAsync()` | `UniTask<bool>` | 热重载配置 |
-| `SaveUserConfigurationAsync()` | `UniTask` | 保存用户配置 |
-| `Dispose()` | `void` | 释放所有资源 |
-
-### InputContext
-
-| 方法 | 描述 |
-|------|------|
-| `new InputContext(actionMapName, name?)` | 创建上下文（name 可选，默认 = actionMapName） |
-| `AddBinding(Observable<Unit>, IActionCommand)` | 添加按钮绑定 |
-| `AddBinding(Observable<Vector2>, IMoveCommand)` | 添加 Vector2 绑定 |
-| `AddBinding(Observable<float>, IScalarCommand)` | 添加标量绑定 |
-| `AddBinding(Observable<bool>, IBoolCommand)` | 添加布尔绑定 |
-| `RemoveBinding(Observable<T>)` | 移除指定绑定 |
-| `Dispose()` | 自动从所有活动中移除（设计为供 `AddTo(this)` 调用） |
-
-### 工具集 API
-
-| 类 | 关键方法 | 描述 |
-|----|----------|------|
-| `InputRecorder` | `RecordAction()` / `StartRecording()` / `StopRecording()` | 录制回放工具 |
-| `InputRecording` | `CreateReplayObservable()` / `CreateReplayVector2Observable()` / `CreateReplayFloatObservable()` | 重放为 Observable |
-| `InputSequenceMatcher` | `DetectSequence(recording, steps)` | 序列匹配检测 |
-| `InputGestureRecognizer` | `DetectGesture(recording, gesture)` | 手势识别 |
-| `InputTimingValidator` | `ValidateTiming(recording, beats, map, action)` | 反作弊时序验证 |
-| `InputTimingValidator` | `ValidateTiming(recording, beats, map, action)` | 反作弊时序验证 |
-| `InputBindingValidator` | `DetectConflicts(config)` / `FormatConflictsReport(conflicts)` | 绑定冲突检测 |
-
-## 游戏类型适配指南
-
-| 游戏类型 | 上下文栈 | Chord 复合键 | 录制回放 | 手势识别 | 反作弊 |
-|----------|:---:|:---:|:---:|:---:|:---:|
-| FPS/TPS | ✓ | ✓ | — | — | — |
-| 格斗游戏 | ✓ | ✓ | ✓ | ✓ | — |
-| 音游 | ✓ | — | ✓ | — | ✓ |
-| 动作 RPG | ✓ | ✓ | ✓ | — | — |
-| 平台跳跃 | ✓ | ✓ | — | — | — |
-| 本地多人 | ✓ | ✓ | — | — | — |
-
-**说明：**
-
-- **上下文栈**：所有游戏类型的基础功能，管理 Gameplay / UI / 暂停等状态切换
-- **Chord 复合键**：快速格斗（A+B 组合技）、FPS（Shift+W 冲刺）、平台跳跃（方向+跳跃 跳墙蹬）
-- **录制回放**：格斗游戏练习模式、音游回放、动作 RPG 招数回顾
-- **手势识别**：格斗游戏出招检测（波动拳、升龙拳等）
-- **反作弊**：音游排位赛防止自动演奏外挂
+- [Unity Input System 手册](https://docs.unity3d.com/Manual/com.unity.inputsystem.html) — 底层 Unity action、binding、interaction、processor、device 语义
+- [快速上手](Documents~/GettingStarted.SCH.md) | [配置指南](Documents~/Configuration.SCH.md) | [Runtime 指南](Documents~/RuntimeGuide.SCH.md) | [Sample](Samples/README.md)

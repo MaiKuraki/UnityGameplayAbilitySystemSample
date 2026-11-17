@@ -1,11 +1,13 @@
 using CycloneGames.GameplayAbilities.Runtime;
-using CycloneGames.Logger;
+using CycloneGames.Logging;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Sample
 {
     public class GA_Meteor : GameplayAbility
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private readonly GameObject groundSelectorPrefab;
 
         public GA_Meteor(GameObject groundSelectorPrefab)
@@ -17,7 +19,7 @@ namespace CycloneGames.GameplayAbilities.Sample
         {
             if (groundSelectorPrefab == null)
             {
-                CLogger.LogError("GA_Meteor is missing its GroundSelectorPrefab. Ensure it's assigned in the SO asset.");
+                Log.Error("GA_Meteor is missing its GroundSelectorPrefab. Ensure it's assigned in the SO asset.");
                 EndAbility();
                 return;
             }
@@ -31,7 +33,7 @@ namespace CycloneGames.GameplayAbilities.Sample
                 if (hitData != null)
                 {
                     Vector3 impactPoint = hitData.HitResult.point;
-                    CLogger.LogInfo($"Meteor impacting at: {impactPoint}");
+                    Log.Info($"Meteor impacting at: {impactPoint}");
                     // Here you would spawn the meteor VFX and apply damage in an area around impactPoint...
                 }
                 EndAbility();
@@ -39,54 +41,38 @@ namespace CycloneGames.GameplayAbilities.Sample
 
             targetTask.OnCancelled += () =>
             {
-                CLogger.LogInfo("Meteor cast was cancelled.");
+                Log.Info("Meteor cast was cancelled.");
                 EndAbility();
             };
 
             targetTask.Activate();
         }
 
-        public override GameplayAbility CreatePoolableInstance()
+        public override GameplayAbility CreateRuntimeInstance()
         {
-            var ability = new GA_Meteor(this.groundSelectorPrefab);
-
-            ability.Initialize(
-                this.Name,
-                this.InstancingPolicy,
-                this.NetExecutionPolicy,
-                this.CostEffectDefinition,
-                this.CooldownEffectDefinition,
-                this.AbilityTags,
-                this.ActivationBlockedTags,
-                this.ActivationRequiredTags,
-                this.CancelAbilitiesWithTag,
-                this.BlockAbilitiesWithTag
-            );
-            return ability;
+            return new GA_Meteor(groundSelectorPrefab);
         }
     }
 
-    [CreateAssetMenu(fileName = "GA_Meteor", menuName = "CycloneGames/GameplayAbilitySystem/Samples/Ability/Meteor")]
+    /// <summary>
+    /// [ADVANCED] Ground-targeted meteor: the player picks a location with a spawned targeting
+    /// actor, then the strike resolves after confirmation. The most involved activation flow
+    /// in the sample set.
+    ///
+    /// Key Concepts:
+    /// - AbilityTask_WaitTargetData with a spawned target actor
+    /// - Confirm/cancel input flow during activation
+    /// - Delayed area effect resolution at a chosen location
+    /// </summary>
+    [CreateAssetMenu(fileName = "GA_Meteor", menuName = "CycloneGames/GameplayAbilities/Samples/Ability/Meteor")]
     public class GA_Meteor_SO : GameplayAbilitySO
     {
         public GameObject GroundSelectorPrefab;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
             var ability = new GA_Meteor(this.GroundSelectorPrefab);
-
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
+            InitializeAbility(ability);
             return ability;
         }
     }

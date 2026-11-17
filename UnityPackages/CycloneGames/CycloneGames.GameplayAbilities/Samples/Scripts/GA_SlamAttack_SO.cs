@@ -1,12 +1,15 @@
 using System.Collections.Generic;
 using CycloneGames.GameplayAbilities.Runtime;
-using CycloneGames.Logger;
+using CycloneGames.GameplayTags.Core;
+using CycloneGames.Logging;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Sample
 {
     public class GA_SlamAttack : GameplayAbility
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private readonly GameplayEffect slamDamageEffect;
         private readonly float slamRadius;
 
@@ -16,16 +19,20 @@ namespace CycloneGames.GameplayAbilities.Sample
             this.slamRadius = radius;
         }
 
-        public override bool CanActivate(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec)
+        public override bool CanActivate(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, ReadOnlyGameplayTagContainer sourceTags)
         {
             // For this ability, we could add a check to see if the character is airborne.
             // if (!character.IsAirborne) return false;
-            return base.CanActivate(actorInfo, spec);
+            return base.CanActivate(actorInfo, spec, sourceTags);
         }
 
         public override void ActivateAbility(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, GameplayAbilityActivationInfo activationInfo)
         {
-            CommitAbility(actorInfo, spec);
+            if (!CommitAbility(actorInfo, spec).Succeeded)
+            {
+                EndAbility();
+                return;
+            }
 
             // Create a task that waits for the character to land.
             var landingTask = AbilityTask_WaitForLanding.WaitForLanding(this);
@@ -42,7 +49,7 @@ namespace CycloneGames.GameplayAbilities.Sample
                 return;
             }
 
-            CLogger.LogInfo($"{Name} impacts the ground!");
+            Log.Info($"{Name} impacts the ground!");
 
             // Perform a sphere overlap to find all enemies in the slam radius.
             var colliders = Physics.OverlapSphere(caster.transform.position, slamRadius);
@@ -56,7 +63,7 @@ namespace CycloneGames.GameplayAbilities.Sample
                     hitTargets.Add(holder.AbilitySystemComponent);
                 }
             }
-            CLogger.LogInfo($"{Name} hit {hitTargets.Count} targets.");
+            Log.Info($"{Name} hit {hitTargets.Count} targets.");
 
             // Apply the damage effect to all valid targets found.
             foreach (var targetASC in hitTargets)
@@ -68,22 +75,9 @@ namespace CycloneGames.GameplayAbilities.Sample
             EndAbility();
         }
 
-        public override GameplayAbility CreatePoolableInstance()
+        public override GameplayAbility CreateRuntimeInstance()
         {
-            var ability = new GA_SlamAttack(this.slamDamageEffect, this.slamRadius);
-            ability.Initialize(
-                this.Name,
-                this.InstancingPolicy,
-                this.NetExecutionPolicy,
-                this.CostEffectDefinition,
-                this.CooldownEffectDefinition,
-                this.AbilityTags,
-                this.ActivationBlockedTags,
-                this.ActivationRequiredTags,
-                this.CancelAbilitiesWithTag,
-                this.BlockAbilitiesWithTag
-            );
-            return ability;
+            return new GA_SlamAttack(slamDamageEffect, slamRadius);
         }
     }
 
@@ -99,8 +93,7 @@ namespace CycloneGames.GameplayAbilities.Sample
 
         protected override void OnActivate()
         {
-            // TODO: In a real game, you would subscribe to an event on your CharacterMovementComponent.
-            // For this sample, we'll simulate it with a simple delay to represent falling time.
+            // The sample simulates a landing event with a delay. Production code should bind to movement state.
             var delayTask = AbilityTask_WaitDelay.WaitDelay(this.Ability, 0.5f);
             delayTask.OnFinishDelay += () =>
             {
@@ -120,28 +113,26 @@ namespace CycloneGames.GameplayAbilities.Sample
         }
     }
 
-    [CreateAssetMenu(fileName = "GA_SlamAttack", menuName = "CycloneGames/GameplayAbilitySystem/Samples/Ability/Slam Attack")]
+    /// <summary>
+    /// [BASIC] Point-blank area attack: instant damage to every character in radius.
+    /// The simplest multi-target sample.
+    ///
+    /// Key Concepts:
+    /// - Area-of-effect target resolution
+    /// - Instant damage via GameplayEffectSpec
+    /// - CommitAbility with cost and cooldown
+    /// </summary>
+    [CreateAssetMenu(fileName = "GA_SlamAttack", menuName = "CycloneGames/GameplayAbilities/Samples/Ability/Slam Attack")]
     public class GA_SlamAttack_SO : GameplayAbilitySO
     {
         public GameplayEffectSO DamageEffect;
         public float Radius = 5.0f;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
             var effect = DamageEffect ? DamageEffect.GetGameplayEffect() : null;
             var ability = new GA_SlamAttack(effect, Radius);
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
+            InitializeAbility(ability);
             return ability;
         }
     }

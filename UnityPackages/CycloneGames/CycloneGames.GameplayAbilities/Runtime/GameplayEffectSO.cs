@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using CycloneGames.GameplayTags.Core;
+using CycloneGames.GameplayTags.Unity.Runtime;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Runtime
@@ -8,7 +9,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
     /// Abstract base class for a Gameplay Effect definition, designed to be created as a ScriptableObject asset.
     /// This class holds all the design-time data that defines what an effect does, from modifying attributes to applying tags and granting abilities.
     /// </summary>
-    public abstract class GameplayEffectSO : ScriptableObject
+    public abstract class GameplayEffectSO : ScriptableObject, ISerializationCallbackReceiver
     {
         [Tooltip("The unique name for this effect, used primarily for debugging and logging purposes.")]
         public string EffectName;
@@ -18,6 +19,9 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         [Tooltip("The total duration of the effect in seconds. This is only used if DurationPolicy is 'HasDuration'. Use -1 for an infinite duration.")]
         public float Duration;
+
+        [Tooltip("Optional data-driven duration source. When enabled, each spec's duration is evaluated from this magnitude (level-scaled constant, captured attribute, or SetByCaller key) instead of the static Duration value. A SetDuration call on the spec still wins at runtime.")]
+        public DurationMagnitudeSerializable DurationMagnitude;
 
         [Tooltip("The interval in seconds for periodic effects (like Damage over Time). Set to 0 or less to disable. Only applicable for 'HasDuration' or 'Infinite' effects.")]
         public float Period;
@@ -34,49 +38,54 @@ namespace CycloneGames.GameplayAbilities.Runtime
         [Tooltip("A list of abilities to temporarily grant to the target while this effect is active. Only applicable for 'HasDuration' or 'Infinite' effects.")]
         public List<GameplayAbilitySO> GrantedAbilities;
 
-        [Header("Tag Relationships")]
+        [Tooltip("Per-grant removal policy, aligned by index with Granted Abilities. Entries beyond the list length default to CancelAbilityImmediately. Applied when the effect is removed or becomes inhibited.")]
+        public List<EGameplayEffectGrantedAbilityRemovePolicy> GrantedAbilityRemovalPolicies;
+
         [Tooltip("Tags that DESCRIBE the effect itself (e.g., 'Damage.Type.Fire'). These are NOT granted to the target but are used to identify the effect for removal or other gameplay logic.")]
-        public GameplayTagContainer AssetTags;
+        public SerializableGameplayTagContainer AssetTags;
 
         [Tooltip("Tags that are GRANTED to the target while this effect is active. This is the primary way to apply temporary states like 'State.Stunned', 'Debuff.Burning', or 'Cooldown.Skill.Fireball'.")]
-        public GameplayTagContainer GrantedTags;
+        public SerializableGameplayTagContainer GrantedTags;
+
+        [Tooltip("Ability tags blocked while this effect contributes. Blocked tags gate ability activation and are withdrawn together with granted tags while the effect is inhibited.")]
+        public SerializableGameplayTagContainer BlockedAbilityTags;
 
         [Tooltip("The target MUST have all 'Required' tags and NONE of the 'Forbidden' tags for this effect to be successfully applied.")]
-        public GameplayTagRequirements ApplicationTagRequirements;
+        public SerializableGameplayTagRequirements ApplicationTagRequirements;
 
         [Tooltip("Once applied, the effect will only be active (i.e., its modifiers will apply) as long as the target continues to meet these tag requirements.")]
-        public GameplayTagRequirements OngoingTagRequirements;
+        public SerializableGameplayTagRequirements OngoingTagRequirements;
 
         [Tooltip("Upon successful application, this effect will remove any other active effects on the target that have one of the specified tags (checks both their AssetTags and GrantedTags). Useful for dispel mechanics.")]
-        public GameplayTagContainer RemoveGameplayEffectsWithTags;
+        public SerializableGameplayTagContainer RemoveGameplayEffectsWithTags;
 
-        [Header("Cosmetics")]
         [Tooltip("A list of GameplayCue tags (e.g., 'GameplayCue.VFX.Fireball.Impact') to trigger for cosmetic effects like particles and sounds when the effect is applied, executed, or removed.")]
-        public GameplayTagContainer GameplayCues;
+        public SerializableGameplayTagContainer GameplayCues;
 
         [Tooltip("If true, gameplay cues (VFX/SFX) are suppressed for this effect. Useful for silent/debug application.")]
         public bool SuppressGameplayCues;
 
-        [Header("Advanced")]
-        [Tooltip("If true, this effect is automatically removed when the ability that applied it ends. UE5: RemoveGameplayEffectContainerOnAbilityEnd.")]
+        [Tooltip("If true, this effect is automatically removed when the ability that applied it ends.")]
         public bool RemoveGameplayEffectsAfterAbilityEnds;
 
-        [Tooltip("If true (default), periodic effects execute their first tick immediately upon application. If false, the first execution waits for the full period interval. UE5: bExecutePeriodicEffectOnApplication.")]
+        [Tooltip("If true (default), periodic effects execute once immediately upon application, in addition to the regular period schedule.")]
         public bool ExecutePeriodicEffectOnApplication = true;
 
-        [Tooltip("Effects to apply when a stacking attempt occurs while at the stack limit. UE5: OverflowEffects.")]
+        [Tooltip("How the period responds when the effect is no longer inhibited. ")]
+        public EGameplayEffectPeriodInhibitionRemovedPolicy PeriodicInhibitionPolicy;
+
+        [Tooltip("Effects to apply when a stacking attempt occurs while at the stack limit.")]
         public List<GameplayEffectSO> OverflowEffects;
 
-        [Tooltip("If true, the original effect's duration refresh is denied when overflow occurs. UE5: bDenyOverflowApplication.")]
+        [Tooltip("If true, the original effect's duration refresh is denied when overflow occurs.")]
         public bool DenyOverflowApplication;
 
         private GameplayEffect _runtimeCache;
         public GameplayEffect GetGameplayEffect()
         {
-            //  Thread-safe lazy initialization prevents concurrent calls from creating
-            // two different GameplayEffect instances, which would break the stacking index
-            // (Dictionary keyed on GameplayEffect reference identity).
-            return System.Threading.LazyInitializer.EnsureInitialized(ref _runtimeCache, CreateGameplayEffect);
+            // ScriptableObject authoring data and Unity asset access are main-thread-affine.
+            // The immutable runtime definition is created once per loaded asset revision.
+            return _runtimeCache ??= CreateGameplayEffect();
         }
 
         /// <summary>
@@ -91,6 +100,20 @@ namespace CycloneGames.GameplayAbilities.Runtime
         public void ClearCache()
         {
             _runtimeCache = null;
+        }
+
+        private void OnValidate()
+        {
+            ClearCache();
+        }
+
+        void ISerializationCallbackReceiver.OnBeforeSerialize()
+        {
+        }
+
+        void ISerializationCallbackReceiver.OnAfterDeserialize()
+        {
+            ClearCache();
         }
     }
 }

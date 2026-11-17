@@ -1,82 +1,332 @@
-#if NAVIGATHENA_PRESENT
+#if CYCLONEGAMES_HAS_NAVIGATHENA
 using System;
 using System.Threading;
+
+using UnityEngine.SceneManagement;
+
 using Cysharp.Threading.Tasks;
 using MackySoft.Navigathena.SceneManagement;
+
+using AssetSceneHandle = CycloneGames.AssetManagement.Runtime.ISceneHandle;
+using NavigathenaSceneHandle = MackySoft.Navigathena.SceneManagement.ISceneHandle;
 
 namespace CycloneGames.AssetManagement.Runtime.Integrations.Navigathena
 {
     /// <summary>
-    /// A provider-agnostic scene identifier for Navigathena that uses the IAssetPackage abstraction.
+    /// A provider-agnostic scene identifier backed by an explicitly owned asset package.
     /// </summary>
-    public class AssetManagementSceneIdentifier : ISceneIdentifier
+    public sealed class AssetManagementSceneIdentifier : ISceneIdentifier
     {
-        private readonly IAssetPackage assetPackage;
-        private readonly string location;
-        private readonly UnityEngine.SceneManagement.LoadSceneMode loadSceneMode;
-        private readonly bool activateOnLoad;
+        private readonly IAssetSceneLoader _sceneLoader;
+        private readonly string _location;
+        private readonly LoadSceneParameters _loadParameters;
+        private readonly SceneActivationMode _activationMode;
+        private readonly string _bucket;
 
-        public AssetManagementSceneIdentifier(IAssetPackage assetPackage, string location, UnityEngine.SceneManagement.LoadSceneMode loadSceneMode = UnityEngine.SceneManagement.LoadSceneMode.Single, bool activateOnLoad = true)
+        public AssetManagementSceneIdentifier(
+            IAssetSceneLoader sceneLoader,
+            string location,
+            LoadSceneMode loadSceneMode = LoadSceneMode.Additive,
+            bool activateOnLoad = true,
+            string bucket = null)
+            : this(
+                sceneLoader,
+                location,
+                new LoadSceneParameters(loadSceneMode),
+                activateOnLoad ? SceneActivationMode.ActivateOnLoad : SceneActivationMode.Manual,
+                bucket)
         {
-            this.assetPackage = assetPackage;
-            this.location = location;
-            this.loadSceneMode = loadSceneMode;
-            this.activateOnLoad = activateOnLoad;
         }
 
-        public MackySoft.Navigathena.SceneManagement.ISceneHandle CreateHandle()
+        public AssetManagementSceneIdentifier(
+            IAssetSceneLoader sceneLoader,
+            string location,
+            LoadSceneParameters loadParameters,
+            SceneActivationMode activationMode = SceneActivationMode.ActivateOnLoad,
+            string bucket = null)
         {
-            var sceneHandle = assetPackage.LoadSceneAsync(
-                location,
-                loadSceneMode,
-                activateOnLoad ? SceneActivationMode.ActivateOnLoad : SceneActivationMode.Manual);
-            return new NavigathenaSceneHandleAdapter(sceneHandle, assetPackage);
+            _sceneLoader = sceneLoader ?? throw new ArgumentNullException(nameof(sceneLoader));
+            if (string.IsNullOrWhiteSpace(location))
+            {
+                throw new ArgumentException("Scene location cannot be null or empty.", nameof(location));
+            }
+
+            NavigathenaSceneHandleAdapter.ValidateAdditiveLoadMode(
+                loadParameters.loadSceneMode,
+                nameof(loadParameters));
+            NavigathenaSceneHandleAdapter.ValidateSceneActivationMode(
+                activationMode,
+                nameof(activationMode));
+
+            _location = location;
+            _loadParameters = loadParameters;
+            _activationMode = activationMode;
+            _bucket = bucket;
+        }
+
+        public NavigathenaSceneHandle CreateHandle()
+        {
+            return new NavigathenaSceneHandleAdapter(
+                _sceneLoader,
+                _location,
+                _loadParameters,
+                _activationMode,
+                _bucket);
         }
     }
 
     /// <summary>
-    /// Adapts a CycloneGames.AssetManagement.ISceneHandle to the MackySoft.Navigathena.SceneManagement.ISceneHandle interface.
+    /// Bridges an AssetManagement scene ownership lease into a Navigathena transition handle.
     /// </summary>
-    public class NavigathenaSceneHandleAdapter : MackySoft.Navigathena.SceneManagement.ISceneHandle
+    public sealed class NavigathenaSceneHandleAdapter : NavigathenaSceneHandle
     {
-        private readonly ISceneHandle sceneHandle;
-        private readonly IAssetPackage assetPackage;
+        private readonly IAssetSceneLoader _sceneLoader;
+        private readonly string _location;
+        private readonly LoadSceneParameters _loadParameters;
+        private readonly SceneActivationMode _activationMode;
+        private readonly string _bucket;
+        private AssetSceneHandle _sceneHandle;
+        private bool _loadStarted;
+        private bool _unloadStarted;
+        private bool _providerUnloadCompleted;
         private bool _unloaded;
+        private UniTask<Scene> _loadTask;
+        private UniTask _unloadTask;
 
-        public UnityEngine.SceneManagement.Scene Scene => sceneHandle.Scene;
-
-        public NavigathenaSceneHandleAdapter(ISceneHandle inSceneHandle, IAssetPackage assetPackage)
+        private NavigathenaSceneHandleAdapter(
+            AssetSceneHandle sceneHandle,
+            IAssetSceneLoader sceneLoader)
         {
-            this.sceneHandle = inSceneHandle;
-            this.assetPackage = assetPackage;
+            _sceneHandle = sceneHandle ?? throw new ArgumentNullException(nameof(sceneHandle));
+            _sceneLoader = sceneLoader ?? throw new ArgumentNullException(nameof(sceneLoader));
         }
 
-        public async UniTask<UnityEngine.SceneManagement.Scene> Load(IProgress<float> progress = null, CancellationToken cancellationToken = default)
+        /// <summary>
+        /// Transfers the sole caller-owned wrapper lease for an already-started additive scene operation to
+        /// Navigathena. After this call, the previous owner must not dispose the handle or request its unload.
+        /// </summary>
+        /// <param name="sceneHandle">The active AssetManagement scene handle whose caller ownership is transferred.</param>
+        /// <param name="sceneLoader">The exact loader that created and owns <paramref name="sceneHandle"/>.</param>
+        /// <param name="loadSceneMode">
+        /// The mode used to create <paramref name="sceneHandle"/>. Only <see cref="LoadSceneMode.Additive"/> is supported.
+        /// </param>
+        public static NavigathenaSceneHandleAdapter TakeOwnership(
+            AssetSceneHandle sceneHandle,
+            IAssetSceneLoader sceneLoader,
+            LoadSceneMode loadSceneMode)
         {
-            while (!sceneHandle.IsDone)
+            AssetRuntimeGuard.EnsureMainThread();
+            if (sceneHandle == null)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                progress?.Report(sceneHandle.Progress);
-                await UniTask.Yield(cancellationToken);
+                throw new ArgumentNullException(nameof(sceneHandle));
             }
-            
-            return sceneHandle.Scene;
-        }
-
-        public UniTask Unload(IProgress<float> progress = null, CancellationToken cancellationToken = default)
-        {
-            if (_unloaded) return UniTask.CompletedTask;
-            _unloaded = true;
-            return assetPackage.UnloadSceneAsync(sceneHandle);
-        }
-
-        public void Dispose()
-        {
-            // After Unload, the scene handle is already fully disposed by UnloadSceneAsync.
-            // Only dispose if Unload was never called.
-            if (!_unloaded)
+            if (sceneLoader == null)
             {
-                (sceneHandle as IDisposable)?.Dispose();
+                throw new ArgumentNullException(nameof(sceneLoader));
+            }
+
+            ValidateAdditiveLoadMode(loadSceneMode, nameof(loadSceneMode));
+            ValidateSceneActivationMode(sceneHandle.ActivationMode, nameof(sceneHandle));
+            return new NavigathenaSceneHandleAdapter(sceneHandle, sceneLoader);
+        }
+
+        internal NavigathenaSceneHandleAdapter(
+            IAssetSceneLoader sceneLoader,
+            string location,
+            LoadSceneParameters loadParameters,
+            SceneActivationMode activationMode,
+            string bucket)
+        {
+            _sceneLoader = sceneLoader ?? throw new ArgumentNullException(nameof(sceneLoader));
+            _location = location ?? throw new ArgumentNullException(nameof(location));
+            ValidateAdditiveLoadMode(loadParameters.loadSceneMode, nameof(loadParameters));
+            ValidateSceneActivationMode(activationMode, nameof(activationMode));
+            _loadParameters = loadParameters;
+            _activationMode = activationMode;
+            _bucket = bucket;
+        }
+
+        internal static void ValidateAdditiveLoadMode(LoadSceneMode loadSceneMode, string parameterName)
+        {
+            if (loadSceneMode != LoadSceneMode.Additive)
+            {
+                throw new ArgumentOutOfRangeException(
+                    parameterName,
+                    loadSceneMode,
+                    "The Navigathena integration supports additive scene loading only.");
+            }
+        }
+
+        internal static void ValidateSceneActivationMode(
+            SceneActivationMode activationMode,
+            string parameterName)
+        {
+            if (activationMode != SceneActivationMode.ActivateOnLoad &&
+                activationMode != SceneActivationMode.Manual)
+            {
+                throw new ArgumentOutOfRangeException(
+                    parameterName,
+                    activationMode,
+                    "The scene activation mode is not supported.");
+            }
+        }
+
+        public Scene Scene
+        {
+            get
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                return _sceneHandle != null ? _sceneHandle.Scene : default;
+            }
+        }
+
+        public UniTask<Scene> Load(
+            IProgress<float> progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            if (_unloaded || _unloadStarted)
+            {
+                throw new ObjectDisposedException(nameof(NavigathenaSceneHandleAdapter));
+            }
+
+            if (_loadStarted)
+            {
+                throw new InvalidOperationException("A Navigathena scene handle can only be loaded once.");
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            _loadStarted = true;
+            _loadTask = AssetOperationBroadcast.Create(LoadCoreAsync(progress, cancellationToken));
+            return _loadTask;
+        }
+
+        private async UniTask<Scene> LoadCoreAsync(
+            IProgress<float> progress,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                if (_sceneHandle == null)
+                {
+                    _sceneHandle = _sceneLoader.LoadSceneAsync(
+                        _location,
+                        _loadParameters,
+                        _activationMode,
+                        bucket: _bucket);
+                }
+
+                SceneActivationMode providerActivationMode = _sceneHandle.ActivationMode;
+                ValidateSceneActivationMode(providerActivationMode, nameof(_sceneHandle));
+                if (providerActivationMode == SceneActivationMode.Manual)
+                {
+                    await _sceneHandle.ActivateAsync(cancellationToken);
+                }
+                else
+                {
+                    while (!_sceneHandle.IsDone)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        progress?.Report(_sceneHandle.Progress);
+                        await UniTask.Yield(cancellationToken);
+                    }
+                }
+
+                await _sceneHandle.Task;
+                cancellationToken.ThrowIfCancellationRequested();
+                progress?.Report(1f);
+                return _sceneHandle.Scene;
+            }
+            catch (Exception loadFailure) when (
+                loadFailure is not OutOfMemoryException &&
+                loadFailure is not AccessViolationException)
+            {
+                if (_sceneHandle != null)
+                {
+                    try
+                    {
+                        await EnsureUnloadStarted();
+                    }
+                    catch (Exception cleanupFailure) when (
+                        cleanupFailure is not OutOfMemoryException &&
+                        cleanupFailure is not AccessViolationException)
+                    {
+                        throw new AggregateException(
+                            "Scene load failed and deterministic cleanup also failed.",
+                            loadFailure,
+                            cleanupFailure);
+                    }
+                }
+                else
+                {
+                    _unloaded = true;
+                }
+
+                throw;
+            }
+        }
+
+        public async UniTask Unload(
+            IProgress<float> progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            AssetRuntimeGuard.EnsureMainThread();
+            cancellationToken.ThrowIfCancellationRequested();
+            UniTask task = EnsureUnloadStarted();
+            if (cancellationToken.CanBeCanceled)
+            {
+                await task.AttachExternalCancellation(cancellationToken);
+            }
+            else
+            {
+                await task;
+            }
+
+            progress?.Report(1f);
+        }
+
+        private UniTask EnsureUnloadStarted()
+        {
+            if (_unloaded)
+            {
+                return UniTask.CompletedTask;
+            }
+
+            if (_sceneHandle == null)
+            {
+                _unloaded = true;
+                return UniTask.CompletedTask;
+            }
+
+            if (!_unloadStarted)
+            {
+                _unloadStarted = true;
+                _unloadTask = AssetOperationBroadcast.Create(UnloadCoreAsync());
+            }
+
+            return _unloadTask;
+        }
+
+        private async UniTask UnloadCoreAsync()
+        {
+            try
+            {
+                if (!_providerUnloadCompleted)
+                {
+                    await _sceneLoader.UnloadSceneAsync(_sceneHandle);
+                    _providerUnloadCompleted = true;
+                }
+
+                // Navigathena owns the caller lease. Provider unload and caller-wrapper release are separate
+                // contracts, so release the wrapper only after authoritative unload succeeds. If Dispose faults,
+                // retain the handle and retry only that idempotent caller release on the next Unload call.
+                _sceneHandle.Dispose();
+                _sceneHandle = null;
+                _unloaded = true;
+            }
+            finally
+            {
+                _unloadStarted = false;
             }
         }
     }

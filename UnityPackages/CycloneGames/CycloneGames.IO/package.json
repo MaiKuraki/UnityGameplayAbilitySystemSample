@@ -1,0 +1,24 @@
+{
+  "name": "com.cyclone-games.io",
+  "version": "1.0.0",
+  "displayName": "CycloneGames.IO",
+  "description": "Bounded, atomic, streaming, hashing, comparison, path-sandbox, and Unity URI primitives for production file workflows.",
+  "unity": "2022.3",
+  "unityRelease": "0f1",
+  "dependencies": {
+    "com.cyclone-games.hash": "1.0.0"
+  },
+  "keywords": [
+    "CycloneGames",
+    "IO",
+    "File",
+    "Hash",
+    "UnityWebRequest"
+  ],
+  "author": {
+    "name": "CycloneGames",
+    "email": "",
+    "url": ""
+  },
+  "samples": []
+}

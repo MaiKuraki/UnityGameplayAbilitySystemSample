@@ -1,944 +1,1953 @@
+using CycloneGames.Hash.Core;
+using CycloneGames.Logging;
+using Cysharp.Threading.Tasks;
+using R3;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Text;
 using System.Threading;
-using CycloneGames.Logger;
-using Cysharp.Threading.Tasks;
+using Unity.Profiling;
+using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.InputSystem.Users;
 using VYaml.Serialization;
-using Unio;
-using Unity.Collections;
-using UnityEngine;
-using R3;
 
 namespace CycloneGames.InputSystem.Runtime
 {
+    /// <summary>
+    /// Explicitly owned, main-thread-confined input session.
+    /// </summary>
     public sealed class InputManager : IDisposable
     {
+        private static readonly LogChannel Log = InputSystemLog.Channel;
+
         private const string DEBUG_FLAG = "[InputManager]";
-        public static InputManager Instance { get; } = new InputManager();
-        private InputManager() { }
+        private const int MaxOverrideJsonPerPlayer = 1024 * 1024;
+        private const int MaxOverrideProfileBytes = 4 * 1024 * 1024;
+        private const int MaxJoinTimeoutSeconds = 300;
+        private const int MaxBatchJoinTotalTimeoutSeconds = 300;
+        private static readonly ProfilerMarker InitializeMarker = new ProfilerMarker("CycloneGames.Input.Initialize");
+        private static readonly ProfilerMarker JoinMarker = new ProfilerMarker("CycloneGames.Input.JoinPlayer");
+        private static readonly UTF8Encoding StrictUtf8 = new UTF8Encoding(false, true);
 
-        public static bool IsListeningForPlayers { get; private set; }
-        public event Action<IInputPlayer> OnPlayerInputReady;
-        public event Action OnConfigurationReloaded;
+        private static readonly InputConfigurationPreflightResult CachedPreflightSuccess =
+            new InputConfigurationPreflightResult(InputConfigurationPreflightStatus.Success, null);
 
-        private readonly Dictionary<int, IInputPlayer> _registerPlayers = new();
-        private InputConfiguration _configuration;
-        private InputAction _joinAction;
-        private string _userConfigUri;
-        private bool _isInitialized = false;
-        private bool _isDisposed = false;
-        private bool _isDeviceLockingOnJoinEnabled = false;
-        private IDisposable _cursorSubscription;
+        private ulong _cachedPreflightContentHash;
+        private bool _hasCachedPreflightSuccess;
 
-        public bool ManageCursorVisibility { get; set; } = true;
-        public bool ResetCursorToCenter { get; set; } = false;
+        private static InputManager _compatibilityInstance;
+        private static int _listeningManagerCount;
+        private static bool _isSubsystemResetting;
+        private static readonly HashSet<InputManager> ActiveManagers = new HashSet<InputManager>();
 
-        private static bool ValidateMainThread(string operationName)
+        public static InputManager Instance
         {
-            if (Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread)
+            get
             {
-                return true;
-            }
-
-            CLogger.LogError($"{DEBUG_FLAG} {operationName} must be called on Unity main thread. Use the async API or await UniTask.SwitchToMainThread before calling it.");
-            return false;
-        }
-
-        private static async UniTask SwitchToUnityMainThreadAsync(CancellationToken cancellationToken = default)
-        {
-            if (!Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread)
-            {
-                await UniTask.SwitchToMainThread(PlayerLoopTiming.Update, cancellationToken);
+                EnsureMainThread();
+                return _compatibilityInstance ??= new InputManager();
             }
         }
 
-        public void Initialize(string yamlContent, string userConfigUri)
+        public static bool IsListeningForPlayers
         {
-            if (_isInitialized) return;
-            if (string.IsNullOrEmpty(yamlContent)) return;
-
-            using (InputPerformanceProfiler.BeginScope("Initialize"))
+            get
             {
-                try
-                {
-                    // Normalize line endings for cross-platform compatibility
-                    string normalizedContent = NormalizeLineEndings(yamlContent);
-                    _configuration = YamlSerializer.Deserialize<InputConfiguration>(System.Text.Encoding.UTF8.GetBytes(normalizedContent));
-                    _userConfigUri = userConfigUri;
-                    _isInitialized = true;
-                    CLogger.LogInfo($"{DEBUG_FLAG} Initialized successfully.");
-                }
-                catch (Exception e) { CLogger.LogError($"{DEBUG_FLAG} Failed to parse YAML: {e.Message}"); }
+                EnsureMainThread();
+                return _listeningManagerCount > 0;
             }
         }
 
-
-        /// <summary>
-        /// Reinitializes InputManager with new configuration. Allows reinitialization even if already initialized.
-        /// Useful for hot-update scenarios or when switching configurations.
-        /// </summary>
-        public void Reinitialize(string yamlContent, string userConfigUri)
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        private static void ResetOnSubsystemRegistration()
         {
-            if (string.IsNullOrEmpty(yamlContent)) return;
-
-            using (InputPerformanceProfiler.BeginScope("Reinitialize"))
-            {
-                try
-                {
-                    // Normalize line endings for cross-platform compatibility
-                    string normalizedContent = NormalizeLineEndings(yamlContent);
-                    _configuration = YamlSerializer.Deserialize<InputConfiguration>(System.Text.Encoding.UTF8.GetBytes(normalizedContent));
-                    _userConfigUri = userConfigUri;
-                    _isInitialized = true;
-                    CLogger.LogInfo($"{DEBUG_FLAG} Reinitialized successfully.");
-                    OnConfigurationReloaded?.Invoke();
-                }
-                catch (Exception e) { CLogger.LogError($"{DEBUG_FLAG} Failed to reinitialize: {e.Message}"); }
-            }
+            // UniTask captures its main-thread id at AfterAssembliesLoaded, which runs after this hook.
+            // Unity invokes SubsystemRegistration on the main thread, so use the internal teardown path
+            // and invalidate every manager left from a domain-reload-disabled play session.
+            ResetAllManagersForSubsystemRegistration();
         }
 
-        /// <summary>
-        /// Normalizes line endings to Unix-style (LF only) for cross-platform compatibility.
-        /// </summary>
-        private static string NormalizeLineEndings(string content)
+        internal static void ResetGlobalStateForDomainReload()
         {
-            if (string.IsNullOrEmpty(content)) return content;
-            return content.Replace("\r\n", "\n").Replace("\r", "\n");
+            EnsureMainThread();
+            ResetAllManagersForSubsystemRegistration();
         }
 
-
-        /// <summary>
-        /// Hot-reloads configuration at runtime. Existing players keep current config; new players use reloaded config.
-        /// </summary>
-        public async UniTask<bool> ReloadConfigurationAsync()
+        private static void ResetAllManagersForSubsystemRegistration()
         {
-            if (!_isInitialized || string.IsNullOrEmpty(_userConfigUri))
-            {
-                CLogger.LogWarning($"{DEBUG_FLAG} Cannot reload: not initialized.");
-                return false;
-            }
-
-            using (InputPerformanceProfiler.BeginScope("ReloadConfiguration"))
-            {
-                try
-                {
-                    string filePath = new Uri(_userConfigUri).LocalPath;
-                    if (!File.Exists(filePath))
-                    {
-                        CLogger.LogError($"{DEBUG_FLAG} Configuration file not found: {filePath}");
-                        return false;
-                    }
-
-                    using var nativeBytes = await NativeFile.ReadAllBytesAsync(filePath, SynchronizationStrategy.BlockOnThreadPool);
-                    byte[] yamlBytes = nativeBytes.ToArray();
-                    string yamlContent = System.Text.Encoding.UTF8.GetString(yamlBytes);
-                    var newConfig = YamlSerializer.Deserialize<InputConfiguration>(yamlBytes);
-
-                    _configuration = newConfig;
-                    CLogger.LogInfo($"{DEBUG_FLAG} Configuration reloaded successfully.");
-                    OnConfigurationReloaded?.Invoke();
-                    return true;
-                }
-                catch (Exception e)
-                {
-                    CLogger.LogError($"{DEBUG_FLAG} Failed to reload configuration: {e.Message}");
-                    return false;
-                }
-            }
-        }
-
-        /// <summary>
-        /// Batch joins multiple players. Optimized for local multiplayer scenarios.
-        /// </summary>
-        public List<IInputPlayer> JoinPlayersBatch(List<int> playerIds)
-        {
-            if (playerIds == null || playerIds.Count == 0) return new List<IInputPlayer>();
-            if (!ValidateMainThread(nameof(JoinPlayersBatch))) return new List<IInputPlayer>();
-
-            using (InputPerformanceProfiler.BeginScope("JoinPlayersBatch"))
-            {
-                var results = new List<IInputPlayer>(playerIds.Count);
-                foreach (int playerId in playerIds)
-                {
-                    var service = JoinSinglePlayer(playerId);
-                    if (service != null)
-                    {
-                        results.Add(service);
-                    }
-                }
-                return results;
-            }
-        }
-
-        /// <summary>
-        /// Async batch player joining with timeout support.
-        /// </summary>
-        public async UniTask<List<IInputPlayer>> JoinPlayersBatchAsync(List<int> playerIds, int timeoutPerPlayerInSeconds = 5)
-        {
-            if (playerIds == null || playerIds.Count == 0) return new List<IInputPlayer>();
-            await SwitchToUnityMainThreadAsync();
-
-            using (InputPerformanceProfiler.BeginScope("JoinPlayersBatchAsync"))
-            {
-                var results = new List<IInputPlayer>(playerIds.Count);
-                var tasks = new List<UniTask<IInputPlayer>>(playerIds.Count);
-
-                foreach (int playerId in playerIds)
-                {
-                    tasks.Add(JoinSinglePlayerAsync(playerId, timeoutPerPlayerInSeconds));
-                }
-
-                var completedTasks = await UniTask.WhenAll(tasks);
-                foreach (var service in completedTasks)
-                {
-                    if (service != null)
-                    {
-                        results.Add(service);
-                    }
-                }
-
-                return results;
-            }
-        }
-
-        public async UniTask SaveUserConfigurationAsync()
-        {
-            if (!_isInitialized || string.IsNullOrEmpty(_userConfigUri)) return;
-
-            NativeArray<byte> nativeBytes = default;
+            if (_isSubsystemResetting) return;
+            _isSubsystemResetting = true;
             try
             {
-                byte[] yamlBytes = YamlSerializer.Serialize(_configuration).ToArray();
-
-                // Normalize line endings to Unix-style (LF) for cross-platform compatibility
-                // This ensures configs saved on Windows work correctly on Linux/SteamDeck/macOS
-                string yamlContent = System.Text.Encoding.UTF8.GetString(yamlBytes);
-                yamlContent = yamlContent.Replace("\r\n", "\n").Replace("\r", "\n");
-                yamlBytes = System.Text.Encoding.UTF8.GetBytes(yamlContent);
-
-                string filePath = new Uri(_userConfigUri).LocalPath;
-
-                string directory = System.IO.Path.GetDirectoryName(filePath);
-                if (!string.IsNullOrEmpty(directory) && !System.IO.Directory.Exists(directory))
+                if (ActiveManagers.Count > 0)
                 {
-                    System.IO.Directory.CreateDirectory(directory);
+                    var snapshot = new InputManager[ActiveManagers.Count];
+                    ActiveManagers.CopyTo(snapshot);
+                    for (int i = 0; i < snapshot.Length; i++) snapshot[i]?.DisposeCore();
                 }
 
-                nativeBytes = new NativeArray<byte>(yamlBytes, Allocator.Persistent);
-                await NativeFile.WriteAllBytesAsync(filePath, nativeBytes);
-                CLogger.LogInfo($"{DEBUG_FLAG} User configuration saved to: {filePath}");
-            }
-            catch (Exception e)
-            {
-                CLogger.LogError($"{DEBUG_FLAG} Failed to save user configuration: {e.Message}");
+                ActiveManagers.Clear();
+                _compatibilityInstance = null;
+                _listeningManagerCount = 0;
             }
             finally
             {
-                if (nativeBytes.IsCreated)
-                {
-                    nativeBytes.Dispose();
-                }
+                _isSubsystemResetting = false;
             }
         }
 
-        public void StartListeningForPlayers(bool lockDeviceOnJoin)
+        public event Action<IInputPlayer> OnPlayerInputReady;
+        public event Action OnConfigurationReloaded;
+
+        private readonly Dictionary<int, IInputPlayer> _registeredPlayers = new Dictionary<int, IInputPlayer>();
+        private readonly HashSet<int> _joinsInProgress = new HashSet<int>();
+        private readonly HashSet<int> _reservedDeviceIds = new HashSet<int>();
+        // Snapshot of device IDs already paired to any InputUser. Rebuilt once per device-topology revision
+        // so IsDeviceClaimable stays O(1) instead of scanning every user and every paired device.
+        private readonly HashSet<int> _claimedDeviceIds = new HashSet<int>();
+        private bool _claimedDeviceIdsValid;
+        private bool _isReassigning;
+        private readonly Dictionary<int, string> _bindingOverridesByPlayer = new Dictionary<int, string>();
+        private readonly InputConfigurationLimits _limits;
+        private InputConfiguration _configuration;
+        private RuntimeInputConfiguration _runtimeConfiguration;
+        private InputAction _joinAction;
+        private CancellationTokenSource _shutdown = new CancellationTokenSource();
+        private bool _isInitialized;
+        private bool _isDisposed;
+        private bool _isListening;
+        private bool _isConfigurationTransitioning;
+        private bool _isDeviceLockingOnJoinEnabled;
+        private bool _deviceChangeSubscribed;
+        private long _deviceRevision;
+        private long _configurationRevision;
+
+        public InputManager()
+            : this(null)
         {
-            if (!_isInitialized) return;
-            if (!ValidateMainThread(nameof(StartListeningForPlayers))) return;
-
-            _isDeviceLockingOnJoinEnabled = lockDeviceOnJoin;
-            if (_joinAction != null) _joinAction.Dispose();
-
-            _joinAction = new InputAction(name: "CombinedJoin", type: InputActionType.Button);
-
-            foreach (var playerConfig in _configuration.PlayerSlots)
-            {
-                if (playerConfig.JoinAction != null)
-                {
-                    foreach (var binding in playerConfig.JoinAction.DeviceBindings)
-                    {
-                        _joinAction.AddBinding(binding);
-                    }
-                }
-            }
-
-            _joinAction.performed += OnJoinAction;
-            _joinAction.Enable();
-            IsListeningForPlayers = true;
-            CLogger.LogInfo($"{DEBUG_FLAG} Listening for players... Device Locking: {_isDeviceLockingOnJoinEnabled}");
         }
 
-        public void StopListeningForPlayers()
+        public InputManager(InputConfigurationLimits limits)
         {
-            if (_joinAction != null)
-            {
-                _joinAction.performed -= OnJoinAction;
-                _joinAction.Dispose();
-                _joinAction = null;
-            }
-            IsListeningForPlayers = false;
+            EnsureMainThread();
+            if (_isSubsystemResetting)
+                throw new InvalidOperationException("InputManager cannot be constructed during subsystem teardown.");
+            _limits = limits ?? InputConfigurationLimits.Default;
+            UnityEngine.InputSystem.InputSystem.onDeviceChange += OnDeviceTopologyChanged;
+            _deviceChangeSubscribed = true;
+            ActiveManagers.Add(this);
+        }
+
+        public bool IsInitialized
+        {
+            get { EnsureMainThread(); return _isInitialized; }
+        }
+
+        public bool IsDisposed
+        {
+            get { EnsureMainThread(); return _isDisposed; }
+        }
+
+        public int ActivePlayerCount
+        {
+            get { EnsureMainThread(); return _registeredPlayers.Count; }
         }
 
         /// <summary>
-        /// Joins a player with all currently available required devices. Treats Keyboard and Mouse as a unit.
-        /// If the player is already joined, returns the existing service without triggering OnPlayerInputReady event.
+        /// When enabled, a device-topology change re-joins any registered player whose InputUser has lost
+        /// all paired devices, using the devices that are still available. Disabled by default so products
+        /// keep explicit control over rejoin timing and player-ready notifications.
         /// </summary>
+        public bool AutoReassignOnDeviceLoss { get; set; }
+
+        public InputManagerMemoryStats GetMemoryStats()
+        {
+            EnsureMainThread();
+            int actionCount = 0;
+            int contextDefinitionCount = 0;
+            int activeContextCount = 0;
+            int subjectCount = 0;
+            int pollingActionCount = 0;
+            int holdStateCount = 0;
+            int contextStackCount = 0;
+            int captureStackCount = 0;
+            foreach (KeyValuePair<int, IInputPlayer> pair in _registeredPlayers)
+            {
+                if (!(pair.Value is InputPlayer player))
+                {
+                    continue;
+                }
+
+                InputPlayerMemoryStats playerStats = player.GetMemoryStats();
+                actionCount += playerStats.ActionCount;
+                contextDefinitionCount += playerStats.ContextDefinitionCount;
+                activeContextCount += playerStats.ActiveContextCount;
+                subjectCount += playerStats.SubjectCount;
+                pollingActionCount += playerStats.PollingActionCount;
+                holdStateCount += playerStats.HoldStateCount;
+                contextStackCount += playerStats.ContextStackCount;
+                captureStackCount += playerStats.CaptureStackCount;
+            }
+
+            return new InputManagerMemoryStats(
+                _registeredPlayers.Count,
+                _limits.MaxPlayers,
+                _joinsInProgress.Count,
+                _reservedDeviceIds.Count,
+                _bindingOverridesByPlayer.Count,
+                actionCount,
+                contextDefinitionCount,
+                activeContextCount,
+                subjectCount,
+                pollingActionCount,
+                holdStateCount,
+                contextStackCount,
+                captureStackCount,
+                _limits.MaxPlayers * InputPlayer.MaximumContextCaptureDepth);
+        }
+
+        private InputManagerInitializationResult _lastInitializationResult;
+        public InputManagerInitializationResult LastInitializationResult
+        {
+            get { EnsureMainThread(); return _lastInitializationResult; }
+            private set { _lastInitializationResult = value; }
+        }
+
+        public void Initialize(string yamlContent)
+        {
+            if (!ValidateMainThread(nameof(Initialize))) return;
+            if (_isInitialized) return;
+            InputManagerInitializationResult result = InitializeWithResult(yamlContent);
+            if (!result.IsSuccess) Log.Error($"{DEBUG_FLAG} {result.Message}");
+        }
+
+        public InputManagerInitializationResult InitializeWithResult(string yamlContent)
+        {
+            if (!Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread)
+                return new InputManagerInitializationResult(
+                    InputManagerInitializationStatus.NotMainThread,
+                    "Initialization must run on the Unity main thread.",
+                    null);
+            if (_isInitialized)
+            {
+                LastInitializationResult = new InputManagerInitializationResult(
+                    InputManagerInitializationStatus.Success,
+                    "InputManager is already initialized.",
+                    null);
+                return LastInitializationResult;
+            }
+
+            return PrepareAndCommit(yamlContent, notifyReload: false);
+        }
+
+        public void Reinitialize(string yamlContent)
+        {
+            InputManagerInitializationResult result = ReinitializeWithResult(yamlContent);
+            if (!result.IsSuccess) Log.Error($"{DEBUG_FLAG} {result.Message}");
+        }
+
+        public InputManagerInitializationResult ReinitializeWithResult(string yamlContent)
+        {
+            if (!Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread)
+                return new InputManagerInitializationResult(
+                    InputManagerInitializationStatus.NotMainThread,
+                    "Reinitialization must run on the Unity main thread.",
+                    null);
+            if (_registeredPlayers.Count > 0)
+            {
+                return SetInitializationFailure(
+                    InputManagerInitializationStatus.ActivePlayers,
+                    "Cannot replace configuration while players are active. Remove players before reinitializing.");
+            }
+            if (_joinsInProgress.Count > 0)
+            {
+                return SetInitializationFailure(
+                    InputManagerInitializationStatus.JoinInProgress,
+                    "Cannot replace configuration while player joins are in progress. Cancel or complete joins first.");
+            }
+            return PrepareAndCommit(yamlContent, notifyReload: _isInitialized);
+        }
+
+        private InputManagerInitializationResult PrepareAndCommit(
+            string yamlContent,
+            bool notifyReload)
+        {
+            if (_isConfigurationTransitioning)
+            {
+                return SetInitializationFailure(
+                    InputManagerInitializationStatus.ConfigurationOperationInProgress,
+                    "A configuration transition is already in progress.");
+            }
+
+            _isConfigurationTransitioning = true;
+            try
+            {
+                using (InitializeMarker.Auto())
+                {
+                if (!Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread)
+                {
+                    return new InputManagerInitializationResult(
+                        InputManagerInitializationStatus.NotMainThread,
+                        "Initialization must run on the Unity main thread.",
+                        null);
+                }
+
+                if (_isDisposed)
+                {
+                    return SetInitializationFailure(InputManagerInitializationStatus.Disposed,
+                        "A disposed InputManager cannot be reinitialized. Construct a new instance.");
+                }
+
+                if (yamlContent == null || yamlContent.Length == 0 ||
+                    (yamlContent.Length <= FileInputConfigurationStore.DefaultMaximumBytes &&
+                     string.IsNullOrWhiteSpace(yamlContent)))
+                {
+                    return SetInitializationFailure(InputManagerInitializationStatus.EmptyContent,
+                        "Configuration content is empty.");
+                }
+
+                if (!InputConfigurationYamlPreflight.TryValidate(yamlContent, out string yamlSafetyError))
+                {
+                    return SetInitializationFailure(
+                        InputManagerInitializationStatus.ValidationFailed,
+                        yamlSafetyError);
+                }
+
+                InputConfiguration parsed;
+                byte[] configurationBytes = null;
+                try
+                {
+                    string normalized = NormalizeLineEndings(yamlContent);
+                    configurationBytes = StrictUtf8.GetBytes(normalized);
+                    parsed = YamlSerializer.Deserialize<InputConfiguration>(configurationBytes);
+                }
+                catch (Exception exception) when (IsRecoverableException(exception))
+                {
+                    return SetInitializationFailure(InputManagerInitializationStatus.ParseFailed,
+                        $"Configuration YAML parsing failed ({exception.GetType().Name}).");
+                }
+
+                InputConfigurationValidationResult validation = InputConfigurationValidator.ValidateAndPrepare(parsed, _limits);
+                if (!validation.IsValid)
+                {
+                    string message = validation.Issues.Count == 0
+                        ? "Configuration validation failed."
+                        : validation.Issues[0].ToString();
+                    LastInitializationResult = new InputManagerInitializationResult(
+                        InputManagerInitializationStatus.ValidationFailed,
+                        message,
+                        validation);
+                    return LastInitializationResult;
+                }
+
+                InputConfigurationPreflightResult preflight =
+                    RunOrReusePreflight(configurationBytes, validation.RuntimeConfiguration);
+                if (!preflight.IsSuccess)
+                {
+                    string message = preflight.Issues.Count == 0
+                        ? "Input System configuration preflight failed."
+                        : preflight.Issues[0].ToString();
+                    LastInitializationResult = new InputManagerInitializationResult(
+                        InputManagerInitializationStatus.InputSystemPreflightFailed,
+                        message,
+                        validation,
+                        preflight);
+                    return LastInitializationResult;
+                }
+
+                InputConfiguration ownedConfiguration =
+                    InputConfigurationCloner.DeepClone(validation.Configuration);
+
+                bool rebuildJoinAction = _isListening;
+                InputAction replacementJoinAction = null;
+                if (rebuildJoinAction)
+                {
+                    try
+                    {
+                        replacementJoinAction = CreatePreparedJoinAction(validation.RuntimeConfiguration);
+                    }
+                    catch (Exception exception) when (IsRecoverableException(exception))
+                    {
+                        replacementJoinAction?.Dispose();
+                        LastInitializationResult = new InputManagerInitializationResult(
+                            InputManagerInitializationStatus.ValidationFailed,
+                            $"Configuration join bindings could not be prepared ({exception.GetType().Name}).",
+                            validation,
+                            preflight);
+                        return LastInitializationResult;
+                    }
+                }
+
+                if (_isDisposed)
+                {
+                    replacementJoinAction?.Dispose();
+                    return SetInitializationFailure(
+                        InputManagerInitializationStatus.Disposed,
+                        "The InputManager was disposed during configuration preparation.");
+                }
+                if (_registeredPlayers.Count > 0 || _joinsInProgress.Count > 0)
+                {
+                    replacementJoinAction?.Dispose();
+                    return SetInitializationFailure(
+                        _registeredPlayers.Count > 0
+                            ? InputManagerInitializationStatus.ActivePlayers
+                            : InputManagerInitializationStatus.JoinInProgress,
+                        "Configuration state changed during preparation; retry after players and joins are cleared.");
+                }
+
+                _configuration = ownedConfiguration;
+                _runtimeConfiguration = validation.RuntimeConfiguration;
+                _isInitialized = true;
+                _bindingOverridesByPlayer.Clear();
+                var successResult = new InputManagerInitializationResult(
+                    InputManagerInitializationStatus.Success,
+                    validation.WasMigrated ? "Configuration migrated and initialized." : "Configuration initialized.",
+                    validation,
+                    preflight);
+                LastInitializationResult = successResult;
+                long committedRevision = unchecked(++_configurationRevision);
+
+                if (rebuildJoinAction) ReplaceJoinAction(replacementJoinAction);
+                if (_isDisposed)
+                {
+                    return SetInitializationFailure(
+                        InputManagerInitializationStatus.Disposed,
+                        "The InputManager was disposed while committing the configuration.");
+                }
+
+                if (notifyReload)
+                {
+                    _isConfigurationTransitioning = false;
+                    NotifyConfigurationReloaded(committedRevision);
+                }
+
+                return successResult;
+                }
+            }
+            finally
+            {
+                _isConfigurationTransitioning = false;
+            }
+        }
+
+        /// <summary>
+        /// Reuses the verdict of an identical configuration. Only successful verdicts are cached: a rejected
+        /// configuration has to be re-validated because the Input System registry can gain new interaction,
+        /// processor or composite types between attempts, whereas a successful verdict stays valid because the
+        /// registry never loses types while the process runs.
+        /// </summary>
+        private InputConfigurationPreflightResult RunOrReusePreflight(
+            byte[] configurationBytes,
+            RuntimeInputConfiguration runtimeConfiguration)
+        {
+            ulong contentHash = configurationBytes == null ? 0UL : Fnv1a64.Compute(configurationBytes);
+            if (configurationBytes != null && _hasCachedPreflightSuccess && contentHash == _cachedPreflightContentHash)
+            {
+                return CachedPreflightSuccess;
+            }
+
+            InputConfigurationPreflightResult result =
+                InputSystemConfigurationPreflight.Run(runtimeConfiguration);
+            if (result.IsSuccess && configurationBytes != null)
+            {
+                _cachedPreflightContentHash = contentHash;
+                _hasCachedPreflightSuccess = true;
+            }
+
+            return result;
+        }
+
+        private InputManagerInitializationResult SetInitializationFailure(InputManagerInitializationStatus status, string message)
+        {
+            LastInitializationResult = new InputManagerInitializationResult(status, message, null);
+            return LastInitializationResult;
+        }
+
+        public List<IInputPlayer> JoinPlayersBatch(List<int> playerIds)
+        {
+            if (!ValidateMainThread(nameof(JoinPlayersBatch)) ||
+                !TrySnapshotBatchPlayerIds(playerIds, out int[] playerIdSnapshot))
+                return new List<IInputPlayer>();
+
+            var result = new List<IInputPlayer>(playerIdSnapshot.Length);
+            for (int i = 0; i < playerIdSnapshot.Length; i++)
+            {
+                IInputPlayer player = JoinSinglePlayer(playerIdSnapshot[i]);
+                if (player != null) result.Add(player);
+            }
+
+            return result;
+        }
+
+        public UniTask<List<IInputPlayer>> JoinPlayersBatchAsync(List<int> playerIds, int timeoutPerPlayerInSeconds = 5)
+        {
+            return JoinPlayersBatchAsync(playerIds, timeoutPerPlayerInSeconds, default);
+        }
+
+        public async UniTask<List<IInputPlayer>> JoinPlayersBatchAsync(
+            List<int> playerIds,
+            int timeoutPerPlayerInSeconds,
+            CancellationToken cancellationToken)
+        {
+            await SwitchToUnityMainThreadAsync(cancellationToken);
+            if (timeoutPerPlayerInSeconds <= 0 || timeoutPerPlayerInSeconds > MaxJoinTimeoutSeconds ||
+                !TrySnapshotBatchPlayerIds(playerIds, out int[] playerIdSnapshot))
+                return new List<IInputPlayer>();
+
+            var result = new List<IInputPlayer>(playerIdSnapshot.Length);
+            int totalTimeoutSeconds = Math.Min(
+                MaxBatchJoinTotalTimeoutSeconds,
+                playerIdSnapshot.Length * timeoutPerPlayerInSeconds);
+            using var batchTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(totalTimeoutSeconds));
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                _shutdown.Token,
+                batchTimeout.Token);
+            var newlyRegistered = new List<KeyValuePair<int, IInputPlayer>>(playerIdSnapshot.Length);
+            try
+            {
+                for (int i = 0; i < playerIdSnapshot.Length; i++)
+                {
+                    int playerId = playerIdSnapshot[i];
+                    bool wasRegistered = _registeredPlayers.ContainsKey(playerId);
+                    IInputPlayer player = await JoinSinglePlayerAsync(
+                        playerId,
+                        timeoutPerPlayerInSeconds,
+                        linked.Token);
+                    if (player != null)
+                    {
+                        result.Add(player);
+                        if (!wasRegistered && IsPlayerRegistrationCurrent(playerId, player))
+                            newlyRegistered.Add(new KeyValuePair<int, IInputPlayer>(playerId, player));
+                    }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    // Yield between players so a batch join does not spend every player's construction cost inside
+                    // one frame. The last player needs no trailing wait, otherwise every batch pays one extra frame.
+                    if (i + 1 < playerIdSnapshot.Length)
+                    {
+                        await UniTask.Yield(PlayerLoopTiming.Update, linked.Token);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    RollbackBatchPlayers(newlyRegistered);
+                    throw;
+                }
+
+                // A manager shutdown or the bounded aggregate timeout returns the successfully joined prefix.
+            }
+
+            return result;
+        }
+
         public IInputPlayer JoinSinglePlayer(int playerIdToJoin = 0)
         {
             if (!ValidateMainThread(nameof(JoinSinglePlayer))) return null;
+            if (_isDisposed || !_isInitialized || _isConfigurationTransitioning) return null;
+            if (_registeredPlayers.TryGetValue(playerIdToJoin, out IInputPlayer existing)) return existing;
+            if (!_joinsInProgress.Add(playerIdToJoin)) return null;
 
-            if (_registerPlayers.TryGetValue(playerIdToJoin, out var existingService))
+            try
             {
-                CLogger.LogInfo($"{DEBUG_FLAG} Player {playerIdToJoin} already joined. Returning existing service.");
-                return existingService;
+                long configurationRevision = _configurationRevision;
+                RuntimePlayerSlotConfig config = GetRuntimePlayerConfig(playerIdToJoin, false);
+                if (config == null || !TrySelectDevices(config, null, out List<InputDevice> devices, out string schemeName))
+                    return null;
+                return JoinPlayerWithDevices(
+                    playerIdToJoin,
+                    config,
+                    devices,
+                    schemeName,
+                    configurationRevision);
             }
-
-            var playerConfig = GetPlayerConfig(playerIdToJoin, checkIfAlreadyJoined: false);
-            if (playerConfig == null) return null;
-
-            var requiredDeviceLayouts = GetRequiredLayoutsForConfig(playerConfig);
-            if (requiredDeviceLayouts.Count == 0) return null;
-
-            var devicesToPair = new List<InputDevice>();
-
-            foreach (string layout in requiredDeviceLayouts)
+            finally
             {
-                InputDevice device = FindAvailableDeviceByLayout(layout);
-                if (device != null)
-                {
-                    devicesToPair.Add(device);
-                }
+                _joinsInProgress.Remove(playerIdToJoin);
             }
-
-            bool hasKeyboard = ContainsKeyboard(devicesToPair);
-            bool hasMouse = ContainsMouse(devicesToPair);
-
-            if (hasKeyboard && !hasMouse)
-            {
-                InputDevice mouse = FindAvailableDeviceByLayout("Mouse");
-                if (mouse != null) devicesToPair.Add(mouse);
-            }
-            else if (hasMouse && !hasKeyboard)
-            {
-                InputDevice keyboard = FindAvailableDeviceByLayout("Keyboard");
-                if (keyboard != null) devicesToPair.Add(keyboard);
-            }
-
-            if (devicesToPair.Count == 0)
-            {
-                CLogger.LogError($"{DEBUG_FLAG} Failed to find required devices for Player {playerIdToJoin}.");
-                return null;
-            }
-
-            return JoinPlayerWithDevices(playerIdToJoin, playerConfig, devicesToPair);
         }
 
-        public async UniTask<IInputPlayer> JoinSinglePlayerAsync(int playerIdToJoin = 0, int timeoutInSeconds = 5)
+        public UniTask<IInputPlayer> JoinSinglePlayerAsync(int playerIdToJoin = 0, int timeoutInSeconds = 5)
         {
-            await SwitchToUnityMainThreadAsync();
+            return JoinSinglePlayerAsync(playerIdToJoin, timeoutInSeconds, default);
+        }
 
-            var playerConfig = GetPlayerConfig(playerIdToJoin);
-            if (playerConfig == null) return null;
+        public async UniTask<IInputPlayer> JoinSinglePlayerAsync(
+            int playerIdToJoin,
+            int timeoutInSeconds,
+            CancellationToken cancellationToken)
+        {
+            await SwitchToUnityMainThreadAsync(cancellationToken);
+            if (_isDisposed || !_isInitialized || _isConfigurationTransitioning) return null;
+            if (timeoutInSeconds <= 0 || timeoutInSeconds > MaxJoinTimeoutSeconds) return null;
+            if (_registeredPlayers.TryGetValue(playerIdToJoin, out IInputPlayer existing)) return existing;
+            if (!_joinsInProgress.Add(playerIdToJoin)) return null;
 
-            var requiredDeviceLayouts = GetRequiredLayoutsForConfig(playerConfig);
-            if (requiredDeviceLayouts.Count == 0) return null;
-
-            var devicesToPair = new List<InputDevice>();
-            var layoutsToWaitFor = new HashSet<string>();
-
-            foreach (string layout in requiredDeviceLayouts)
+            try
             {
-                InputDevice device = FindAvailableDeviceByLayout(layout);
-                if (device != null) devicesToPair.Add(device);
-                else layoutsToWaitFor.Add(layout);
-            }
+                long configurationRevision = _configurationRevision;
+                RuntimePlayerSlotConfig config = GetRuntimePlayerConfig(playerIdToJoin, false);
+                if (config == null) return null;
 
-            if (layoutsToWaitFor.Count > 0)
-            {
-                CLogger.LogWarning($"{DEBUG_FLAG} Waiting for required devices to connect: {string.Join(", ", layoutsToWaitFor)}");
-                var tcs = new UniTaskCompletionSource<bool>();
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutInSeconds));
-                cts.Token.Register(() => tcs.TrySetResult(false));
-
-                Action<InputDevice, InputDeviceChange> deviceChangeHandler = (device, change) =>
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutInSeconds));
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdown.Token, timeout.Token);
+                while (!linked.IsCancellationRequested)
                 {
-                    if (change == InputDeviceChange.Added && layoutsToWaitFor.Contains(device.layout))
-                    {
-                        layoutsToWaitFor.Remove(device.layout);
-                        devicesToPair.Add(device);
-                        if (layoutsToWaitFor.Count == 0) tcs.TrySetResult(true);
-                    }
-                };
-
-                UnityEngine.InputSystem.InputSystem.onDeviceChange += deviceChangeHandler;
-                bool success;
-                try
-                {
-                    success = await tcs.Task;
-                }
-                finally
-                {
-                    UnityEngine.InputSystem.InputSystem.onDeviceChange -= deviceChangeHandler;
+                    if (TrySelectDevices(config, null, out List<InputDevice> devices, out string schemeName))
+                        return JoinPlayerWithDevices(
+                            playerIdToJoin,
+                            config,
+                            devices,
+                            schemeName,
+                            configurationRevision);
+                    await WaitForDeviceChangeAsync(linked.Token);
                 }
 
-                if (!success)
-                {
-                    CLogger.LogError($"{DEBUG_FLAG} Timed out waiting for devices: {string.Join(", ", layoutsToWaitFor)}. Aborting join.");
-                    return null;
-                }
-            }
-
-            if (devicesToPair.Count == 0)
-            {
-                CLogger.LogError($"{DEBUG_FLAG} Failed to find ANY required devices for Player {playerIdToJoin}.");
                 return null;
             }
-
-            return JoinPlayerWithDevices(playerIdToJoin, playerConfig, devicesToPair);
+            catch (OperationCanceledException)
+            {
+                if (cancellationToken.IsCancellationRequested) throw;
+                return null;
+            }
+            finally
+            {
+                _joinsInProgress.Remove(playerIdToJoin);
+            }
         }
 
         public IInputPlayer JoinPlayerOnSharedDevice(int playerIdToJoin)
         {
             if (!ValidateMainThread(nameof(JoinPlayerOnSharedDevice))) return null;
+            if (_isDisposed || !_isInitialized || _isConfigurationTransitioning) return null;
+            if (_registeredPlayers.TryGetValue(playerIdToJoin, out IInputPlayer existing)) return existing;
+            if (!_joinsInProgress.Add(playerIdToJoin)) return null;
 
-            var playerConfig = GetPlayerConfig(playerIdToJoin);
-            if (playerConfig == null) return null;
-
-            var keyboard = Keyboard.current;
-            if (keyboard == null)
+            InputUser user = default;
+            try
             {
-                CLogger.LogError($"{DEBUG_FLAG} Cannot JoinPlayerOnSharedDevice: no keyboard connected.");
+                long configurationRevision = _configurationRevision;
+                RuntimePlayerSlotConfig config = GetRuntimePlayerConfig(playerIdToJoin, false);
+                if (config == null || Keyboard.current == null) return null;
+                user = InputUser.PerformPairingWithDevice(Keyboard.current);
+                if (Mouse.current != null) InputUser.PerformPairingWithDevice(Mouse.current, user);
+                IInputPlayer player = CreatePlayerService(
+                    playerIdToJoin,
+                    user,
+                    config,
+                    Keyboard.current,
+                    null,
+                    configurationRevision);
+                if (player == null && user.valid) user.UnpairDevicesAndRemoveUser();
+                return player;
+            }
+            catch (Exception exception) when (IsRecoverableException(exception))
+            {
+                if (user.valid) user.UnpairDevicesAndRemoveUser();
+                Log.Error(
+                    exception,
+                    $"{DEBUG_FLAG} Shared-device join failed.");
                 return null;
             }
-
-            var user = InputUser.PerformPairingWithDevice(keyboard);
-            if (Mouse.current != null)
+            catch
             {
-                InputUser.PerformPairingWithDevice(Mouse.current, user);
+                if (user.valid) user.UnpairDevicesAndRemoveUser();
+                throw;
             }
-
-            return CreatePlayerService(playerIdToJoin, user, playerConfig, keyboard);
+            finally
+            {
+                _joinsInProgress.Remove(playerIdToJoin);
+                InvalidateClaimedDeviceIds();
+            }
         }
 
         public async UniTask<IInputPlayer> JoinPlayerOnSharedDeviceAsync(int playerIdToJoin)
         {
-            await SwitchToUnityMainThreadAsync();
+            return await JoinPlayerOnSharedDeviceAsync(playerIdToJoin, default);
+        }
+
+        public async UniTask<IInputPlayer> JoinPlayerOnSharedDeviceAsync(
+            int playerIdToJoin,
+            CancellationToken cancellationToken)
+        {
+            await SwitchToUnityMainThreadAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_shutdown.IsCancellationRequested) return null;
             return JoinPlayerOnSharedDevice(playerIdToJoin);
         }
 
         public IInputPlayer JoinPlayerAndLockDevice(int playerIdToJoin, InputDevice deviceToLock)
         {
-            if (!ValidateMainThread(nameof(JoinPlayerAndLockDevice))) return null;
+            if (!ValidateMainThread(nameof(JoinPlayerAndLockDevice)) || deviceToLock == null) return null;
+            if (_isDisposed || !_isInitialized || _isConfigurationTransitioning) return null;
+            if (_registeredPlayers.TryGetValue(playerIdToJoin, out IInputPlayer existing)) return existing;
+            if (!_joinsInProgress.Add(playerIdToJoin)) return null;
 
-            if (!_isInitialized)
+            try
             {
-                CLogger.LogError($"{DEBUG_FLAG} Cannot join player, manager is not initialized.");
-                return null;
-            }
-            if (deviceToLock == null)
-            {
-                CLogger.LogError($"{DEBUG_FLAG} Cannot join player {playerIdToJoin}: device is null.");
-                return null;
-            }
+                long configurationRevision = _configurationRevision;
+                RuntimePlayerSlotConfig config = GetRuntimePlayerConfig(playerIdToJoin, false);
+                if (config == null || !IsDeviceClaimable(deviceToLock)) return null;
 
-            var playerConfig = GetPlayerConfig(playerIdToJoin, false);
-            if (playerConfig == null) return null;
-
-            if (_registerPlayers.ContainsKey(playerIdToJoin))
-            {
-                CLogger.LogWarning($"{DEBUG_FLAG} Player {playerIdToJoin} already joined.");
-                return _registerPlayers[playerIdToJoin];
-            }
-
-            var allUsers = InputUser.all;
-            int userCount = allUsers.Count;
-            for (int i = 0; i < userCount; i++)
-            {
-                if (IsDevicePairedToUser(allUsers[i], deviceToLock))
-                {
-                    CLogger.LogWarning($"{DEBUG_FLAG} Device '{deviceToLock.displayName}' already in use.");
+                if (!TrySelectDevices(config, deviceToLock, out List<InputDevice> devices, out string schemeName))
                     return null;
-                }
-            }
 
-            var user = InputUser.PerformPairingWithDevice(deviceToLock);
-            return CreatePlayerService(playerIdToJoin, user, playerConfig, deviceToLock);
+                return JoinPlayerWithDevices(
+                    playerIdToJoin,
+                    config,
+                    devices,
+                    schemeName,
+                    configurationRevision);
+            }
+            finally
+            {
+                _joinsInProgress.Remove(playerIdToJoin);
+            }
         }
 
         public async UniTask<IInputPlayer> JoinPlayerAndLockDeviceAsync(int playerIdToJoin, InputDevice deviceToLock)
         {
-            await SwitchToUnityMainThreadAsync();
+            return await JoinPlayerAndLockDeviceAsync(playerIdToJoin, deviceToLock, default);
+        }
+
+        public async UniTask<IInputPlayer> JoinPlayerAndLockDeviceAsync(
+            int playerIdToJoin,
+            InputDevice deviceToLock,
+            CancellationToken cancellationToken)
+        {
+            await SwitchToUnityMainThreadAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_shutdown.IsCancellationRequested) return null;
             return JoinPlayerAndLockDevice(playerIdToJoin, deviceToLock);
+        }
+
+        public void StartListeningForPlayers(bool lockDeviceOnJoin)
+        {
+            if (!_isInitialized || !ValidateMainThread(nameof(StartListeningForPlayers))) return;
+            if (_isDisposed || _isConfigurationTransitioning) return;
+            long configurationRevision = _configurationRevision;
+            RuntimeInputConfiguration configuration = _runtimeConfiguration;
+            InputAction replacement;
+            try
+            {
+                replacement = CreatePreparedJoinAction(configuration);
+            }
+            catch (Exception exception) when (IsRecoverableException(exception))
+            {
+                Log.Error(
+                    exception,
+                    $"{DEBUG_FLAG} Join listener could not be prepared.");
+                return;
+            }
+
+            if (_isDisposed || !_isInitialized || _isConfigurationTransitioning ||
+                configurationRevision != _configurationRevision ||
+                !ReferenceEquals(configuration, _runtimeConfiguration))
+            {
+                DisposeJoinActionSafely(replacement, "discard a stale join listener");
+                return;
+            }
+
+            _isDeviceLockingOnJoinEnabled = lockDeviceOnJoin;
+            ReplaceJoinAction(replacement);
+        }
+
+        public void StopListeningForPlayers()
+        {
+            if (!ValidateMainThread(nameof(StopListeningForPlayers))) return;
+            if (_isConfigurationTransitioning) return;
+            ReplaceJoinAction(null);
+        }
+
+        private InputAction CreatePreparedJoinAction(RuntimeInputConfiguration configuration)
+        {
+            var action = new InputAction("CombinedJoin", InputActionType.Button);
+            try
+            {
+                var paths = new HashSet<string>(StringComparer.Ordinal);
+                AddJoinBindings(configuration.JoinAction, paths);
+                for (int i = 0; i < configuration.PlayerSlots.Count; i++)
+                    AddJoinBindings(configuration.PlayerSlots[i].JoinAction, paths);
+                foreach (string path in paths) action.AddBinding(path);
+                if (action.bindings.Count == 0)
+                {
+                    CleanupSafely(action.Dispose, "dispose an empty join listener");
+                    return null;
+                }
+
+                action.performed += OnJoinAction;
+                action.Enable();
+                return action;
+            }
+            catch
+            {
+                action.performed -= OnJoinAction;
+                CleanupSafely(action.Dispose, "dispose a failed join listener");
+                throw;
+            }
+        }
+
+        private void ReplaceJoinAction(InputAction replacement)
+        {
+            InputAction previous = _joinAction;
+            _joinAction = replacement;
+            bool isListening = replacement != null;
+            if (_isListening != isListening)
+            {
+                _isListening = isListening;
+                if (isListening)
+                {
+                    _listeningManagerCount++;
+                }
+                else if (_listeningManagerCount > 0)
+                {
+                    _listeningManagerCount--;
+                }
+            }
+
+            if (previous != null && !ReferenceEquals(previous, replacement))
+            {
+                DisposeJoinActionSafely(previous, "replace the join listener");
+            }
+        }
+
+        private void DisposeJoinActionSafely(InputAction action, string phase)
+        {
+            if (action == null) return;
+            CleanupSafely(action.Disable, $"{phase}: disable");
+            action.performed -= OnJoinAction;
+            CleanupSafely(action.Dispose, phase);
         }
 
         private void OnJoinAction(InputAction.CallbackContext context)
         {
-            var joiningDevice = context.control.device;
+            if (_isConfigurationTransitioning || _isDisposed) return;
+            InvalidateClaimedDeviceIds();
+            InputDevice device = context.control?.device;
+            if (device == null || !IsDeviceClaimable(device)) return;
 
-            var allUsers = InputUser.all;
-            int userCount = allUsers.Count;
-            for (int i = 0; i < userCount; i++)
+            // A join key always creates a player while unregistered slots remain. Only when every declared
+            // slot is occupied does it extend the primary player's device set, which is the single-player
+            // hot-plug case. Previously the locking branch always paired the device to player zero, so a
+            // second local player could never register from a gamepad.
+            RuntimePlayerSlotConfig fallback = null;
+            for (int i = 0; i < _runtimeConfiguration.PlayerSlots.Count; i++)
             {
-                if (IsDevicePairedToUser(allUsers[i], joiningDevice))
+                RuntimePlayerSlotConfig slot = _runtimeConfiguration.PlayerSlots[i];
+                if (_registeredPlayers.ContainsKey(slot.PlayerId) || _joinsInProgress.Contains(slot.PlayerId)) continue;
+                fallback ??= slot;
+                if (slot.JoinAction != null && MatchesAnyJoinBinding(slot.JoinAction.DeviceBindings, device))
                 {
-                    CLogger.LogWarning($"{DEBUG_FLAG} Device '{joiningDevice.displayName}' already paired.");
+                    JoinFromDevice(slot, device);
                     return;
                 }
             }
 
-            if (_isDeviceLockingOnJoinEnabled)
+            if (fallback != null)
             {
-                if (_registerPlayers.TryGetValue(0, out var existingService))
-                {
-                    if (existingService is InputPlayer inputPlayer)
-                    {
-                        InputUser.PerformPairingWithDevice(joiningDevice, inputPlayer.User);
-                        CLogger.LogInfo($"{DEBUG_FLAG} Paired device '{joiningDevice.displayName}' to Player 0.");
-                    }
-                }
-                else
-                {
-                    var playerConfig = GetPlayerConfig(0);
-                    if (playerConfig == null) return;
-
-                    var user = InputUser.PerformPairingWithDevice(joiningDevice);
-                    if (joiningDevice is Keyboard && Mouse.current != null) InputUser.PerformPairingWithDevice(Mouse.current, user);
-                    else if (joiningDevice is Mouse && Keyboard.current != null) InputUser.PerformPairingWithDevice(Keyboard.current, user);
-
-                    CreatePlayerService(0, user, playerConfig, joiningDevice);
-                }
+                JoinFromDevice(fallback, device);
+                return;
             }
-            else
-            {
-                int playerIdToJoin = -1;
-                for (int i = 0; i < _configuration.PlayerSlots.Count; i++)
-                {
-                    if (!_registerPlayers.ContainsKey(i))
-                    {
-                        var slotConfig = _configuration.PlayerSlots[i];
-                        if (slotConfig.JoinAction != null &&
-                            MatchesAnyJoinBinding(slotConfig.JoinAction.DeviceBindings, joiningDevice))
-                        {
-                            playerIdToJoin = i;
-                            break;
-                        }
-                    }
-                }
 
-                if (playerIdToJoin == -1)
-                {
-                    for (int i = 0; i < _configuration.PlayerSlots.Count; i++)
-                    {
-                        if (!_registerPlayers.ContainsKey(i))
-                        {
-                            playerIdToJoin = i;
-                            break;
-                        }
-                    }
-                }
-
-                if (playerIdToJoin == -1)
-                {
-                    CLogger.LogWarning($"{DEBUG_FLAG} No available player slots to join.");
-                    return;
-                }
-
-                var playerConfig = GetPlayerConfig(playerIdToJoin);
-                if (playerConfig == null) return;
-
-                var user = InputUser.PerformPairingWithDevice(joiningDevice);
-                if (joiningDevice is Keyboard && Mouse.current != null) InputUser.PerformPairingWithDevice(Mouse.current, user);
-                else if (joiningDevice is Mouse && Keyboard.current != null) InputUser.PerformPairingWithDevice(Keyboard.current, user);
-
-                CreatePlayerService(playerIdToJoin, user, playerConfig, joiningDevice);
-            }
+            PairAdditionalDevice(GetPrimaryPlayerId(), device);
         }
 
-        private PlayerSlotConfig GetPlayerConfig(int playerId, bool checkIfAlreadyJoined = true)
+        private void JoinFromDevice(RuntimePlayerSlotConfig slot, InputDevice device)
         {
-            if (!_isInitialized) return null;
-            if (checkIfAlreadyJoined && _registerPlayers.ContainsKey(playerId)) return null;
-            var playerSlots = _configuration.PlayerSlots;
-            int playerSlotCount = playerSlots.Count;
-            for (int i = 0; i < playerSlotCount; i++)
-            {
-                var playerSlot = playerSlots[i];
-                if (playerSlot.PlayerId == playerId)
-                {
-                    return playerSlot;
-                }
-            }
-
-            return null;
+            if (_isDeviceLockingOnJoinEnabled) JoinPlayerAndLockDevice(slot.PlayerId, device);
+            else TryJoinFromDevice(slot, device);
         }
 
         /// <summary>
-        /// Batch pairs all devices to a player in a single operation.
+        /// Explicitly pairs one more device to an already joined player. This never creates a player, so a
+        /// single-player session can hot-plug a second device without changing local-multiplayer registration.
+        /// Returns false for a disposed player, an unclaimable device, or a layout the slot does not declare.
         /// </summary>
-        private IInputPlayer JoinPlayerWithDevices(int playerId, PlayerSlotConfig config, List<InputDevice> devices)
+        public bool PairAdditionalDevice(int playerId, InputDevice device)
         {
-            if (devices == null || devices.Count == 0)
+            if (!ValidateMainThread(nameof(PairAdditionalDevice)) || device == null) return false;
+            if (_isDisposed || !_isInitialized || _isConfigurationTransitioning) return false;
+            if (!_registeredPlayers.TryGetValue(playerId, out IInputPlayer player) ||
+                player is not InputPlayer inputPlayer) return false;
+
+            RuntimePlayerSlotConfig config = GetRuntimePlayerConfig(playerId, false);
+            if (config == null || !CanPairAdditionalDevice(config, device)) return false;
+            InvalidateClaimedDeviceIds();
+            if (!IsDeviceClaimable(device)) return false;
+
+            try
             {
-                CLogger.LogError($"{DEBUG_FLAG} No devices for Player {playerId}.");
+                InputUser.PerformPairingWithDevice(device, inputPlayer.User);
+                InvalidateClaimedDeviceIds();
+                return true;
+            }
+            catch (Exception exception) when (IsRecoverableException(exception))
+            {
+                Log.Error(
+                    exception,
+                    $"{DEBUG_FLAG} Additional join device could not be paired.");
+                return false;
+            }
+        }
+
+        private void TryJoinFromDevice(RuntimePlayerSlotConfig config, InputDevice device)
+        {
+            if (!_joinsInProgress.Add(config.PlayerId)) return;
+            try
+            {
+                long configurationRevision = _configurationRevision;
+                if (TrySelectDevices(config, device, out List<InputDevice> devices, out string schemeName))
+                    JoinPlayerWithDevices(
+                        config.PlayerId,
+                        config,
+                        devices,
+                        schemeName,
+                        configurationRevision);
+            }
+            finally
+            {
+                _joinsInProgress.Remove(config.PlayerId);
+            }
+        }
+
+        private IInputPlayer JoinPlayerWithDevices(
+            int playerId,
+            RuntimePlayerSlotConfig config,
+            List<InputDevice> devices,
+            string controlScheme,
+            long configurationRevision)
+        {
+            using (JoinMarker.Auto())
+            {
+                if (!IsJoinConfigurationCurrent(playerId, config, configurationRevision) ||
+                    devices == null || devices.Count == 0 || !TryReserveDevices(devices))
+                    return null;
+                InputUser user = default;
+                try
+                {
+                    user = InputUser.PerformPairingWithDevice(devices[0]);
+                    for (int i = 1; i < devices.Count; i++) InputUser.PerformPairingWithDevice(devices[i], user);
+                    IInputPlayer player = CreatePlayerService(
+                        playerId,
+                        user,
+                        config,
+                        devices[0],
+                        controlScheme,
+                        configurationRevision);
+                    if (player == null && user.valid) user.UnpairDevicesAndRemoveUser();
+                    return player;
+                }
+                catch (Exception exception) when (IsRecoverableException(exception))
+                {
+                    if (user.valid) user.UnpairDevicesAndRemoveUser();
+                    Log.Error(
+                        exception,
+                        $"{DEBUG_FLAG} Player {playerId} join failed.");
+                    return null;
+                }
+                catch
+                {
+                    if (user.valid) user.UnpairDevicesAndRemoveUser();
+                    throw;
+                }
+                finally
+                {
+                    ReleaseReservedDevices(devices);
+                    InvalidateClaimedDeviceIds();
+                }
+            }
+        }
+
+        private IInputPlayer CreatePlayerService(
+            int playerId,
+            InputUser user,
+            RuntimePlayerSlotConfig config,
+            InputDevice initialDevice,
+            string controlScheme,
+            long configurationRevision)
+        {
+            if (!IsJoinConfigurationCurrent(playerId, config, configurationRevision)) return null;
+            InputPlayer inputPlayer = null;
+            try
+            {
+                inputPlayer = new InputPlayer(playerId, user, config, initialDevice);
+                if (!IsJoinConfigurationCurrent(playerId, config, configurationRevision))
+                {
+                    inputPlayer.Dispose();
+                    return null;
+                }
+                if (!string.IsNullOrEmpty(controlScheme)) inputPlayer.User.ActivateControlScheme(controlScheme);
+                if (_bindingOverridesByPlayer.TryGetValue(playerId, out string overrides) &&
+                    !inputPlayer.ImportBindingOverridesJson(overrides))
+                    throw new InvalidOperationException($"Stored binding overrides for player {playerId} are invalid.");
+                if (!IsJoinConfigurationCurrent(playerId, config, configurationRevision))
+                {
+                    inputPlayer.Dispose();
+                    return null;
+                }
+
+                _registeredPlayers.Add(playerId, inputPlayer);
+                NotifyPlayerInputReady(playerId, inputPlayer);
+
+                if (IsPlayerRegistrationCurrent(playerId, inputPlayer)) return inputPlayer;
+                if (_registeredPlayers.TryGetValue(playerId, out IInputPlayer registered) &&
+                    ReferenceEquals(registered, inputPlayer))
+                {
+                    _registeredPlayers.Remove(playerId);
+                }
+                if (!inputPlayer.IsDisposed) inputPlayer.Dispose();
                 return null;
             }
-
-            using (InputPerformanceProfiler.BeginScope("JoinPlayerWithDevices"))
+            catch
             {
-                var user = InputUser.PerformPairingWithDevice(devices[0]);
-                for (int i = 1; i < devices.Count; i++)
+                if (_registeredPlayers.TryGetValue(playerId, out IInputPlayer registered) &&
+                    ReferenceEquals(registered, inputPlayer))
                 {
-                    InputUser.PerformPairingWithDevice(devices[i], user);
+                    _registeredPlayers.Remove(playerId);
+                }
+                if (inputPlayer != null && !inputPlayer.IsDisposed) inputPlayer.Dispose();
+                throw;
+            }
+        }
+
+        private bool IsJoinConfigurationCurrent(
+            int playerId,
+            RuntimePlayerSlotConfig config,
+            long configurationRevision)
+        {
+            return !_isDisposed &&
+                   !_isConfigurationTransitioning &&
+                   configurationRevision == _configurationRevision &&
+                   ReferenceEquals(GetRuntimePlayerConfig(playerId, false), config);
+        }
+
+        private bool IsPlayerRegistrationCurrent(int playerId, IInputPlayer player)
+        {
+            return !_isDisposed &&
+                   player is InputPlayer inputPlayer &&
+                   !inputPlayer.IsDisposed &&
+                   _registeredPlayers.TryGetValue(playerId, out IInputPlayer registered) &&
+                   ReferenceEquals(registered, player);
+        }
+
+        internal bool TrySelectDevices(
+            RuntimePlayerSlotConfig config,
+            InputDevice mustInclude,
+            out List<InputDevice> selected,
+            out string schemeName)
+        {
+            selected = null;
+            schemeName = null;
+            InvalidateClaimedDeviceIds();
+            List<InputDevice> available = GetClaimableDevices(mustInclude);
+            if (config.PairAllMatchingDevices)
+            {
+                return TryCollectEveryMatchingDevice(config, available, mustInclude, out selected);
+            }
+
+            if (config.ControlSchemes.Count > 0)
+            {
+                if (!string.IsNullOrEmpty(config.DefaultControlScheme) &&
+                    TryMatchControlScheme(config, config.DefaultControlScheme, available, mustInclude, out selected, out schemeName))
+                    return true;
+                for (int i = 0; i < config.ControlSchemes.Count; i++)
+                {
+                    RuntimeControlSchemeConfig scheme = config.ControlSchemes[i];
+                    if (string.Equals(scheme.Name, config.DefaultControlScheme, StringComparison.Ordinal)) continue;
+                    if (TryMatchControlScheme(config, scheme.Name, available, mustInclude, out selected, out schemeName)) return true;
                 }
 
-                return CreatePlayerService(playerId, user, config, devices[0]);
+                return false;
             }
-        }
 
-        private IInputPlayer CreatePlayerService(int playerId, InputUser user, PlayerSlotConfig config, InputDevice initialDevice = null)
-        {
-            using (InputPerformanceProfiler.BeginScope("CreatePlayerService"))
+            List<string> layouts = GetCandidateLayouts(config);
+            selected = new List<InputDevice>(2);
+            if (mustInclude != null)
             {
-                var inputPlayer = new InputPlayer(playerId, user, config, initialDevice);
-                _registerPlayers[playerId] = inputPlayer;
-                string devices = FormatPairedDeviceNames(user);
-                CLogger.LogInfo($"{DEBUG_FLAG} Player {playerId} created with devices: [{devices}].");
-                
-                if (playerId == 0)
-                {
-                    SetupCursorControl(inputPlayer);
-                }
-
-                OnPlayerInputReady?.Invoke(inputPlayer);
-                return inputPlayer;
+                if (!MatchesAnyLayout(mustInclude, layouts) || !IsDeviceClaimable(mustInclude)) return false;
+                selected.Add(mustInclude);
             }
-        }
-
-        private void SetupCursorControl(IInputPlayer player)
-        {
-            _cursorSubscription?.Dispose();
-            _cursorSubscription = player.ActiveDeviceKind.Subscribe(OnDeviceChanged);
-            UpdateCursorState(player.ActiveDeviceKind.CurrentValue);
-        }
-
-        private void OnDeviceChanged(InputDeviceKind deviceKind)
-        {
-            if (ManageCursorVisibility)
-            {
-                UpdateCursorState(deviceKind);
-            }
-        }
-
-        private void UpdateCursorState(InputDeviceKind kind)
-        {
-            bool showCursor = kind == InputDeviceKind.KeyboardMouse;
-            
-            Cursor.visible = showCursor;
-            
-            if (showCursor)
-            {
-                Cursor.lockState = CursorLockMode.None;
-                
-                if (ResetCursorToCenter)
-                {
-                    WarpCursorToCenter();
-                }
-            }
-        }
-
-        private void WarpCursorToCenter()
-        {
-#if ENABLE_INPUT_SYSTEM
-            if (UnityEngine.InputSystem.Mouse.current != null)
-            {
-                var center = new UnityEngine.Vector2(UnityEngine.Screen.width / 2f, UnityEngine.Screen.height / 2f);
-                UnityEngine.InputSystem.Mouse.current.WarpCursorPosition(center);
-            }
-#endif
-        }
-
-        public static UnityEngine.Vector2 GetMousePosition()
-        {
-            UnityEngine.Vector2 mousePos = UnityEngine.Vector2.zero;
-#if ENABLE_INPUT_SYSTEM
-            if (UnityEngine.InputSystem.Mouse.current != null)
-                mousePos = UnityEngine.InputSystem.Mouse.current.position.ReadValue();
             else
-                mousePos = UnityEngine.Input.mousePosition;
-#else
-            mousePos = UnityEngine.Input.mousePosition;
-#endif
-            return mousePos;
+            {
+                for (int i = 0; i < layouts.Count; i++)
+                {
+                    InputDevice device = FindAvailableDeviceByLayout(available, layouts[i], selected);
+                    if (device == null) continue;
+                    selected.Add(device);
+                    break;
+                }
+            }
+
+            if (selected.Count == 0) return false;
+            AddKeyboardMouseCompanion(available, selected);
+            return true;
         }
 
-        private HashSet<string> GetRequiredLayoutsForConfig(PlayerSlotConfig config)
+        /// <summary>
+        /// Selects every claimable device whose layout the configuration references and leaves the control scheme
+        /// unset, so bindings on all of them stay active. Used when one local player must keep responding to both a
+        /// gamepad and keyboard/mouse without re-joining.
+        /// </summary>
+        private bool TryCollectEveryMatchingDevice(
+            RuntimePlayerSlotConfig config,
+            List<InputDevice> available,
+            InputDevice mustInclude,
+            out List<InputDevice> selected)
         {
-            var layouts = new HashSet<string>();
-            foreach (var context in config.Contexts)
-                foreach (var binding in context.Bindings)
-                    foreach (var deviceBinding in binding.DeviceBindings)
+            selected = new List<InputDevice>(4);
+            if (mustInclude != null)
+            {
+                if (!IsDeviceClaimable(mustInclude)) return false;
+                selected.Add(mustInclude);
+            }
+
+            List<string> layouts = GetCandidateLayouts(config);
+            int perLayoutLimit = Math.Max(1, config.MaxDevicesPerLayout);
+            // One budget per referenced layout. A device counts against the first candidate layout it derives
+            // from, so derived layouts (for example DualShockGamepad) share the Gamepad budget. Without this
+            // bound a single player would claim every attached keyboard, mouse and gamepad and no other
+            // local player could join.
+            var claimedPerLayout = new int[layouts.Count];
+            for (int i = 0; i < selected.Count; i++)
+            {
+                int layoutIndex = FindMatchingLayoutIndex(selected[i], layouts);
+                if (layoutIndex >= 0) claimedPerLayout[layoutIndex]++;
+            }
+
+            for (int i = 0; i < available.Count; i++)
+            {
+                InputDevice device = available[i];
+                if (device == null || ContainsDevice(selected, device)) continue;
+                if (!IsDeviceClaimable(device)) continue;
+                int layoutIndex = FindMatchingLayoutIndex(device, layouts);
+                if (layoutIndex < 0 || claimedPerLayout[layoutIndex] >= perLayoutLimit) continue;
+                claimedPerLayout[layoutIndex]++;
+                selected.Add(device);
+            }
+
+            return selected.Count > 0;
+        }
+
+        private static bool TryMatchControlScheme(
+            RuntimePlayerSlotConfig config,
+            string requestedName,
+            List<InputDevice> available,
+            InputDevice mustInclude,
+            out List<InputDevice> selected,
+            out string schemeName)
+        {
+            selected = null;
+            schemeName = null;
+            RuntimeControlSchemeConfig source = null;
+            for (int i = 0; i < config.ControlSchemes.Count; i++)
+            {
+                if (string.Equals(config.ControlSchemes[i].Name, requestedName, StringComparison.Ordinal))
+                {
+                    source = config.ControlSchemes[i];
+                    break;
+                }
+            }
+
+            if (source == null) return false;
+            InputControlScheme scheme = CreateControlScheme(source);
+            using InputControlScheme.MatchResult match = scheme.PickDevicesFrom(available, mustInclude);
+            if (!match.isSuccessfulMatch) return false;
+            selected = new List<InputDevice>(match.devices.Count);
+            for (int i = 0; i < match.devices.Count; i++)
+            {
+                InputDevice device = match.devices[i];
+                if (device != null && !ContainsDevice(selected, device)) selected.Add(device);
+            }
+
+            if (mustInclude != null && !ContainsDevice(selected, mustInclude)) return false;
+            schemeName = source.Name;
+            return selected.Count > 0;
+        }
+
+        private static InputControlScheme CreateControlScheme(RuntimeControlSchemeConfig source)
+        {
+            var requirements = new InputControlScheme.DeviceRequirement[source.DeviceRequirements.Count];
+            for (int i = 0; i < requirements.Length; i++)
+            {
+                RuntimeControlSchemeDeviceRequirementConfig requirement = source.DeviceRequirements[i];
+                requirements[i] = new InputControlScheme.DeviceRequirement
+                {
+                    controlPath = requirement.ControlPath,
+                    isOptional = requirement.IsOptional,
+                    isOR = requirement.IsOr
+                };
+            }
+
+            return new InputControlScheme(source.Name, requirements, source.BindingGroup);
+        }
+
+        private List<InputDevice> GetClaimableDevices(InputDevice mustInclude)
+        {
+            var result = new List<InputDevice>(UnityEngine.InputSystem.InputSystem.devices.Count);
+            var devices = UnityEngine.InputSystem.InputSystem.devices;
+            for (int i = 0; i < devices.Count; i++)
+            {
+                InputDevice device = devices[i];
+                if (IsDeviceClaimable(device) || ReferenceEquals(device, mustInclude)) result.Add(device);
+            }
+
+            return result;
+        }
+
+        private void InvalidateClaimedDeviceIds()
+        {
+            _claimedDeviceIdsValid = false;
+        }
+
+        /// <summary>
+        /// Rebuilds the device-ownership snapshot once per topology revision. Without this index every
+        /// claimability probe walked all InputUsers and all of their paired devices, making a join
+        /// O(users x pairedDevices) per attached device.
+        /// </summary>
+        private void EnsureClaimedDeviceIds()
+        {
+            if (_claimedDeviceIdsValid) return;
+            _claimedDeviceIds.Clear();
+            var users = InputUser.all;
+            for (int i = 0; i < users.Count; i++)
+            {
+                var paired = users[i].pairedDevices;
+                for (int j = 0; j < paired.Count; j++)
+                {
+                    InputDevice device = paired[j];
+                    if (device != null) _claimedDeviceIds.Add(device.deviceId);
+                }
+            }
+
+            _claimedDeviceIdsValid = true;
+        }
+
+        private bool IsDeviceClaimable(InputDevice device)
+        {
+            if (device == null || _reservedDeviceIds.Contains(device.deviceId)) return false;
+            EnsureClaimedDeviceIds();
+            return !_claimedDeviceIds.Contains(device.deviceId);
+        }
+
+        private bool TryReserveDevices(List<InputDevice> devices)
+        {
+            for (int i = 0; i < devices.Count; i++)
+            {
+                if (!IsDeviceClaimable(devices[i])) return false;
+            }
+
+            for (int i = 0; i < devices.Count; i++) _reservedDeviceIds.Add(devices[i].deviceId);
+            return true;
+        }
+
+        private void ReleaseReservedDevices(List<InputDevice> devices)
+        {
+            for (int i = 0; i < devices.Count; i++) _reservedDeviceIds.Remove(devices[i].deviceId);
+        }
+
+        private static List<string> GetCandidateLayouts(RuntimePlayerSlotConfig config)
+        {
+            var layouts = new List<string>();
+            for (int i = 0; i < config.Contexts.Count; i++)
+            {
+                RuntimeContextDefinitionConfig context = config.Contexts[i];
+                for (int j = 0; j < context.Bindings.Count; j++)
+                {
+                    RuntimeActionBindingConfig action = context.Bindings[j];
+                    for (int k = 0; k < action.DeviceBindings.Count; k++) AddLayout(action.DeviceBindings[k], layouts);
+                    for (int k = 0; k < action.CompositeBindings.Count; k++)
                     {
-                        int startIndex = deviceBinding.IndexOf('<');
-                        if (startIndex != -1)
-                        {
-                            int endIndex = deviceBinding.IndexOf('>');
-                            if (endIndex > startIndex) layouts.Add(deviceBinding.Substring(startIndex + 1, endIndex - startIndex - 1));
-                        }
+                        RuntimeCompositeBindingConfig composite = action.CompositeBindings[k];
+                        for (int part = 0; part < composite.Parts.Count; part++) AddLayout(composite.Parts[part].Path, layouts);
                     }
+                }
+            }
+
             return layouts;
         }
 
-        /// <summary>
-        /// Finds an available device matching the layout. Uses cached collections to minimize allocations.
-        /// </summary>
-        private InputDevice FindAvailableDeviceByLayout(string layoutName)
+        private static void AddLayout(string path, List<string> layouts)
         {
-            var devices = UnityEngine.InputSystem.InputSystem.devices;
-            int deviceCount = devices.Count;
-            var allUsers = InputUser.all;
-            int userCount = allUsers.Count;
-
-            for (int i = 0; i < deviceCount; i++)
+            int start = path.IndexOf('<');
+            int end = start < 0 ? -1 : path.IndexOf('>', start + 1);
+            if (start < 0 || end <= start) return;
+            string layout = path.Substring(start + 1, end - start - 1);
+            for (int i = 0; i < layouts.Count; i++)
             {
-                var device = devices[i];
-                if (UnityEngine.InputSystem.InputSystem.IsFirstLayoutBasedOnSecond(device.layout, layoutName))
-                {
-                    bool isPaired = false;
-                    for (int j = 0; j < userCount; j++)
-                    {
-                        if (IsDevicePairedToUser(allUsers[j], device))
-                        {
-                            isPaired = true;
-                            break;
-                        }
-                    }
-                    if (!isPaired) return device;
-                }
+                if (string.Equals(layouts[i], layout, StringComparison.Ordinal)) return;
             }
+
+            layouts.Add(layout);
+        }
+
+        private static int FindMatchingLayoutIndex(InputDevice device, List<string> layouts)
+        {
+            for (int i = 0; i < layouts.Count; i++)
+            {
+                if (UnityEngine.InputSystem.InputSystem.IsFirstLayoutBasedOnSecond(device.layout, layouts[i])) return i;
+            }
+
+            return -1;
+        }
+
+        private static bool MatchesAnyLayout(InputDevice device, List<string> layouts)
+        {
+            return FindMatchingLayoutIndex(device, layouts) >= 0;
+        }
+
+        private static InputDevice FindAvailableDeviceByLayout(
+            List<InputDevice> available,
+            string layout,
+            List<InputDevice> selected)
+        {
+            for (int i = 0; i < available.Count; i++)
+            {
+                InputDevice device = available[i];
+                if (!ContainsDevice(selected, device) &&
+                    UnityEngine.InputSystem.InputSystem.IsFirstLayoutBasedOnSecond(device.layout, layout))
+                    return device;
+            }
+
             return null;
         }
 
-        private static bool ContainsKeyboard(List<InputDevice> devices)
+        private static void AddKeyboardMouseCompanion(List<InputDevice> available, List<InputDevice> selected)
         {
-            int count = devices.Count;
-            for (int i = 0; i < count; i++)
+            bool hasKeyboard = false;
+            bool hasMouse = false;
+            for (int i = 0; i < selected.Count; i++)
             {
-                if (devices[i] is Keyboard)
+                hasKeyboard |= selected[i] is Keyboard;
+                hasMouse |= selected[i] is Mouse;
+            }
+
+            if (hasKeyboard == hasMouse) return;
+            for (int i = 0; i < available.Count; i++)
+            {
+                if ((hasKeyboard && available[i] is Mouse) || (hasMouse && available[i] is Keyboard))
                 {
-                    return true;
+                    selected.Add(available[i]);
+                    return;
+                }
+            }
+        }
+
+        private static bool ContainsDevice(List<InputDevice> devices, InputDevice target)
+        {
+            for (int i = 0; i < devices.Count; i++)
+            {
+                if (ReferenceEquals(devices[i], target)) return true;
+            }
+
+            return false;
+        }
+
+        private static bool MatchesAnyJoinBinding(IReadOnlyList<string> bindings, InputDevice device)
+        {
+            for (int i = 0; i < bindings.Count; i++)
+            {
+                string path = bindings[i];
+                int start = path.IndexOf('<');
+                int end = start < 0 ? -1 : path.IndexOf('>', start + 1);
+                if (start >= 0 && end > start)
+                {
+                    string layout = path.Substring(start + 1, end - start - 1);
+                    if (UnityEngine.InputSystem.InputSystem.IsFirstLayoutBasedOnSecond(device.layout, layout)) return true;
                 }
             }
 
             return false;
+        }
+
+        private static bool CanPairAdditionalDevice(RuntimePlayerSlotConfig config, InputDevice device)
+        {
+            if (config.ControlSchemes.Count == 0)
+                return MatchesAnyLayout(device, GetCandidateLayouts(config));
+
+            for (int schemeIndex = 0; schemeIndex < config.ControlSchemes.Count; schemeIndex++)
+            {
+                RuntimeControlSchemeConfig scheme = config.ControlSchemes[schemeIndex];
+                for (int requirementIndex = 0; requirementIndex < scheme.DeviceRequirements.Count; requirementIndex++)
+                {
+                    if (MatchesLayoutPath(device, scheme.DeviceRequirements[requirementIndex].ControlPath)) return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool MatchesLayoutPath(InputDevice device, string path)
+        {
+            int start = path.IndexOf('<');
+            int end = start < 0 ? -1 : path.IndexOf('>', start + 1);
+            return start >= 0 && end > start &&
+                   UnityEngine.InputSystem.InputSystem.IsFirstLayoutBasedOnSecond(
+                       device.layout,
+                       path.Substring(start + 1, end - start - 1));
+        }
+
+        private static void AddJoinBindings(RuntimeActionBindingConfig action, HashSet<string> paths)
+        {
+            if (action == null) return;
+            for (int i = 0; i < action.DeviceBindings.Count; i++) paths.Add(action.DeviceBindings[i]);
+        }
+
+        private RuntimePlayerSlotConfig GetRuntimePlayerConfig(int playerId, bool checkJoined = true)
+        {
+            if (!_isInitialized || (checkJoined && _registeredPlayers.ContainsKey(playerId))) return null;
+            for (int i = 0; i < _runtimeConfiguration.PlayerSlots.Count; i++)
+            {
+                if (_runtimeConfiguration.PlayerSlots[i].PlayerId == playerId) return _runtimeConfiguration.PlayerSlots[i];
+            }
+
+            return null;
+        }
+
+        private PlayerSlotConfig GetMutablePlayerConfig(int playerId)
+        {
+            if (!_isInitialized) return null;
+            for (int i = 0; i < _configuration.PlayerSlots.Count; i++)
+            {
+                if (_configuration.PlayerSlots[i].PlayerId == playerId) return _configuration.PlayerSlots[i];
+            }
+
+            return null;
+        }
+
+        private int GetPrimaryPlayerId()
+        {
+            if (GetRuntimePlayerConfig(0, false) != null) return 0;
+            return _runtimeConfiguration.PlayerSlots.Count > 0 ? _runtimeConfiguration.PlayerSlots[0].PlayerId : 0;
         }
 
         private static bool IsDevicePairedToUser(InputUser user, InputDevice device)
         {
-            var pairedDevices = user.pairedDevices;
-            int deviceCount = pairedDevices.Count;
-            for (int i = 0; i < deviceCount; i++)
+            var devices = user.pairedDevices;
+            for (int i = 0; i < devices.Count; i++)
             {
-                if (ReferenceEquals(pairedDevices[i], device))
-                {
-                    return true;
-                }
+                if (ReferenceEquals(devices[i], device)) return true;
             }
 
             return false;
         }
 
-        private static bool ContainsMouse(List<InputDevice> devices)
+        private async UniTask WaitForDeviceChangeAsync(CancellationToken cancellationToken)
         {
-            int count = devices.Count;
-            for (int i = 0; i < count; i++)
-            {
-                if (devices[i] is Mouse)
-                {
-                    return true;
-                }
-            }
-
-            return false;
+            long revision = _deviceRevision;
+            await UniTask.WaitUntil(
+                () => _deviceRevision != revision,
+                PlayerLoopTiming.Update,
+                cancellationToken);
         }
 
-        private static bool MatchesAnyJoinBinding(List<string> bindings, InputDevice joiningDevice)
+        private void OnDeviceTopologyChanged(InputDevice _, InputDeviceChange __)
         {
-            int count = bindings.Count;
-            for (int i = 0; i < count; i++)
+            _deviceRevision++;
+            InvalidateClaimedDeviceIds();
+            if (AutoReassignOnDeviceLoss && !_isReassigning && !_isDisposed &&
+                !_isConfigurationTransitioning && _isInitialized)
             {
-                string binding = bindings[i];
-                if (binding.Contains(joiningDevice.layout) ||
-                    (joiningDevice is Keyboard && binding.Contains("Keyboard")) ||
-                    (joiningDevice is Mouse && binding.Contains("Mouse")))
-                {
-                    return true;
-                }
+                ReassignPlayersWithoutDevices();
             }
-
-            return false;
-        }
-
-        private static string FormatPairedDeviceNames(InputUser user)
-        {
-            var pairedDevices = user.pairedDevices;
-            int deviceCount = pairedDevices.Count;
-            if (deviceCount == 0)
-            {
-                return "All (Shared)";
-            }
-
-            var builder = new StringBuilder(64);
-            for (int i = 0; i < deviceCount; i++)
-            {
-                if (i > 0)
-                {
-                    builder.Append(", ");
-                }
-
-                builder.Append(pairedDevices[i].displayName);
-            }
-
-            return builder.ToString();
         }
 
         /// <summary>
-        /// Gets an existing input player for the specified player ID, or null if not joined.
+        /// Re-joins one registered player with the devices currently available, refreshing the control
+        /// scheme, binding mask and device whitelist together. A device loss otherwise leaves the player
+        /// registered but with an empty whitelist and a stale scheme, so every action resolves zero controls.
+        /// Returns false when the player is unknown, no device can satisfy a declared scheme, or the
+        /// manager is not in a state where a rejoin is safe.
         /// </summary>
+        public bool ReassignPlayerDevices(int playerId)
+        {
+            if (!ValidateMainThread(nameof(ReassignPlayerDevices))) return false;
+            if (_isDisposed || !_isInitialized || _isConfigurationTransitioning || _isReassigning) return false;
+            if (!_registeredPlayers.ContainsKey(playerId)) return false;
+
+            RuntimePlayerSlotConfig config = GetRuntimePlayerConfig(playerId, false);
+            if (config == null) return false;
+
+            // Probe before destroying anything. Removing the player is destructive: when no unclaimed
+            // device can satisfy a declared scheme (all spares belong to other players), keep the current
+            // registration instead of leaving the product with a vanished player.
+            if (!TrySelectDevices(config, null, out _, out _)) return false;
+
+            _isReassigning = true;
+            try
+            {
+                if (!RemovePlayer(playerId)) return false;
+                InvalidateClaimedDeviceIds();
+                return JoinSinglePlayer(playerId) != null;
+            }
+            finally
+            {
+                _isReassigning = false;
+            }
+        }
+
+        /// <summary>
+        /// Counts the paired devices that still exist in the system. <c>InputSystem.onDeviceChange</c> is
+        /// raised <em>before</em> <c>InputUser</c> drops the removed device from
+        /// <c>pairedDevices</c> - measured: on the <c>Removed</c> notification for the second of two paired
+        /// devices the list still reports one entry. A plain <c>pairedDevices.Count</c> check inside the
+        /// notification therefore never sees an orphaned player, and auto-reassignment silently degrades to
+        /// "wait for some unrelated later topology event". Filtering on <c>Device.added</c> makes the check
+        /// correct both inside and outside the notification.
+        /// </summary>
+        private static int CountLivePairedDevices(InputUser user)
+        {
+            var devices = user.pairedDevices;
+            int count = 0;
+            for (int i = 0; i < devices.Count; i++)
+            {
+                InputDevice device = devices[i];
+                if (device != null && device.added) count++;
+            }
+
+            return count;
+        }
+
+        private void ReassignPlayersWithoutDevices()
+        {
+            List<int> orphaned = null;
+            foreach (KeyValuePair<int, IInputPlayer> pair in _registeredPlayers)
+            {
+                if (pair.Value is InputPlayer player && CountLivePairedDevices(player.User) == 0)
+                {
+                    orphaned ??= new List<int>(_registeredPlayers.Count);
+                    orphaned.Add(pair.Key);
+                }
+            }
+
+            if (orphaned == null) return;
+            for (int i = 0; i < orphaned.Count; i++) ReassignPlayerDevices(orphaned[i]);
+        }
+
         public IInputPlayer GetInputPlayer(int playerId)
         {
-            return _registerPlayers.TryGetValue(playerId, out var service) ? service : null;
+            EnsureMainThread();
+            return _registeredPlayers.TryGetValue(playerId, out IInputPlayer player) ? player : null;
         }
 
-        /// <summary>
-        /// Gets an existing input player or joins it on the Unity main thread.
-        /// </summary>
         public async UniTask<IInputPlayer> GetOrJoinInputPlayerAsync(int playerId, int timeoutInSeconds = 5)
         {
-            if (_registerPlayers.TryGetValue(playerId, out var service))
-            {
-                return service;
-            }
-
-            return await JoinSinglePlayerAsync(playerId, timeoutInSeconds);
+            await SwitchToUnityMainThreadAsync();
+            return _registeredPlayers.TryGetValue(playerId, out IInputPlayer player)
+                ? player
+                : await JoinSinglePlayerAsync(playerId, timeoutInSeconds);
         }
 
-        /// <summary>
-        /// Refreshes player input by triggering OnPlayerInputReady event for an already joined player.
-        /// Useful when you dynamically bind input contexts after the player has already joined (e.g., in a different scene).
-        /// This allows the InputSystem to recognize and manage newly bound input contexts.
-        /// Returns true if the player exists and event was triggered, false otherwise.
-        /// </summary>
         public bool RefreshPlayerInput(int playerId)
         {
-            if (_registerPlayers.TryGetValue(playerId, out var service))
-            {
-                OnPlayerInputReady?.Invoke(service);
-                CLogger.LogInfo($"{DEBUG_FLAG} Refreshed input for Player {playerId}.");
-                return true;
-            }
-            CLogger.LogWarning($"{DEBUG_FLAG} Cannot refresh input for Player {playerId}: player not found.");
-            return false;
+            EnsureMainThread();
+            if (!_registeredPlayers.TryGetValue(playerId, out IInputPlayer player)) return false;
+            NotifyPlayerInputReady(playerId, player);
+            return IsPlayerRegistrationCurrent(playerId, player);
         }
 
-        /// <summary>
-        /// Removes a player from the manager and disposes their input resources.
-        /// </summary>
         public bool RemovePlayer(int playerId)
         {
-            if (!_registerPlayers.TryGetValue(playerId, out var service))
-            {
-                return false;
-            }
-
-            (service as IDisposable)?.Dispose();
-            _registerPlayers.Remove(playerId);
-            CLogger.LogInfo($"{DEBUG_FLAG} Player {playerId} removed.");
+            EnsureMainThread();
+            if (!_registeredPlayers.TryGetValue(playerId, out IInputPlayer player)) return false;
+            _registeredPlayers.Remove(playerId);
+            if (player is IDisposable disposable)
+                CleanupSafely(disposable.Dispose, $"dispose player {playerId}");
+            InvalidateClaimedDeviceIds();
             return true;
         }
 
-        public void Dispose()
-        {
-            if (_isDisposed) return;
-            _isDisposed = true;
-
-            _cursorSubscription?.Dispose();
-            _cursorSubscription = null;
-            StopListeningForPlayers();
-            foreach (var service in _registerPlayers.Values)
-            {
-                (service as IDisposable)?.Dispose();
-            }
-            _registerPlayers.Clear();
-            _isInitialized = false;
-        }
-
-        /// <summary>
-        /// Overrides a specific device binding for an action on the given player.
-        /// Returns true if the old binding was found and overridden.
-        /// </summary>
         public bool RebindAction(int playerId, string actionMapName, string actionName, string oldBinding, string newBinding)
         {
-            if (!_registerPlayers.TryGetValue(playerId, out var service)) return false;
-            return service.RebindAction(actionMapName, actionName, oldBinding, newBinding);
+            EnsureMainThread();
+            return _registeredPlayers.TryGetValue(playerId, out IInputPlayer player) &&
+                   player.RebindAction(actionMapName, actionName, oldBinding, newBinding);
         }
 
-        /// <summary>
-        /// Resets a specific action's bindings to their original configuration for the given player.
-        /// </summary>
         public bool ResetActionBinding(int playerId, string actionMapName, string actionName)
         {
-            if (!_registerPlayers.TryGetValue(playerId, out var service)) return false;
-            return service.ResetActionBinding(actionMapName, actionName);
+            EnsureMainThread();
+            return _registeredPlayers.TryGetValue(playerId, out IInputPlayer player) &&
+                   player.ResetActionBinding(actionMapName, actionName);
         }
 
-        /// <summary>
-        /// Resets all actions' bindings for the given player to their original configuration.
-        /// </summary>
         public void ResetAllActionBindings(int playerId)
         {
-            if (_registerPlayers.TryGetValue(playerId, out var service))
-            {
-                service.ResetAllActionBindings();
-            }
+            EnsureMainThread();
+            if (_registeredPlayers.TryGetValue(playerId, out IInputPlayer player)) player.ResetAllActionBindings();
         }
 
-        /// <summary>
-        /// Returns the current effective binding paths for an action on the given player.
-        /// </summary>
         public string[] GetActionBindings(int playerId, string actionMapName, string actionName)
         {
-            if (!_registerPlayers.TryGetValue(playerId, out var service)) return System.Array.Empty<string>();
-            return service.GetActionBindings(actionMapName, actionName);
+            EnsureMainThread();
+            return _registeredPlayers.TryGetValue(playerId, out IInputPlayer player)
+                ? player.GetActionBindings(actionMapName, actionName)
+                : Array.Empty<string>();
         }
 
-        /// <summary>
-        /// Returns a chord observable for two button actions on the given player.
-        /// </summary>
-        public Observable<Unit> GetChordObservable(int playerId, string actionMapName, string actionName1, string actionName2, float windowMs = 300f)
+        public Observable<Unit> GetChordObservable(
+            int playerId,
+            string actionMapName,
+            string firstAction,
+            string secondAction,
+            float windowMs = 300f)
         {
-            if (!_registerPlayers.TryGetValue(playerId, out var service)) return EmptyObservables.Unit;
-            return service.GetChordObservable(actionMapName, actionName1, actionName2, windowMs);
+            EnsureMainThread();
+            return _registeredPlayers.TryGetValue(playerId, out IInputPlayer player)
+                ? player.GetChordObservable(actionMapName, firstAction, secondAction, windowMs)
+                : EmptyObservables.Unit;
+        }
+
+        public InputBindingOverrideProfile ExportBindingOverrideProfile()
+        {
+            if (!TryExportBindingOverrideProfile(out InputBindingOverrideProfile profile))
+            {
+                throw new InvalidOperationException(
+                    "Binding override profile exceeds the manager export budget.");
+            }
+
+            return profile;
+        }
+
+        public bool TryExportBindingOverrideProfile(out InputBindingOverrideProfile profile)
+        {
+            EnsureMainThread();
+            profile = new InputBindingOverrideProfile();
+            int totalBytes = 0;
+            foreach (KeyValuePair<int, IInputPlayer> pair in _registeredPlayers)
+            {
+                if (!pair.Value.TryExportBindingOverridesJson(out string overridesJson) ||
+                    !TryGetStrictUtf8ByteCount(overridesJson, out int entryBytes) ||
+                    entryBytes > MaxOverrideJsonPerPlayer ||
+                    entryBytes > MaxOverrideProfileBytes - totalBytes)
+                {
+                    profile = null;
+                    return false;
+                }
+
+                totalBytes += entryBytes;
+                profile.Players.Add(new InputBindingOverrideEntry
+                {
+                    PlayerId = pair.Key,
+                    OverridesJson = overridesJson
+                });
+            }
+
+            foreach (KeyValuePair<int, string> pair in _bindingOverridesByPlayer)
+            {
+                if (_registeredPlayers.ContainsKey(pair.Key)) continue;
+                if (!TryGetStrictUtf8ByteCount(pair.Value, out int entryBytes) ||
+                    entryBytes > MaxOverrideJsonPerPlayer ||
+                    entryBytes > MaxOverrideProfileBytes - totalBytes)
+                {
+                    profile = null;
+                    return false;
+                }
+
+                totalBytes += entryBytes;
+                profile.Players.Add(new InputBindingOverrideEntry { PlayerId = pair.Key, OverridesJson = pair.Value });
+            }
+
+            profile.Players.Sort((left, right) => left.PlayerId.CompareTo(right.PlayerId));
+            return true;
+        }
+
+        public bool ImportBindingOverrideProfile(InputBindingOverrideProfile profile)
+        {
+            EnsureMainThread();
+            if (profile == null || profile.SchemaVersion != InputBindingOverrideProfile.CurrentSchemaVersion ||
+                profile.Players == null || profile.Players.Count > _limits.MaxPlayers)
+                return false;
+
+            var staged = new Dictionary<int, string>(profile.Players.Count);
+            int totalBytes = 0;
+            for (int i = 0; i < profile.Players.Count; i++)
+            {
+                InputBindingOverrideEntry entry = profile.Players[i];
+                RuntimePlayerSlotConfig playerConfig = entry == null
+                    ? null
+                    : GetRuntimePlayerConfig(entry.PlayerId, false);
+                if (entry == null || playerConfig == null ||
+                    entry.OverridesJson == null || !TryGetStrictUtf8ByteCount(entry.OverridesJson, out int entryBytes) ||
+                    entryBytes > MaxOverrideJsonPerPlayer ||
+                    !staged.TryAdd(entry.PlayerId, entry.OverridesJson) ||
+                    !InputPlayer.ValidateBindingOverridesJsonForConfiguration(
+                        entry.OverridesJson,
+                        playerConfig))
+                    return false;
+                totalBytes += entryBytes;
+                if (totalBytes > MaxOverrideProfileBytes) return false;
+            }
+
+            var rollback = new Dictionary<int, string>();
+            foreach (KeyValuePair<int, string> pair in staged)
+            {
+                if (!_registeredPlayers.TryGetValue(pair.Key, out IInputPlayer player)) continue;
+                rollback[pair.Key] = player.ExportBindingOverridesJson();
+                if (!player.ImportBindingOverridesJson(pair.Value))
+                {
+                    foreach (KeyValuePair<int, string> previous in rollback)
+                        _registeredPlayers[previous.Key].ImportBindingOverridesJson(previous.Value);
+                    return false;
+                }
+            }
+
+            _bindingOverridesByPlayer.Clear();
+            foreach (KeyValuePair<int, string> pair in staged) _bindingOverridesByPlayer.Add(pair.Key, pair.Value);
+            return true;
+        }
+
+        public string ExportBindingOverrideProfileJson()
+        {
+            string json = JsonUtility.ToJson(ExportBindingOverrideProfile());
+            if (!TryGetStrictUtf8ByteCount(json, out int byteCount) || byteCount > MaxOverrideProfileBytes)
+                throw new InvalidOperationException("Binding override profile exceeds the configured byte limit.");
+            return json;
+        }
+
+        public bool ImportBindingOverrideProfileJson(string json)
+        {
+            EnsureMainThread();
+            if (string.IsNullOrEmpty(json) || !TryGetStrictUtf8ByteCount(json, out int byteCount) ||
+                byteCount > MaxOverrideProfileBytes) return false;
+            try
+            {
+                InputBindingOverrideProfile profile = JsonUtility.FromJson<InputBindingOverrideProfile>(json);
+                return ImportBindingOverrideProfile(profile);
+            }
+            catch (Exception exception) when (IsRecoverableException(exception))
+            {
+                Log.Error(
+                    exception,
+                    $"{DEBUG_FLAG} Failed to import binding override profile.");
+                return false;
+            }
         }
 
         public List<BindingConflict> CheckBindingConflicts(int playerId)
         {
-            var config = GetPlayerConfig(playerId, false);
-            return InputBindingValidator.DetectConflicts(config);
+            EnsureMainThread();
+            return InputBindingValidator.DetectConflicts(GetMutablePlayerConfig(playerId));
         }
 
         public List<BindingConflict> CheckBindingConflicts(int playerId, string contextName)
         {
-            var config = GetPlayerConfig(playerId, false);
-            return InputBindingValidator.DetectConflicts(config, contextName);
+            EnsureMainThread();
+            return InputBindingValidator.DetectConflicts(GetMutablePlayerConfig(playerId), contextName);
         }
 
         public static string FormatConflictsReport(List<BindingConflict> conflicts)
         {
             return InputBindingValidator.FormatConflictsReport(conflicts);
+        }
+
+        public static Vector2 GetMousePosition()
+        {
+            EnsureMainThread();
+            return Mouse.current == null ? Vector2.zero : Mouse.current.position.ReadValue();
+        }
+
+        public void Dispose()
+        {
+            EnsureMainThread();
+            DisposeCore();
+        }
+
+        private void DisposeCore()
+        {
+            if (_isDisposed) return;
+            _isDisposed = true;
+            ActiveManagers.Remove(this);
+            _isInitialized = false;
+            _isConfigurationTransitioning = true;
+            if (_deviceChangeSubscribed)
+            {
+                UnityEngine.InputSystem.InputSystem.onDeviceChange -= OnDeviceTopologyChanged;
+                _deviceChangeSubscribed = false;
+            }
+
+            var players = new List<KeyValuePair<int, IInputPlayer>>(_registeredPlayers);
+            _registeredPlayers.Clear();
+            _joinsInProgress.Clear();
+            _reservedDeviceIds.Clear();
+            _bindingOverridesByPlayer.Clear();
+            _configuration = null;
+            _runtimeConfiguration = null;
+            OnPlayerInputReady = null;
+            OnConfigurationReloaded = null;
+
+            CleanupSafely(_shutdown.Cancel, "cancel manager operations");
+            CleanupSafely(() => ReplaceJoinAction(null), "dispose the join listener");
+            for (int i = 0; i < players.Count; i++)
+            {
+                KeyValuePair<int, IInputPlayer> entry = players[i];
+                IInputPlayer player = entry.Value;
+                if (player is IDisposable disposable)
+                {
+                    CleanupSafely(disposable.Dispose, $"dispose player {entry.Key}");
+                }
+            }
+            CleanupSafely(_shutdown.Dispose, "dispose the manager cancellation source");
+            if (ReferenceEquals(_compatibilityInstance, this)) _compatibilityInstance = null;
+        }
+
+        private static bool ValidateMainThread(string operation)
+        {
+            if (Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread) return true;
+            Log.Error(
+                operation,
+                static (value, builder) => builder
+                    .Append(DEBUG_FLAG)
+                    .Append(' ')
+                    .Append(value)
+                    .Append(" must run on the Unity main thread."));
+            return false;
+        }
+
+        private static void EnsureMainThread()
+        {
+            if (!Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread)
+                throw new InvalidOperationException("InputManager operations must run on the Unity main thread.");
+        }
+
+        private static async UniTask SwitchToUnityMainThreadAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread)
+                await UniTask.SwitchToMainThread(PlayerLoopTiming.Update, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        private void RollbackBatchPlayers(List<KeyValuePair<int, IInputPlayer>> players)
+        {
+            for (int i = players.Count - 1; i >= 0; i--)
+            {
+                KeyValuePair<int, IInputPlayer> entry = players[i];
+                if (!_registeredPlayers.TryGetValue(entry.Key, out IInputPlayer current) ||
+                    !ReferenceEquals(current, entry.Value))
+                    continue;
+
+                _registeredPlayers.Remove(entry.Key);
+                if (current is IDisposable disposable)
+                    CleanupSafely(disposable.Dispose, $"roll back batch player {entry.Key}");
+            }
+        }
+
+        private bool TrySnapshotBatchPlayerIds(List<int> playerIds, out int[] snapshot)
+        {
+            snapshot = null;
+            if (playerIds == null || playerIds.Count > _limits.MaxPlayers) return false;
+            int count = playerIds.Count;
+            if (count == 0)
+            {
+                snapshot = Array.Empty<int>();
+                return true;
+            }
+
+            var uniqueIds = new HashSet<int>();
+            snapshot = new int[count];
+            for (int i = 0; i < count; i++)
+            {
+                int playerId = playerIds[i];
+                if (!uniqueIds.Add(playerId))
+                {
+                    snapshot = null;
+                    return false;
+                }
+
+                snapshot[i] = playerId;
+            }
+
+            return true;
+        }
+
+        private static string NormalizeLineEndings(string value)
+        {
+            return string.IsNullOrEmpty(value) ? value : value.Replace("\r\n", "\n").Replace("\r", "\n");
+        }
+
+        private static bool TryGetStrictUtf8ByteCount(string value, out int byteCount)
+        {
+            try
+            {
+                byteCount = StrictUtf8.GetByteCount(value);
+                return true;
+            }
+            catch (EncoderFallbackException)
+            {
+                byteCount = 0;
+                return false;
+            }
+        }
+
+        private static bool IsRecoverableException(Exception exception)
+        {
+            return exception is not OutOfMemoryException &&
+                   exception is not AccessViolationException &&
+                   exception is not StackOverflowException;
+        }
+
+        private static void CleanupSafely(Action cleanup, string phase)
+        {
+            try
+            {
+                cleanup();
+            }
+            catch (Exception exception) when (IsRecoverableException(exception))
+            {
+                Log.Error(
+                    exception,
+                    $"{DEBUG_FLAG} Failed to {phase} during teardown.");
+            }
+        }
+
+        private void NotifyConfigurationReloaded(long committedRevision)
+        {
+            Action handlers = OnConfigurationReloaded;
+            if (handlers == null) return;
+            Delegate[] invocationList = handlers.GetInvocationList();
+            for (int i = 0; i < invocationList.Length; i++)
+            {
+                try
+                {
+                    ((Action)invocationList[i]).Invoke();
+                }
+                catch (Exception exception) when (IsRecoverableException(exception))
+                {
+                    Log.Error(
+                        exception,
+                        $"{DEBUG_FLAG} Configuration reload subscriber failed.");
+                }
+
+                if (_isDisposed || committedRevision != _configurationRevision) return;
+            }
+        }
+
+        private void NotifyPlayerInputReady(int playerId, IInputPlayer inputPlayer)
+        {
+            Action<IInputPlayer> handlers = OnPlayerInputReady;
+            if (handlers == null) return;
+            Delegate[] invocationList = handlers.GetInvocationList();
+            for (int i = 0; i < invocationList.Length; i++)
+            {
+                try
+                {
+                    ((Action<IInputPlayer>)invocationList[i]).Invoke(inputPlayer);
+                }
+                catch (Exception exception) when (IsRecoverableException(exception))
+                {
+                    Log.Error(
+                        exception,
+                        $"{DEBUG_FLAG} Player-ready subscriber failed.");
+                }
+
+
+                if (!IsPlayerRegistrationCurrent(playerId, inputPlayer)) return;
+            }
         }
     }
 }

@@ -1,0 +1,27 @@
+{
+    "name": "CycloneGames.AssetManagement.Editor.Providers.Addressables",
+    "rootNamespace": "",
+    "references": [
+        "CycloneGames.AssetManagement.Editor",
+        "Unity.Addressables.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "CYCLONEGAMES_HAS_ADDRESSABLES"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.unity.addressables",
+            "expression": "[2.0.0,99.0.0)",
+            "define": "CYCLONEGAMES_HAS_ADDRESSABLES"
+        }
+    ],
+    "noEngineReferences": false
+}

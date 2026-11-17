@@ -34,14 +34,9 @@ namespace GASSample.UI
             string appVersion = Application.version;
             string resVersion = "Unknown";
 
-            if (assetModule != null)
-            {
-                var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
-                if (pkg != null)
-                {
-                    resVersion = await pkg.RequestPackageVersionAsync(appendTimeTicks: false, cancellationToken: destroyCancellationToken);
-                }
-            }
+            // AssetManagement no longer exposes a provider-neutral content version: YooAsset keeps a
+            // package version, Addressables does not. Keep the label honest instead of faking one.
+            await UniTask.CompletedTask;
 
             SetVersion(appVersion, resVersion);
         }

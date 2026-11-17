@@ -3,13 +3,17 @@
     "rootNamespace": "",
     "references": [
         "UniTask",
-        "VitalRouter.Unity"
+        "VitalRouter.Unity",
+        "CycloneGames.Cheat.Core",
+        "CycloneGames.Logging.Core"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
-    "overrideReferences": false,
-    "precompiledReferences": [],
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "VitalRouter.dll"
+    ],
     "autoReferenced": true,
     "defineConstraints": [],
     "versionDefines": [],

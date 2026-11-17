@@ -1,69 +1,68 @@
-using System.Collections.Generic;
 using UnityEngine;
 
 namespace CycloneGames.GameplayFramework.Runtime
 {
     /// <summary>
-    /// Spawn point for players. Uses static registry pattern for zero-GC lookup.
-    /// PlayerStart instances auto-register/unregister on enable/disable.
+    /// Spawn point for players. The owning World discovers and caches scene starts once during
+    /// initialization, avoiding cross-world static state and Domain Reload dependencies.
     /// </summary>
     public class PlayerStart : Actor
     {
-        private static readonly List<PlayerStart> _registry = new List<PlayerStart>(16);
-        private static bool _registryDirty;
-
-        public static IReadOnlyList<PlayerStart> GetAllPlayerStarts() => _registry;
-        public static bool IsRegistryDirty => _registryDirty;
-        public static void ClearRegistryDirtyFlag() => _registryDirty = false;
-
-        [SerializeField] private Transform Arrow;
-
-        protected override void Awake()
+#if UNITY_EDITOR
+        public enum EGizmoMode
         {
-            base.Awake();
-            if (Arrow != null && Arrow.gameObject.activeInHierarchy) Arrow.gameObject.SetActive(false);
+            Auto = 0,
+            ThreeDimensional = 1,
+            SideScroller2D = 2,
+            TopDown2D = 3
         }
 
-        protected virtual void OnEnable()
+        public enum EFacingAxis
         {
-            if (!_registry.Contains(this))
-            {
-                _registry.Add(this);
-                _registryDirty = true;
-            }
+            Auto = 0,
+            TransformForward = 1,
+            TransformRight = 2,
+            TransformUp = 3,
+            NegativeTransformForward = 4,
+            NegativeTransformRight = 5,
+            NegativeTransformUp = 6
         }
 
-        protected virtual void OnDisable()
-        {
-            if (_registry.Remove(this))
-            {
-                _registryDirty = true;
-            }
-        }
+        [SerializeField, HideInInspector]
+        private EGizmoMode GizmoMode;
+
+        [SerializeField, HideInInspector]
+        private EFacingAxis GizmoFacingAxis;
+
+        [SerializeField, HideInInspector]
+        private bool GizmoDrawShape = true;
+
+        [SerializeField, HideInInspector]
+        private bool GizmoDrawSpawnAnchor = true;
+
+        [SerializeField, HideInInspector]
+        private bool GizmoDrawFacingArrow = true;
+
+        [SerializeField, HideInInspector]
+        private bool GizmoDrawLabel = true;
+
+        [SerializeField, HideInInspector, Min(0f)]
+        private float GizmoArrowLengthOverride;
+
+        [SerializeField, HideInInspector, Min(0.1f)]
+        private float GizmoArrowLengthScale = 1f;
+#endif
 
 #if UNITY_EDITOR
-        private void OnDrawGizmos()
-        {
-            Gizmos.color = new Color(0.2f, 0.8f, 0.2f, 0.6f);
-            Gizmos.DrawWireSphere(transform.position, 0.5f);
-
-            // Draw forward direction arrow
-            Gizmos.color = new Color(0.2f, 0.5f, 1f, 0.8f);
-            Vector3 forward = transform.forward * 1.5f;
-            Gizmos.DrawRay(transform.position, forward);
-            Vector3 arrowHead = transform.position + forward;
-            Vector3 right = transform.right * 0.25f;
-            Gizmos.DrawRay(arrowHead, -forward.normalized * 0.4f + right);
-            Gizmos.DrawRay(arrowHead, -forward.normalized * 0.4f - right);
-        }
-
-        private void OnDrawGizmosSelected()
-        {
-            Gizmos.color = new Color(0.2f, 1f, 0.2f, 0.3f);
-            Gizmos.DrawSphere(transform.position, 0.5f);
-
-            UnityEditor.Handles.Label(transform.position + Vector3.up * 1.2f, GetName() ?? "PlayerStart");
-        }
+        public EGizmoMode GetGizmoMode() => GizmoMode;
+        public EFacingAxis GetGizmoFacingAxis() => GizmoFacingAxis;
+        public bool ShouldDrawGizmoShape() => GizmoDrawShape;
+        public bool ShouldDrawGizmoSpawnAnchor() => GizmoDrawSpawnAnchor;
+        public bool ShouldDrawGizmoFacingArrow() => GizmoDrawFacingArrow;
+        public bool ShouldDrawGizmoLabel() => GizmoDrawLabel;
+        public float GetGizmoArrowLengthOverride() => Mathf.Max(0f, GizmoArrowLengthOverride);
+        public float GetGizmoArrowLengthScale() => Mathf.Max(0.1f, GizmoArrowLengthScale);
 #endif
+
     }
 }

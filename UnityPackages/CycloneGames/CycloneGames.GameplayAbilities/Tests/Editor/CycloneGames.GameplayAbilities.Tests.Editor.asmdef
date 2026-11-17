@@ -3,7 +3,14 @@
     "rootNamespace": "CycloneGames.GameplayAbilities.Tests.Editor",
     "references": [
         "CycloneGames.GameplayAbilities.Core",
-        "CycloneGames.DeterministicMath.Core"
+        "CycloneGames.GameplayAbilities.Runtime",
+        "CycloneGames.GameplayAbilities.Editor",
+        "UniTask",
+        "Unity.PerformanceTesting",
+        "CycloneGames.DeterministicMath.Core",
+        "CycloneGames.GameplayTags.Core",
+        "CycloneGames.GameplayTags.Unity.Runtime",
+        "CycloneGames.Logging.Core"
     ],
     "includePlatforms": [
         "Editor"
@@ -18,5 +25,5 @@
     "optionalUnityReferences": [
         "TestAssemblies"
     ],
-    "noEngineReferences": true
+    "noEngineReferences": false
 }

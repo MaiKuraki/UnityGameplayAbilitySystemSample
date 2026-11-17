@@ -1,6 +1,7 @@
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayTags.Core;
-using CycloneGames.Logger;
+using CycloneGames.GameplayTags.Unity.Runtime;
+using CycloneGames.Logging;
 using UnityEngine;
 using System.Collections.Generic;
 
@@ -8,6 +9,8 @@ namespace CycloneGames.GameplayAbilities.Sample
 {
     public class GA_Purify : GameplayAbility
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private readonly float areaOfEffectRadius;
         private readonly GameplayTagContainer targetRequiredFactions;
         private readonly GameplayTagContainer targetForbiddenFactions;
@@ -15,8 +18,12 @@ namespace CycloneGames.GameplayAbilities.Sample
         public GA_Purify(float radius, GameplayTagContainer required, GameplayTagContainer forbidden)
         {
             this.areaOfEffectRadius = radius;
-            this.targetRequiredFactions = required;
-            this.targetForbiddenFactions = forbidden;
+            this.targetRequiredFactions = required != null
+                ? new GameplayTagContainer(required)
+                : new GameplayTagContainer();
+            this.targetForbiddenFactions = forbidden != null
+                ? new GameplayTagContainer(forbidden)
+                : new GameplayTagContainer();
         }
 
         public override void ActivateAbility(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, GameplayAbilityActivationInfo activationInfo)
@@ -41,7 +48,11 @@ namespace CycloneGames.GameplayAbilities.Sample
 
         private void OnTargetDataReceived(TargetData data)
         {
-            CommitAbility(ActorInfo, Spec);
+            if (!CommitAbility(ActorInfo, Spec).Succeeded)
+            {
+                EndAbility();
+                return;
+            }
 
             var charactersToProcess = new HashSet<Character>();
 
@@ -54,9 +65,10 @@ namespace CycloneGames.GameplayAbilities.Sample
             var multiTargetData = data as GameplayAbilityTargetData_MultiTarget;
             if (multiTargetData != null)
             {
-                foreach (var targetObject in multiTargetData.Actors)
-                {
-                    var character = targetObject.GetComponent<Character>();
+            for (int i = 0; i < multiTargetData.ActorCount; i++)
+            {
+                var targetObject = multiTargetData.GetActor(i);
+                var character = targetObject.GetComponent<Character>();
                     if (character != null)
                     {
                         charactersToProcess.Add(character);
@@ -71,16 +83,16 @@ namespace CycloneGames.GameplayAbilities.Sample
 
                 if (targetCharacter.AbilitySystemComponent != null && CanDispelPoison(targetCharacter.AbilitySystemComponent, Spec.Level))
                 {
-                    var poisonTagContainer = new GameplayTagContainer { GameplayTagManager.RequestTag(GASSampleTags.Debuff_Poison) };
+                    var poisonTagContainer = new GameplayTagContainer { GameplayTagManager.Request(GASSampleTags.Debuff_Poison) };
                     targetCharacter.AbilitySystemComponent.RemoveActiveEffectsWithGrantedTags(poisonTagContainer);
                     targetsPurified++;
-                    CLogger.LogInfo($"Purified {targetCharacter.name}.");
+                    Log.Info($"Purified {targetCharacter.name}.");
                 }
             }
 
             if (targetsPurified == 0)
             {
-                CLogger.LogInfo("Purify was cast, but no one had cleansable poison.");
+                Log.Info("Purify was cast, but no one had cleansable poison.");
             }
 
             EndAbility();
@@ -88,7 +100,7 @@ namespace CycloneGames.GameplayAbilities.Sample
 
         private bool CanDispelPoison(AbilitySystemComponent targetASC, int dispelLevel)
         {
-            var poisonDebuffTag = GameplayTagManager.RequestTag(GASSampleTags.Debuff_Poison);
+            var poisonDebuffTag = GameplayTagManager.Request(GASSampleTags.Debuff_Poison);
             if (poisonDebuffTag.IsNone) return false;
 
             foreach (var activeEffect in targetASC.ActiveEffects)
@@ -105,56 +117,37 @@ namespace CycloneGames.GameplayAbilities.Sample
         }
 
 
-        public override GameplayAbility CreatePoolableInstance()
+        public override GameplayAbility CreateRuntimeInstance()
         {
-            var ability = new GA_Purify(this.areaOfEffectRadius, this.targetRequiredFactions, this.targetForbiddenFactions);
-
-            ability.Initialize(
-                this.Name,
-                this.InstancingPolicy,
-                this.NetExecutionPolicy,
-                this.CostEffectDefinition,
-                this.CooldownEffectDefinition,
-                this.AbilityTags,
-                this.ActivationBlockedTags,
-                this.ActivationRequiredTags,
-                this.CancelAbilitiesWithTag,
-                this.BlockAbilitiesWithTag
-            );
-
-            return ability;
+            return new GA_Purify(areaOfEffectRadius, targetRequiredFactions, targetForbiddenFactions);
         }
     }
 
-    [CreateAssetMenu(fileName = "GA_Purify", menuName = "CycloneGames/GameplayAbilitySystem/Samples/Ability/Purify")]
+    /// <summary>
+    /// [INTERMEDIATE] Area dispel: removes debuffs from allies in radius. Introduces
+    /// removal-by-tag effects and faction tag filtering.
+    ///
+    /// Key Concepts:
+    /// - GameplayEffect.RemoveGameplayEffectsWithTags (dispel mechanics)
+    /// - TargetRequiredTags / TargetBlockedTags style faction filtering
+    /// - Area-of-effect friendly targeting
+    /// </summary>
+    [CreateAssetMenu(fileName = "GA_Purify", menuName = "CycloneGames/GameplayAbilities/Samples/Ability/Purify")]
     public class GA_Purify_SO : GameplayAbilitySO
     {
         [Tooltip("The radius of the purify effect in meters.")]
         public float AreaOfEffectRadius = 5.0f;
 
         [Tooltip("Targets found must have ALL of these faction tags to be affected.")]
-        public GameplayTagContainer TargetRequiredFactions;
+        public SerializableGameplayTagContainer TargetRequiredFactions;
 
         [Tooltip("Targets found that have ANY of these faction tags will be ignored.")]
-        public GameplayTagContainer TargetForbiddenFactions;
+        public SerializableGameplayTagContainer TargetForbiddenFactions;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
-            // Pass the tag containers to the ability's constructor.
             var ability = new GA_Purify(AreaOfEffectRadius, TargetRequiredFactions, TargetForbiddenFactions);
-
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
+            InitializeAbility(ability);
             return ability;
         }
     }

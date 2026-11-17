@@ -1,16 +1,29 @@
 using System;
 using System.Collections.Generic;
-using CycloneGames.GameplayTags.Core;
 using UnityEditor;
 using UnityEditor.IMGUI.Controls;
 using UnityEngine;
 
+#if UNITY_6000_2_OR_NEWER
+using TreeView = UnityEditor.IMGUI.Controls.TreeView<int>;
+using TreeViewItem = UnityEditor.IMGUI.Controls.TreeViewItem<int>;
+using TreeViewState = UnityEditor.IMGUI.Controls.TreeViewState<int>;
+#else
+using TreeView = UnityEditor.IMGUI.Controls.TreeView;
+using TreeViewItem = UnityEditor.IMGUI.Controls.TreeViewItem;
+using TreeViewState = UnityEditor.IMGUI.Controls.TreeViewState;
+#endif
+
+using CycloneGames.GameplayTags.Core;
+using CycloneGames.GameplayTags.Unity.Runtime;
+
 namespace CycloneGames.GameplayTags.Unity.Editor
 {
-    [CustomPropertyDrawer(typeof(GameplayTag))]
+    [CustomPropertyDrawer(typeof(SerializableGameplayTag))]
     public class GameplayTagPropertyDrawer : PropertyDrawer
     {
         private static readonly GUIContent s_TempContent = new();
+        private static readonly GUIContent s_InvalidPropertyContent = new("Invalid Tag Property");
 
         public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
         {
@@ -20,51 +33,71 @@ namespace CycloneGames.GameplayTags.Unity.Editor
             int oldIndentLevel = EditorGUI.indentLevel;
             EditorGUI.indentLevel = 0;
 
-            SerializedProperty nameProperty = property.FindPropertyRelative("m_Name");
+            SerializedProperty nameProperty = property.FindPropertyRelative("tagName");
 
             if (nameProperty == null)
             {
-                EditorGUI.LabelField(position, label, new GUIContent("Invalid Tag Property"));
+                EditorGUI.LabelField(position, label, s_InvalidPropertyContent);
+                EditorGUI.indentLevel = oldIndentLevel;
                 EditorGUI.EndProperty();
                 return;
             }
 
-            GameplayTag tag = GameplayTagManager.RequestTag(nameProperty.stringValue, false);
+            bool hasMixedValues = HasMixedTagValues(nameProperty);
+            GameplayTag tag = hasMixedValues
+                ? GameplayTag.None
+                : GameplayTagManager.Request(nameProperty.stringValue, false);
 
-            bool hasValue = !string.IsNullOrEmpty(nameProperty.stringValue);
+            bool hasValue = !hasMixedValues && !string.IsNullOrEmpty(nameProperty.stringValue);
             bool isValid = hasValue && tag.IsValid;
 
-            if (!hasValue)
+            if (hasMixedValues)
+                s_TempContent.text = "Mixed Values";
+            else if (!hasValue)
                 s_TempContent.text = "None";
             else if (!isValid)
                 s_TempContent.text = nameProperty.stringValue + " (Invalid)";
             else
                 s_TempContent.text = tag.Name;
 
-            s_TempContent.tooltip = isValid ? tag.Description : null;
+            s_TempContent.tooltip = hasMixedValues
+                ? "The selected objects contain different gameplay tags. Choose a tag to assign it to all selected objects."
+                : isValid
+                ? tag.Description
+                : hasValue
+                    ? "This tag is not registered. Open the GameplayTag Validation Window or clear the field."
+                    : null;
 
             // Draw clear button when a tag is selected
             Rect clearRect = default;
-            if (hasValue)
+            if (hasValue || hasMixedValues)
             {
                 clearRect = new Rect(position.xMax - 18, position.y, 18, position.height);
                 position.width -= 20;
             }
 
-            if (EditorGUI.DropdownButton(position, s_TempContent, FocusType.Keyboard))
+            bool previousMixedValue = EditorGUI.showMixedValue;
+            EditorGUI.showMixedValue = hasMixedValues;
+            bool openPicker = EditorGUI.DropdownButton(position, s_TempContent, FocusType.Keyboard);
+            EditorGUI.showMixedValue = previousMixedValue;
+            if (openPicker)
             {
+                // Runs once per picker selection, not per frame; the delegate captures the property being
+                // edited, so there is no static form for it.
+#pragma warning disable CG0046
                 Action<GameplayTag> onTagSelected = newTag =>
                 {
                     nameProperty.stringValue = newTag.IsNone ? null : newTag.Name;
                     property.serializedObject.ApplyModifiedProperties();
                 };
+#pragma warning restore CG0046
 
                 var tagPickerTreeView = new TagPickerTreeView(new TreeViewState(), onTagSelected);
                 var content = new TagPickerPopup(tagPickerTreeView, position.width);
                 PopupWindow.Show(position, content);
             }
 
-            if (hasValue)
+            if (hasValue || hasMixedValues)
             {
                 Color prev = GUI.color;
                 if (!isValid) GUI.color = new Color(1f, 0.4f, 0.4f);
@@ -78,6 +111,11 @@ namespace CycloneGames.GameplayTags.Unity.Editor
 
             EditorGUI.indentLevel = oldIndentLevel;
             EditorGUI.EndProperty();
+        }
+
+        internal static bool HasMixedTagValues(SerializedProperty nameProperty)
+        {
+            return nameProperty != null && nameProperty.hasMultipleDifferentValues;
         }
 
         private class TagPickerPopup : PopupWindowContent
@@ -132,37 +170,35 @@ namespace CycloneGames.GameplayTags.Unity.Editor
                 var root = new TreeViewItem { id = 0, depth = -1, displayName = "Root" };
 
                 GameplayTagManager.InitializeIfNeeded();
-                ReadOnlySpan<GameplayTag> allTags = GameplayTagManager.GetAllTags();
+                TagDataSnapshot snapshot = GameplayTagManager.Snapshot;
 
-                var tagItems = new Dictionary<string, TreeViewItem>();
-                int id = 1;
-
-                // "None" option at top
-                int noneId = id++;
+                // The "(None)" row is the explicit clear choice. Item ids are the runtime index plus one,
+                // so the mapping stays valid without a second dictionary.
+                int noneId = 1;
                 var noneItem = new TreeViewItem { id = noneId, displayName = "(None)", depth = 0 };
                 m_IdToTagPath[noneId] = null;
 
-                List<TreeViewItem> flatItems = new() { noneItem };
+                List<TreeViewItem> flatItems = new(snapshot.TagCount + 1) { noneItem };
+                var itemByIndex = new Dictionary<int, TreeViewItem>(snapshot.TagCount);
 
-                for (int t = 0; t < allTags.Length; t++)
+                // Runtime indices ascend with parents before descendants and the snapshot already stores
+                // the parent chain as a compressed row, so the tree builds in one pass. The previous
+                // implementation split and re-interpolated every tag name to rediscover that hierarchy -
+                // O(N*depth) string allocations on every popup open for information the snapshot holds.
+                for (int runtimeIndex = 1; runtimeIndex < snapshot.TotalTagCount; runtimeIndex++)
                 {
-                    GameplayTag tag = allTags[t];
-                    string[] parts = tag.Name.Split('.');
-                    string currentPath = "";
+                    string name = snapshot.GetName(runtimeIndex);
+                    int lastDot = name.LastIndexOf('.');
+                    string label = lastDot < 0 ? name : name.Substring(lastDot + 1);
 
-                    for (int i = 0; i < parts.Length; i++)
-                    {
-                        currentPath = i == 0 ? parts[i] : $"{currentPath}.{parts[i]}";
+                    int parentIndex = snapshot.GetParentIndex(runtimeIndex);
+                    int depth = parentIndex == 0 ? 0 : itemByIndex[parentIndex].depth + 1;
 
-                        if (!tagItems.ContainsKey(currentPath))
-                        {
-                            int itemId = id++;
-                            var newItem = new TreeViewItem { id = itemId, displayName = parts[i], depth = i + 1 };
-                            tagItems[currentPath] = newItem;
-                            m_IdToTagPath[itemId] = currentPath;
-                            flatItems.Add(newItem);
-                        }
-                    }
+                    int itemId = runtimeIndex + 1;
+                    var item = new TreeViewItem { id = itemId, displayName = label, depth = depth };
+                    itemByIndex[runtimeIndex] = item;
+                    m_IdToTagPath[itemId] = name;
+                    flatItems.Add(item);
                 }
 
                 SetupParentsAndChildrenFromDepths(root, flatItems);
@@ -202,7 +238,7 @@ namespace CycloneGames.GameplayTags.Unity.Editor
                 }
                 else
                 {
-                    GameplayTag selectedTag = GameplayTagManager.RequestTag(path);
+                    GameplayTag selectedTag = GameplayTagManager.Request(path);
                     onTagSelected?.Invoke(selectedTag);
                 }
 

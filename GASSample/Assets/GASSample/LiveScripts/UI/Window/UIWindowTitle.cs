@@ -40,9 +40,10 @@ namespace GASSample.UI
 
         void ClickStart()
         {
-            // CLogger.LogInfo("[UIWindowTitle] ClickStart");            
+            // LogChannel.Create("GASSample").Info("[UIWindowTitle] ClickStart");            
             var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
-            AssetManagementSceneIdentifier sceneGameplay = new AssetManagementSceneIdentifier(pkg, ScenePath.Gameplay, LoadSceneMode.Additive, true);
+            var sceneLoader = (IAssetSceneLoader)pkg;
+            AssetManagementSceneIdentifier sceneGameplay = new AssetManagementSceneIdentifier(sceneLoader, ScenePath.Gameplay, LoadSceneMode.Additive, true);
             GlobalSceneNavigator.Instance.Push(sceneGameplay);
         }
     }

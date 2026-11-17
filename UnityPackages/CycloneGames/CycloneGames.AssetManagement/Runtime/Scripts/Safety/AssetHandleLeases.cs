@@ -1,0 +1,276 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+
+using Cysharp.Threading.Tasks;
+
+using UnityEngine;
+
+namespace CycloneGames.AssetManagement.Runtime
+{
+    internal interface IAssetHandleLease
+    {
+        bool TryGetBackend<TBackend>(out TBackend backend) where TBackend : class;
+    }
+
+    /// <summary>
+    /// Creates caller-owned leases around shared provider handles. Lease objects are never pooled:
+    /// a stale reference must not be able to observe or release a later provider operation.
+    /// </summary>
+    internal static class AssetHandleLeases
+    {
+        public static IAssetHandle<TAsset> Create<TAsset>(
+            IAssetHandle<TAsset> handle,
+            CancellationToken cancellationToken = default)
+            where TAsset : UnityEngine.Object
+        {
+            return new AssetHandleLease<TAsset>(handle, cancellationToken);
+        }
+
+        public static IAllAssetsHandle<TAsset> Create<TAsset>(
+            IAllAssetsHandle<TAsset> handle,
+            CancellationToken cancellationToken = default)
+            where TAsset : UnityEngine.Object
+        {
+            return new AllAssetsHandleLease<TAsset>(handle, cancellationToken);
+        }
+
+        public static IRawFileHandle Create(
+            IRawFileHandle handle,
+            CancellationToken cancellationToken = default)
+        {
+            return new RawFileHandleLease(handle, cancellationToken);
+        }
+
+        private static UniTask CreateWaitTask(IOperation operation, CancellationToken cancellationToken)
+        {
+            return AssetOperationBroadcast.CreateCallerView(operation.Task, cancellationToken);
+        }
+
+        private sealed class AssetHandleLease<TAsset> : IAssetHandle<TAsset>, IAssetHandleLease
+            where TAsset : UnityEngine.Object
+        {
+            private IAssetHandle<TAsset> _handle;
+            private readonly UniTask _task;
+            private int _disposeState;
+
+            public AssetHandleLease(IAssetHandle<TAsset> handle, CancellationToken cancellationToken)
+            {
+                _handle = handle ?? throw new ArgumentNullException(nameof(handle));
+                _task = CreateWaitTask(handle, cancellationToken);
+            }
+
+            public bool IsDone
+            {
+                get
+                {
+                    GetHandle();
+                    return _task.Status != UniTaskStatus.Pending;
+                }
+            }
+            public float Progress => GetHandle().Progress;
+            public string Error => GetHandle().Error;
+            public UniTask Task
+            {
+                get
+                {
+                    GetHandle();
+                    return _task;
+                }
+            }
+            public TAsset Asset => GetHandle().Asset;
+            public UnityEngine.Object AssetObject => GetHandle().AssetObject;
+
+            public void WaitForAsyncComplete()
+            {
+                GetHandle().WaitForAsyncComplete();
+            }
+
+            public void Dispose()
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                DisposeRetainingOnFailure(ref _handle, ref _disposeState);
+            }
+
+            public bool TryGetBackend<TBackend>(out TBackend backend) where TBackend : class
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                backend = _handle as TBackend;
+                return backend != null;
+            }
+
+            private IAssetHandle<TAsset> GetHandle()
+            {
+                IAssetHandle<TAsset> handle = _handle ?? throw new ObjectDisposedException(
+                    nameof(AssetHandleLease<TAsset>));
+                ThrowIfBackendDisposed(handle, nameof(AssetHandleLease<TAsset>));
+                return handle;
+            }
+        }
+
+        private sealed class AllAssetsHandleLease<TAsset> : IAllAssetsHandle<TAsset>
+            where TAsset : UnityEngine.Object
+        {
+            private IAllAssetsHandle<TAsset> _handle;
+            private readonly UniTask _task;
+            private int _disposeState;
+
+            public AllAssetsHandleLease(IAllAssetsHandle<TAsset> handle, CancellationToken cancellationToken)
+            {
+                _handle = handle ?? throw new ArgumentNullException(nameof(handle));
+                _task = CreateWaitTask(handle, cancellationToken);
+            }
+
+            public bool IsDone
+            {
+                get
+                {
+                    GetHandle();
+                    return _task.Status != UniTaskStatus.Pending;
+                }
+            }
+            public float Progress => GetHandle().Progress;
+            public string Error => GetHandle().Error;
+            public UniTask Task
+            {
+                get
+                {
+                    GetHandle();
+                    return _task;
+                }
+            }
+            public IReadOnlyList<TAsset> Assets => GetHandle().Assets;
+
+            public void WaitForAsyncComplete()
+            {
+                GetHandle().WaitForAsyncComplete();
+            }
+
+            public void Dispose()
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                DisposeRetainingOnFailure(ref _handle, ref _disposeState);
+            }
+
+            private IAllAssetsHandle<TAsset> GetHandle()
+            {
+                IAllAssetsHandle<TAsset> handle = _handle ?? throw new ObjectDisposedException(
+                    nameof(AllAssetsHandleLease<TAsset>));
+                ThrowIfBackendDisposed(handle, nameof(AllAssetsHandleLease<TAsset>));
+                return handle;
+            }
+        }
+
+        private sealed class RawFileHandleLease : IRawFileHandle
+        {
+            private IRawFileHandle _handle;
+            private readonly UniTask _task;
+            private int _disposeState;
+
+            public RawFileHandleLease(IRawFileHandle handle, CancellationToken cancellationToken)
+            {
+                _handle = handle ?? throw new ArgumentNullException(nameof(handle));
+                _task = CreateWaitTask(handle, cancellationToken);
+            }
+
+            public bool IsDone
+            {
+                get
+                {
+                    GetHandle();
+                    return _task.Status != UniTaskStatus.Pending;
+                }
+            }
+            public float Progress => GetHandle().Progress;
+            public string Error => GetHandle().Error;
+            public UniTask Task
+            {
+                get
+                {
+                    GetHandle();
+                    return _task;
+                }
+            }
+            public string FilePath => GetHandle().FilePath;
+
+            public void WaitForAsyncComplete()
+            {
+                GetHandle().WaitForAsyncComplete();
+            }
+
+            public string ReadText()
+            {
+                return GetHandle().ReadText();
+            }
+
+            public byte[] ReadBytes()
+            {
+                return GetHandle().ReadBytes();
+            }
+
+            public void Dispose()
+            {
+                AssetRuntimeGuard.EnsureMainThread();
+                DisposeRetainingOnFailure(ref _handle, ref _disposeState);
+            }
+
+            private IRawFileHandle GetHandle()
+            {
+                IRawFileHandle handle = _handle ?? throw new ObjectDisposedException(
+                    nameof(RawFileHandleLease));
+                ThrowIfBackendDisposed(handle, nameof(RawFileHandleLease));
+                return handle;
+            }
+        }
+
+        private static void DisposeRetainingOnFailure<THandle>(
+            ref THandle handle,
+            ref int disposeState)
+            where THandle : class, IDisposable
+        {
+            const int ACTIVE = 0;
+            const int DISPOSING = 1;
+            const int DISPOSED = 2;
+
+            int observedState = Volatile.Read(ref disposeState);
+            if (observedState == DISPOSED ||
+                Interlocked.CompareExchange(ref disposeState, DISPOSING, ACTIVE) != ACTIVE)
+            {
+                // Disposal is main-thread-affine. A DISPOSING observation can therefore only be
+                // re-entrant; the outer call owns completion and must not release twice.
+                return;
+            }
+
+            THandle current = Volatile.Read(ref handle);
+            if (current == null)
+            {
+                Volatile.Write(ref disposeState, DISPOSED);
+                return;
+            }
+
+            try
+            {
+                current.Dispose();
+                Interlocked.CompareExchange(ref handle, null, current);
+                Volatile.Write(ref disposeState, DISPOSED);
+            }
+            catch
+            {
+                // Retain the exact backend lease so an owner can retry a recoverable cleanup
+                // failure. Clearing before Dispose would permanently lose that ownership edge.
+                Volatile.Write(ref disposeState, ACTIVE);
+                throw;
+            }
+        }
+
+        private static void ThrowIfBackendDisposed(object handle, string ownerName)
+        {
+            if (handle is IAssetBackendLifetime lifetime && lifetime.IsDisposed)
+            {
+                throw new ObjectDisposedException(
+                    ownerName,
+                    "The provider backend was disposed by its owning package or module.");
+            }
+        }
+    }
+}

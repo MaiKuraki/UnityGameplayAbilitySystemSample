@@ -62,8 +62,9 @@ namespace GASSample.UI
         async UniTask BackToTitle()
         {
             var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
-            AssetManagementSceneIdentifier sceneTitle = new AssetManagementSceneIdentifier(pkg, ScenePath.Title, LoadSceneMode.Additive, true);
-            AssetManagementSceneIdentifier sceneTransition = new AssetManagementSceneIdentifier(pkg, ScenePath.Transition, LoadSceneMode.Additive, true);
+            var sceneLoader = (IAssetSceneLoader)pkg;
+            AssetManagementSceneIdentifier sceneTitle = new AssetManagementSceneIdentifier(sceneLoader, ScenePath.Title, LoadSceneMode.Additive, true);
+            AssetManagementSceneIdentifier sceneTransition = new AssetManagementSceneIdentifier(sceneLoader, ScenePath.Transition, LoadSceneMode.Additive, true);
             await GlobalSceneNavigator.Instance.Push(sceneTitle, interruptOperation: new UnloadPackageAssetsOperation(pkg), transitionDirector: new SimpleTransitionDirector(assetModule, sceneTransition, new TransitionDisplayData(0.25f, 0.25f)));
         }
 

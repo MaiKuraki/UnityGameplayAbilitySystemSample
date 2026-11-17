@@ -1,0 +1,18 @@
+{
+    "name": "CycloneGames.Logging.Unity.Samples",
+    "rootNamespace": "CycloneGames.Logging.Unity.Samples",
+    "references": [
+        "CycloneGames.Logging.Pipeline",
+        "CycloneGames.Logging.Core",
+        "CycloneGames.Logging.Unity"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

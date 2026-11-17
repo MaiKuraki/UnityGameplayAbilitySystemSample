@@ -3,116 +3,106 @@ using System.Text;
 
 namespace CycloneGames.GameplayTags.Core
 {
-    /// <summary>
-    /// A single node in a GameplayTagQuery tree. It can contain a list of tags to check
-    /// or a list of sub-expressions to evaluate.
-    /// </summary>
-    [System.Serializable]
-    public class GameplayTagQueryExpression
-    {
-        // The operator to apply to the Tags or Expressions list.
-        public EGameplayTagQueryExprOperator Operator;
+   /// <summary>
+   /// A single node in a GameplayTagQuery tree. It can contain a list of tags to check
+   /// or a list of sub-expressions to evaluate.
+   /// </summary>
+   [System.Serializable]
+   public sealed class GameplayTagQueryExpression
+   {
+      // The operator to apply to the Tags or Expressions list.
+      public EGameplayTagQueryExprOperator Operator;
         
-        // The list of tags to evaluate with the operator. This is used if Expressions is empty.
-        public GameplayTagContainer Tags;
+      // The list of tags to evaluate with the operator. This is used if Expressions is empty.
+      // GameplayTagContainer is a runtime bitset bound to a registry and cannot be serialized by Unity;
+      // the persisted authoring shape is GameplayTagContainerPersisted.
+      [System.NonSerialized]
+      public GameplayTagContainer Tags;
         
-        // The list of sub-expressions to evaluate. This is used if Tags is empty.
-        public List<GameplayTagQueryExpression> Expressions;
+      // The list of sub-expressions to evaluate. This is used if Tags is empty.
+      public List<GameplayTagQueryExpression> Expressions;
 
-        /// <summary>
-        /// Evaluates this expression against a tag container.
-        /// </summary>
-        /// <param name="container">The tag container to check.</param>
-        /// <returns>True if the expression matches, false otherwise.</returns>
-        public bool Matches(GameplayTagContainer container)
-        {
-            if (container == null)
-            {
-                return false;
-            }
+      public static GameplayTagQueryExpression MatchAll(GameplayTagContainer tags)
+         => new() { Operator = EGameplayTagQueryExprOperator.All, Tags = tags };
 
-            return Matches<GameplayTagContainer>(container);
-        }
+      public static GameplayTagQueryExpression MatchAny(GameplayTagContainer tags)
+         => new() { Operator = EGameplayTagQueryExprOperator.Any, Tags = tags };
 
-        public bool Matches<T>(in T container) where T : IGameplayTagContainer
-        {
-            bool hasTags = Tags != null && !Tags.IsEmpty;
-            bool hasExpressions = Expressions != null && Expressions.Count > 0;
+      public static GameplayTagQueryExpression MatchNone(GameplayTagContainer tags)
+         => new() { Operator = EGameplayTagQueryExprOperator.None, Tags = tags };
 
-            if (hasTags)
-            {
-                switch (Operator)
-                {
-                    case EGameplayTagQueryExprOperator.All:
-                        return container.HasAll(Tags);
-                    case EGameplayTagQueryExprOperator.Any:
-                        return container.HasAny(Tags);
-                    case EGameplayTagQueryExprOperator.None:
-                        return !container.HasAny(Tags);
-                }
-            }
-            else if (hasExpressions)
-            {
-                switch (Operator)
-                {
-                    case EGameplayTagQueryExprOperator.All:
-                        foreach (var expr in Expressions)
-                        {
-                            if (!expr.Matches(container)) return false;
-                        }
-                        return true;
-                    case EGameplayTagQueryExprOperator.Any:
-                        foreach (var expr in Expressions)
-                        {
-                            if (expr.Matches(container)) return true;
-                        }
-                        return false;
-                    case EGameplayTagQueryExprOperator.None:
-                        foreach (var expr in Expressions)
-                        {
-                            if (expr.Matches(container)) return false;
-                        }
-                        return true;
-                }
-            }
+      public static GameplayTagQueryExpression All(params GameplayTagQueryExpression[] expressions)
+         => FromExpressions(EGameplayTagQueryExprOperator.All, expressions);
 
-            // If an expression is empty, the behavior matches UE:
-            // All/None match (vacuously true), Any does not match.
-            return Operator == EGameplayTagQueryExprOperator.All || Operator == EGameplayTagQueryExprOperator.None;
-        }
+      public static GameplayTagQueryExpression Any(params GameplayTagQueryExpression[] expressions)
+         => FromExpressions(EGameplayTagQueryExprOperator.Any, expressions);
 
-        public override string ToString()
-        {
-            var sb = new StringBuilder();
-            sb.Append(Operator.ToString());
-            sb.Append(" (");
+      public static GameplayTagQueryExpression None(params GameplayTagQueryExpression[] expressions)
+         => FromExpressions(EGameplayTagQueryExprOperator.None, expressions);
 
-            bool hasTags = Tags != null && !Tags.IsEmpty;
-            bool hasExpressions = Expressions != null && Expressions.Count > 0;
+      private static GameplayTagQueryExpression FromExpressions(
+         EGameplayTagQueryExprOperator queryOperator,
+         GameplayTagQueryExpression[] expressions)
+      {
+         return new GameplayTagQueryExpression
+         {
+            Operator = queryOperator,
+            Expressions = expressions == null
+               ? new List<GameplayTagQueryExpression>()
+               : new List<GameplayTagQueryExpression>(expressions)
+         };
+      }
+
+      public override string ToString()
+      {
+         var sb = new StringBuilder();
+         AppendTo(sb, new HashSet<GameplayTagQueryExpression>(), 0);
+         return sb.ToString();
+      }
+
+      private void AppendTo(StringBuilder sb, HashSet<GameplayTagQueryExpression> active, int depth)
+      {
+         if (depth > GameplayTagQuery.MaxExpressionDepth)
+         {
+            sb.Append("<depth-limit>");
+            return;
+         }
+         if (!active.Add(this))
+         {
+            sb.Append("<cycle>");
+            return;
+         }
+
+         sb.Append(Operator.ToString());
+         sb.Append(" (");
+
+         bool hasTags = Tags != null && !Tags.IsEmpty;
+         bool hasExpressions = Expressions != null && Expressions.Count > 0;
             
-            if (hasTags)
+         if (hasTags)
+         {
+            bool first = true;
+            foreach (var tag in Tags.GetExplicitTags())
             {
-                bool first = true;
-                foreach (var tag in Tags.GetExplicitTags())
-                {
-                    if (!first) sb.Append(", ");
-                    sb.Append(tag.Name);
-                    first = false;
-                }
+               if (!first) sb.Append(", ");
+               sb.Append(tag.Name);
+               first = false;
             }
-            else if (hasExpressions)
+         }
+         else if (hasExpressions)
+         {
+            bool first = true;
+            foreach (var expr in Expressions)
             {
-                bool first = true;
-                foreach (var expr in Expressions)
-                {
-                    if (!first) sb.Append(", ");
-                    sb.Append(expr.ToString());
-                    first = false;
-                }
+               if (!first) sb.Append(", ");
+               if (expr == null) sb.Append("<null>");
+               else expr.AppendTo(sb, active, depth + 1);
+               first = false;
             }
+         }
             
-            sb.Append(")");
-            return sb.ToString();
-        }
-    }
+         sb.Append(")");
+         active.Remove(this);
+      }
+   }
 }

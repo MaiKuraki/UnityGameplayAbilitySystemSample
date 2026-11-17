@@ -1,4 +1,5 @@
 using CycloneGames.GameplayAbilities.Runtime;
+using CycloneGames.Logging;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Samples
@@ -12,7 +13,7 @@ namespace CycloneGames.GameplayAbilities.Samples
     /// - Stack limit configuration
     /// - Duration refresh on stack application
     /// </summary>
-    [CreateAssetMenu(menuName = "CycloneGames/GameplayAbilitySystem/Samples/Ability/Armor Stack")]
+    [CreateAssetMenu(menuName = "CycloneGames/GameplayAbilities/Samples/Ability/Armor Stack")]
     public class GA_ArmorStack_SO : GameplayAbilitySO
     {
         [Header("Stacking Configuration")]
@@ -22,30 +23,19 @@ namespace CycloneGames.GameplayAbilities.Samples
         [Tooltip("Maximum number of stacks allowed")]
         public int MaxStacks = 5;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
             var armorEffect = ArmorStackEffect ? ArmorStackEffect.GetGameplayEffect() : null;
             var ability = new GA_ArmorStack(armorEffect);
-            
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
-            
+            InitializeAbility(ability);
             return ability;
         }
     }
 
     public class GA_ArmorStack : GameplayAbility
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private readonly GameplayEffect armorStackEffect;
 
         public GA_ArmorStack(GameplayEffect armorEffect)
@@ -55,7 +45,11 @@ namespace CycloneGames.GameplayAbilities.Samples
 
         public override void ActivateAbility(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, GameplayAbilityActivationInfo activationInfo)
         {
-            CommitAbility(actorInfo, spec);
+            if (!CommitAbility(actorInfo, spec).Succeeded)
+            {
+                EndAbility();
+                return;
+            }
             
             var owner = spec.Owner;
             
@@ -64,29 +58,15 @@ namespace CycloneGames.GameplayAbilities.Samples
                 var effectSpec = GameplayEffectSpec.Create(armorStackEffect, owner, spec.Level);
                 owner.ApplyGameplayEffectSpecToSelf(effectSpec);
                 
-                GASLog.Info($"[ArmorStack] Applied armor stack. View stacks in GAS Debugger.");
+                Log.Info("[ArmorStack] Applied armor stack. View stacks in GAS Debugger.");
             }
             
             EndAbility();
         }
 
-        public override GameplayAbility CreatePoolableInstance()
+        public override GameplayAbility CreateRuntimeInstance()
         {
-            var ability = new GA_ArmorStack(this.armorStackEffect);
-            
-            ability.Initialize(
-                this.Name,
-                this.InstancingPolicy,
-                this.NetExecutionPolicy,
-                this.CostEffectDefinition,
-                this.CooldownEffectDefinition,
-                this.AbilityTags,
-                this.ActivationBlockedTags,
-                this.ActivationRequiredTags,
-                this.CancelAbilitiesWithTag,
-                this.BlockAbilitiesWithTag
-            );
-            return ability;
+            return new GA_ArmorStack(armorStackEffect);
         }
     }
 }

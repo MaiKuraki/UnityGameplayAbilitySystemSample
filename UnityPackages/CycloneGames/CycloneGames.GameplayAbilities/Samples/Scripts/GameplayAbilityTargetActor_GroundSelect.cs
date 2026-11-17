@@ -10,9 +10,6 @@ namespace CycloneGames.GameplayAbilities.Sample
     /// </summary>
     public class GameplayAbilityTargetActor_GroundSelect : MonoBehaviour, ITargetActor
     {
-        public event Action<TargetData> OnTargetDataReady;
-        public event Action OnCanceled;
-
         [Tooltip("The visual indicator for the selection area.")]
         public GameObject SelectionIndicator;
         [Tooltip("The layer mask representing the ground.")]
@@ -40,12 +37,32 @@ namespace CycloneGames.GameplayAbilities.Sample
             }
         }
         
+        private Camera m_CachedCamera;
+
+        // Camera.main is a tagged-object search, so the reference is cached and only re-acquired when it
+        // dies (scene change, camera destroyed). The acquisition lives in a property getter rather than
+        // Update, which keeps the per-frame method free of the call entirely.
+        private Camera TargetCamera
+        {
+            get
+            {
+                if (m_CachedCamera == null)
+                    m_CachedCamera = Camera.main;
+
+                return m_CachedCamera;
+            }
+        }
+
         void Update()
         {
             if (!isTargeting) return;
 
+            Camera targetingCamera = TargetCamera;
+            if (targetingCamera == null)
+                return;
+
             // Trace from camera to mouse position
-            Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+            Ray ray = targetingCamera.ScreenPointToRay(Input.mousePosition);
             if (Physics.Raycast(ray, out RaycastHit hit, 100f, GroundLayerMask))
             {
                 lastValidHit = hit;
@@ -61,10 +78,16 @@ namespace CycloneGames.GameplayAbilities.Sample
             if (!isTargeting) return;
             isTargeting = false;
 
-            var targetData = GameplayAbilityTargetData_SingleTargetHit.Get();
+            var targetData = owningAbility.AbilitySystemComponent.RentTargetData<GameplayAbilityTargetData_SingleTargetHit>();
             targetData.Init(lastValidHit);
-            onTargetDataReadyCallback?.Invoke(targetData);
-            OnTargetDataReady?.Invoke(targetData);
+            Action<TargetData> callback = onTargetDataReadyCallback;
+            if (callback == null)
+            {
+                targetData.Release();
+                throw new InvalidOperationException("Ground targeting completed without a TargetData receiver.");
+            }
+
+            callback(targetData);
         }
 
         public void CancelTargeting()
@@ -72,11 +95,13 @@ namespace CycloneGames.GameplayAbilities.Sample
             if (!isTargeting) return;
             isTargeting = false;
             onCancelledCallback?.Invoke();
-            OnCanceled?.Invoke();
         }
 
         public void Destroy()
         {
+            onTargetDataReadyCallback = null;
+            onCancelledCallback = null;
+            owningAbility = null;
             // This is now a MonoBehaviour, so we destroy the GameObject.
             Destroy(this.gameObject);
         }

@@ -1,11 +1,14 @@
+using CycloneGames.GameplayAbilities.Core;
 using CycloneGames.GameplayAbilities.Runtime;
 using CycloneGames.GameplayTags.Core;
-using CycloneGames.Logger;
+using CycloneGames.Logging;
 
 namespace CycloneGames.GameplayAbilities.Sample
 {
     public class CharacterAttributeSet : AttributeSet
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         // --- Primary Attributes ---
         public GameplayAttribute Level { get; } = new GameplayAttribute(GASSampleTags.Attribute_Primary_Level);
 
@@ -24,9 +27,9 @@ namespace CycloneGames.GameplayAbilities.Sample
         public GameplayAttribute BonusDamageMultiplier { get; } = new GameplayAttribute(GASSampleTags.Data_DamageMultiplier);
         public GameplayAttribute Damage { get; } = new GameplayAttribute(GASSampleTags.Attribute_Meta_Damage);
 
-        private static readonly GameplayTag Tag_DamageMultiplier = GameplayTagManager.RequestTag(GASSampleTags.Data_DamageMultiplier);
-        private static readonly GameplayTag Tag_State_Dead = GameplayTagManager.RequestTag(GASSampleTags.State_Dead);
-        private static readonly GameplayTag Tag_Event_ExpGain = GameplayTagManager.RequestTag(GASSampleTags.Event_Experience_Gain);
+        private static readonly GameplayTag Tag_DamageMultiplier = GameplayTagManager.Request(GASSampleTags.Data_DamageMultiplier);
+        private static readonly GameplayTag Tag_State_Dead = GameplayTagManager.Request(GASSampleTags.State_Dead);
+        private static readonly GameplayTag Tag_Event_ExpGain = GameplayTagManager.Request(GASSampleTags.Event_Experience_Gain);
 
         public CharacterAttributeSet()
         {
@@ -34,20 +37,35 @@ namespace CycloneGames.GameplayAbilities.Sample
             // but we'll do it via a GameplayEffect for better data-driven design.
         }
 
+        protected override void RegisterAttributes()
+        {
+            RegisterAttribute(Level);
+            RegisterAttribute(Experience);
+            RegisterAttribute(AttackPower);
+            RegisterAttribute(Defense);
+            RegisterAttribute(Speed);
+            RegisterAttribute(Health);
+            RegisterAttribute(MaxHealth);
+            RegisterAttribute(Mana);
+            RegisterAttribute(MaxMana);
+            RegisterAttribute(BonusDamageMultiplier);
+            RegisterAttribute(Damage);
+        }
+
         /// <summary>
         /// Called before a change is made to an attribute's CurrentValue. Perfect for clamping.
         /// </summary>
-        public override void PreAttributeChange(GameplayAttribute attribute, ref float newValue)
+        public override void PreAttributeChange(GameplayAttribute attribute, ref GASFixedValue newValue)
         {
             base.PreAttributeChange(attribute, ref newValue);
 
             if (attribute == Health)
             {
-                newValue = System.Math.Clamp(newValue, 0, GetCurrentValue(MaxHealth));
+                newValue = GASFixedValue.Clamp(newValue, GASFixedValue.Zero, GetCurrentFixedValue(MaxHealth));
             }
             else if (attribute == Mana)
             {
-                newValue = System.Math.Clamp(newValue, 0, GetCurrentValue(MaxMana));
+                newValue = GASFixedValue.Clamp(newValue, GASFixedValue.Zero, GetCurrentFixedValue(MaxMana));
             }
         }
 
@@ -94,7 +112,7 @@ namespace CycloneGames.GameplayAbilities.Sample
                 {
                     var targetASC = data.Target;
                     targetASC.AddLooseGameplayTag(Tag_State_Dead);
-                    CLogger.LogWarning($"{targetASC.OwnerActor} has died!");
+                    Log.Warning($"{targetASC.OwnerActor} has died!");
 
                     var killerASC = data.EffectSpec.Source;
                     if (killerASC != null && killerASC != targetASC)

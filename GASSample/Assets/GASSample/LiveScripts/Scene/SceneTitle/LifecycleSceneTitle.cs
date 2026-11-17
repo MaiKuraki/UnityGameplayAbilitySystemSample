@@ -33,13 +33,13 @@ namespace GASSample.Scene
 
         public UniTask OnFinalize(ISceneDataWriter writer, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
         {
-            uiService.CloseUI(UIWindowName.Title);
+            uiService.CloseAsync(UIWindowName.Title).Forget();
             return UniTask.CompletedTask;
         }
 
         public async UniTask OnInitialize(ISceneDataReader reader, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
         {
-            uiService.OpenUI(UIWindowName.Title);
+            uiService.OpenAsync(UIWindowName.Title).Forget();
             await UpdateProgress(progress, cancellationToken);
         }
 

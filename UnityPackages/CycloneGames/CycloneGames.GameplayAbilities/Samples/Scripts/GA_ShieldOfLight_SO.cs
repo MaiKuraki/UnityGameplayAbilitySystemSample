@@ -1,4 +1,5 @@
 using CycloneGames.GameplayAbilities.Runtime;
+using CycloneGames.Logging;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Samples
@@ -12,37 +13,26 @@ namespace CycloneGames.GameplayAbilities.Samples
     /// - Conditional effect activation
     /// - Effects that pause/resume based on state
     /// </summary>
-    [CreateAssetMenu(menuName = "CycloneGames/GameplayAbilitySystem/Samples/Ability/Shield of Light (Conditional)")]
+    [CreateAssetMenu(menuName = "CycloneGames/GameplayAbilities/Samples/Ability/Shield of Light (Conditional)")]
     public class GA_ShieldOfLight_SO : GameplayAbilitySO
     {
         [Header("Shield Configuration")]
         [Tooltip("The conditional defense buff")]
         public GameplayEffectSO ShieldEffect;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
             var shieldEffect = ShieldEffect ? ShieldEffect.GetGameplayEffect() : null;
             var ability = new GA_ShieldOfLight(shieldEffect);
-            
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
-            
+            InitializeAbility(ability);
             return ability;
         }
     }
 
     public class GA_ShieldOfLight : GameplayAbility
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private readonly GameplayEffect shieldEffect;
 
         public GA_ShieldOfLight(GameplayEffect effect)
@@ -52,7 +42,11 @@ namespace CycloneGames.GameplayAbilities.Samples
 
         public override void ActivateAbility(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, GameplayAbilityActivationInfo activationInfo)
         {
-            CommitAbility(actorInfo, spec);
+            if (!CommitAbility(actorInfo, spec).Succeeded)
+            {
+                EndAbility();
+                return;
+            }
             
             var owner = spec.Owner;
             
@@ -61,29 +55,15 @@ namespace CycloneGames.GameplayAbilities.Samples
                 var effectSpec = GameplayEffectSpec.Create(shieldEffect, owner, spec.Level);
                 owner.ApplyGameplayEffectSpecToSelf(effectSpec);
                 
-                GASLog.Info("[ShieldOfLight] Shield activated! Defense bonus active ONLY while not debuffed.");
+                Log.Info("[ShieldOfLight] Shield activated! Defense bonus active ONLY while not debuffed.");
             }
             
             EndAbility();
         }
 
-        public override GameplayAbility CreatePoolableInstance()
+        public override GameplayAbility CreateRuntimeInstance()
         {
-            var ability = new GA_ShieldOfLight(this.shieldEffect);
-            
-            ability.Initialize(
-                this.Name,
-                this.InstancingPolicy,
-                this.NetExecutionPolicy,
-                this.CostEffectDefinition,
-                this.CooldownEffectDefinition,
-                this.AbilityTags,
-                this.ActivationBlockedTags,
-                this.ActivationRequiredTags,
-                this.CancelAbilitiesWithTag,
-                this.BlockAbilitiesWithTag
-            );
-            return ability;
+            return new GA_ShieldOfLight(shieldEffect);
         }
     }
 }

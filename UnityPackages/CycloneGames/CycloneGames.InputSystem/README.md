@@ -1,1084 +1,722 @@
 # CycloneGames.InputSystem
 
-A production-grade, reactive input wrapper around Unity Input System with context stacks, multi-player device pairing, YAML-driven configuration, and optional analysis tools for recording, gesture recognition, and anti-cheat validation.
+[English | 简体中文](README.SCH.md)
 
-English | [简体中文](./README.SCH.md)
+CycloneGames.InputSystem is a YAML-authored input layer over Unity Input System. It validates configuration before commit, creates an independent input service per local player, routes actions through prioritized mapping contexts, and exposes R3 streams, synchronous reads, and explicit boundaries for configuration and binding-profile persistence.
 
-## Install
+## Table of Contents
 
-- Unity 2022.3+
-- Enable Input System package
-- Dependencies: UniTask, R3, VYaml, CycloneGames.Utility, CycloneGames.Logger
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Core Concepts](#core-concepts)
+- [Usage Guide](#usage-guide)
+- [Advanced Topics](#advanced-topics)
+- [Common Scenarios](#common-scenarios)
+- [Performance and Memory](#performance-and-memory)
+- [Troubleshooting](#troubleshooting)
 
-## Quick Start
+## Overview
 
-### Step 1: Generate Default Config
+Authoring (YAML configuration in the Input System Editor) runs separately from runtime dispatch (`InputManager` commits an immutable snapshot) and per-player delivery (`IInputPlayer` owns an `InputUser`, action asset, active contexts, and R3 streams). Configure contexts, actions, bindings, composites, interactions, processors, and control schemes in YAML; the manager validates against the current Unity Input System registry; each joined player receives an independently constructed action asset.
 
-Open the editor window: `Tools → CycloneGames → Input System Editor`, then click **Generate Default Config** to create the default YAML configuration file.
-
-### Step 2: Configure Code Generation (Recommended)
-
-In the editor window:
-
-1. Set the **Output Directory** (e.g., `Assets/Scripts/Generated`) and **Namespace** (e.g., `YourGame.Input.Generated`).
-2. Click **Save and Generate Constants** to save the configuration and generate the `InputActions.cs` file.
-
-The generated file contains:
-
-- `InputActions.Contexts.*` — String constants for context names
-- `InputActions.ActionMaps.*` — String constants for action map names
-- `InputActions.Actions.*` — Integer hash IDs for actions (zero-GC access)
-
-These constants enable type-safe, allocation-free input access at runtime.
-
-### Step 3: Initialize at Boot
-
-Load the configuration at game startup:
-
-```csharp
-using CycloneGames.Utility.Runtime;
-using CycloneGames.InputSystem.Runtime;
-using Cysharp.Threading.Tasks;
-
-var defaultUri = FilePathUtility.GetUnityWebRequestUri("input_config.yaml", UnityPathSource.StreamingAssets);
-var userUri = FilePathUtility.GetUnityWebRequestUri("user_input_settings.yaml", UnityPathSource.PersistentData);
-await InputSystemLoader.InitializeAsync(defaultUri, userUri);
-```
-
-`InputSystemLoader` prioritizes the user configuration (`PersistentData`), falling back to the default (`StreamingAssets`). On first run, it automatically copies the default to the user directory.
-
-### Step 4: Join Player and Create First Context
-
-```csharp
-using UnityEngine;
-using CycloneGames.InputSystem.Runtime;
-using R3;
-using YourGame.Input.Generated;
-
-public class SimplePlayer : MonoBehaviour
-{
-    private IInputPlayer _input;
-    private InputContext _context;
-
-    private void Start()
-    {
-        _input = InputManager.Instance.JoinSinglePlayer(0);
-
-        _context = new InputContext(InputActions.ActionMaps.PlayerActions, InputActions.Contexts.Gameplay)
-            .AddBinding(_input.GetVector2Observable(InputActions.Actions.Gameplay_Move), new MoveCommand(OnMove))
-            .AddBinding(_input.GetButtonObservable(InputActions.Actions.Gameplay_Confirm), new ActionCommand(OnConfirm))
-            .AddBinding(_input.GetLongPressObservable(InputActions.Actions.Gameplay_Confirm), new ActionCommand(OnConfirmLongPress));
-
-        _context.AddTo(this);        // Auto-cleanup on destroy
-        _input.PushContext(_context);
-    }
-
-    private void OnMove(Vector2 dir) => transform.position += new Vector3(dir.x, 0f, dir.y) * Time.deltaTime * 5f;
-    private void OnConfirm() => Debug.Log("Confirm pressed");
-    private void OnConfirmLongPress() => Debug.Log("Confirm long-pressed");
-}
-```
-
-## Core Concepts
-
-### 4.1 Context Stack
-
-A **Context** is a named collection of input bindings. The **Context Stack** is a LIFO stack: only the top context's bindings are active. This models UI overlays, gameplay/pause transitions, and cutscene interruptions naturally.
-
-**Key behaviors:**
-
-| Action | Behavior |
-|--------|----------|
-| `PushContext(ctx)` | Deactivates the current top, pushes `ctx` to top, then activates it |
-| `RemoveContext(ctx)` | Removes `ctx` by object reference from anywhere in the stack |
-| `PopContext()` | Removes the top element (avoid when using `AddTo`) |
-| `AddTo(component)` | Binds lifecycle to a `MonoBehaviour` — auto-removes on destroy |
-| Auto-Focus | Pushing a context already in the stack moves it to the top |
-
-Each `new InputContext(...)` creates an independent object. Even contexts with the same name are distinct instances — `RemoveContext` only removes the specified instance.
-
-```csharp
-// UI A (gameplay HUD)
-var ctxA = new InputContext("UIActions", "HUD")
-    .AddBinding(input.GetButtonObservable("UIActions", "Pause"), new ActionCommand(Pause));
-ctxA.AddTo(this);
-input.PushContext(ctxA);  // Stack: [HUD]
-
-// UI B (pause menu) overlays A
-var ctxB = new InputContext("UIActions", "PauseMenu")
-    .AddBinding(input.GetButtonObservable("UIActions", "Resume"), new ActionCommand(Resume));
-ctxB.AddTo(this);
-input.PushContext(ctxB);  // Stack: [HUD, PauseMenu]. HUD paused, PauseMenu active.
-
-// OnDisable of ctxB's owner → ctxB auto-removed. HUD resumes automatically.
-```
-
-Multiple contexts can safely share the same ActionMap name. Each context's bindings are independent — only the top context's bindings subscribe.
-
-### 4.2 InputPlayer & IInputPlayer
-
-`IInputPlayer` is the public contract for a single player's input. `InputPlayer` is the engine: it holds the action asset, manages the context stack, wires observables, and detects device changes.
-
-**Joining a player** pairs required devices with an `InputUser`. The manager discovers devices from the YAML config:
-
-```csharp
-// Single-player: auto-locks all required devices
-var input = InputManager.Instance.JoinSinglePlayer(0);
-
-// Async: wait for devices to connect (with timeout)
-var input = await InputManager.Instance.JoinSinglePlayerAsync(0, timeoutInSeconds: 5);
-
-// Get an already-joined player
-var input = InputManager.Instance.GetInputPlayer(0);
-```
-
-**`ActiveDeviceKind`** is a reactive property (`InputDeviceKind.KeyboardMouse`, `Gamepad`, `Touchscreen`, `Other`) that tracks the last-used device. It is only updated when a context is active on top of the stack, so device detection respects input priority.
-
-### 4.3 Commands
-
-Commands are the contract between observable streams and your game logic. Four interfaces define the handler signatures:
-
-| Command Interface | Signature | For Type |
-|-------------------|-----------|----------|
-| `IActionCommand` | `void Execute()` | Button |
-| `IMoveCommand` | `void Execute(Vector2 direction)` | Vector2 |
-| `IScalarCommand` | `void Execute(float value)` | Float |
-| `IBoolCommand` | `void Execute(bool value)` | Bool (press state) |
-
-Convenience classes wrap delegates:
-
-```csharp
-new ActionCommand(() => Debug.Log("Pressed"));
-new MoveCommand(dir => MoveCharacter(dir));
-new ScalarCommand(value => SetVolume(value));
-new BoolCommand(pressed => HandlePressState(pressed));
-```
-
-### 4.4 Observables
-
-Every action produces reactive streams. The following observables are available on `IInputPlayer`:
-
-| Observable | Returns | Description |
-|------------|---------|-------------|
-| `GetButtonObservable` | `Observable<Unit>` | Emits on button press |
-| `GetVector2Observable` | `Observable<Vector2>` | Emits analog/digital direction |
-| `GetScalarObservable` | `Observable<float>` | Emits scalar value (triggers, axis) |
-| `GetLongPressObservable` | `Observable<Unit>` | Emits after configured hold duration |
-| `GetLongPressProgressObservable` | `Observable<float>` | Continuous 0→1 progress; emits -1 on cancel |
-| `GetPressStateObservable` | `Observable<bool>` | `true` on press start, `false` on release |
-| `GetChordObservable` | `Observable<Unit>` | Emits when two buttons overlap in time window |
-
-Each observable has three API variants:
-
-```csharp
-// String-based (compatibility)
-input.GetButtonObservable("PlayerActions", "Confirm");
-input.GetButtonObservable("Confirm");                            // uses active context's ActionMap
-
-// Int-based (zero-GC, uses generated constants)
-input.GetButtonObservable(InputActions.Actions.Gameplay_Confirm);
-```
-
-## Features Guide
-
-### 5.1 Runtime Key Rebinding
-
-Override bindings at runtime without modifying the YAML config:
-
-```csharp
-// Override a specific binding
-input.RebindAction("PlayerActions", "Jump", "<Keyboard>/space", "<Keyboard>/j");
-
-// Reset a specific action to defaults
-input.ResetActionBinding("PlayerActions", "Jump");
-
-// Reset all actions
-input.ResetAllActionBindings();
-
-// Get current effective bindings (includes overrides)
-string[] bindings = input.GetActionBindings("PlayerActions", "Jump");
-```
-
-Also available via `InputManager.Instance` with a `playerId` parameter.
-
-### 5.2 Chord (Combo) Detection
-
-Detect two buttons pressed within a time window (e.g., A+B combo):
-
-```csharp
-// Emits when both "Jump" and "Attack" are held within 200ms
-input.GetChordObservable("PlayerActions", "Jump", "Attack", windowMs: 200f)
-    .Subscribe(_ => PerformSpecialMove());
-```
-
-The chord resets when either button is released and can fire again on the next overlap.
-
-### 5.3 Long Press
-
-Configure long-press duration per action in YAML (`longPressMs`). At runtime, subscribe to either the completion event or the continuous progress stream:
-
-```csharp
-// Completion event
-input.GetLongPressObservable("PlayerActions", "Interact")
-    .Subscribe(_ => StartInteraction());
-
-// Progress stream (0→1) for UI bars
-input.GetLongPressProgressObservable("PlayerActions", "Interact")
-    .Subscribe(progress =>
-    {
-        if (progress < 0f) progressBar.SetActive(false);   // cancelled
-        else if (progress >= 1f) CompleteAction();          // done
-        else { progressBar.SetActive(true); progressBar.fillAmount = progress; }
-    });
-```
-
-Progress value meanings:
-
-| Value | Meaning |
-|-------|---------|
-| `0~1` | Progress (0% → 100%) |
-| `1.0` | Completed (emits once) |
-| `-1` | Cancelled (released early) |
-
-### 5.4 Context-Specific Short/Long Press
-
-The same physical button can trigger short press in one context and long press in another. Define two contexts with different YAML `longPressMs`:
-
-```yaml
-contexts:
-  - name: Inspect
-    actionMap: PlayerActions
-    bindings:
-      - type: Button
-        action: Confirm
-        # No longPressMs — short press only
-        deviceBindings:
-          - "<Keyboard>/space"
-          - "<Gamepad>/buttonSouth"
-  - name: Charge
-    actionMap: PlayerActions
-    bindings:
-      - type: Button
-        action: Confirm
-        longPressMs: 600
-        deviceBindings:
-          - "<Keyboard>/space"
-          - "<Gamepad>/buttonSouth"
-```
-
-```csharp
-var ctxInspect = new InputContext("PlayerActions", "Inspect")
-    .AddBinding(input.GetButtonObservable("PlayerActions", "Confirm"), new ActionCommand(OnInspect));
-var ctxCharge = new InputContext("PlayerActions", "Charge")
-    .AddBinding(input.GetLongPressObservable("PlayerActions", "Confirm"), new ActionCommand(OnCharge));
-
-input.PushContext(ctxInspect);  // short press
-// later:
-input.PushContext(ctxCharge);   // long press
-```
-
-### 5.5 Input Blocking
-
-Temporarily disable all input without destroying contexts:
-
-```csharp
-input.BlockInput();    // Disables the entire InputActionAsset
-input.UnblockInput();  // Re-enables the active context's ActionMap
-```
-
-Useful for loading screens, transitions, or pausing all input globally.
-
-### 5.6 Device Icon Switching
-
-`InputDeviceIconSet` is a `ScriptableObject` that maps `InputDeviceKind` to sprites. `InputDeviceIconSwitcher` is a `MonoBehaviour` that auto-updates a `UI.Image` when the active device changes.
-
-```
-1. Create the asset: Assets → Create → CycloneGames → Input → Device Icon Set
-2. Assign keyboard, gamepad, and touch sprites
-3. Attach InputDeviceIconSwitcher to a GameObject with an Image component
-4. Assign the icon set in the Inspector
-```
-
-The switcher subscribes to player 0's `ActiveDeviceKind` and updates on change. No code required.
-
-### 5.7 Mouse Button Polling
-
-Three polling properties for direct mouse button state, safe to call even when no mouse is present:
-
-```csharp
-bool leftDown = input.IsLeftMouseButtonPressed;
-bool rightDown = input.IsRightMouseButtonPressed;
-bool middleDown = input.IsMiddleMouseButtonPressed;
-```
-
-## YAML Configuration
-
-The input configuration is a single YAML file. The schema supports `schemaFingerprint` for automatic version tracking.
-
-### Complete Schema Reference
-
-```yaml
-schemaFingerprint: "..."      # Auto-generated schema version hash
-
-joinAction:                   # Global: action for player join detection
-  type: Button
-  action: JoinGame
-  deviceBindings:
-    - "<Keyboard>/enter"
-    - "<Gamepad>/start"
-
-playerSlots:
-  - playerId: 0               # Player slot ID
-    joinAction:               # Per-slot join override (optional)
-      type: Button
-      action: JoinGame
-      deviceBindings:
-        - "<Keyboard>/enter"
-    contexts:
-      - name: Gameplay        # Context display name (for debugging)
-        actionMap: PlayerActions  # Unity Input System ActionMap name
-        bindings:
-          - type: Vector2     # ActionValueType: Button | Vector2 | Float
-            action: Move      # Action identifier within the ActionMap
-            updateMode: Polling  # EventDriven (default) | Polling (for delta/mouse input)
-            deviceBindings:
-              - "<Gamepad>/leftStick"
-              - "2DVector(mode=2,up=<Keyboard>/w,down=<Keyboard>/s,left=<Keyboard>/a,right=<Keyboard>/d)"
-              - "<Mouse>/delta"
-          - type: Button
-            action: Confirm
-            longPressMs: 500           # Optional: long-press duration in ms (>0 enables)
-            deviceBindings:
-              - "<Gamepad>/buttonSouth"
-              - "<Keyboard>/space"
-          - type: Float
-            action: FireTrigger
-            longPressMs: 600           # Optional: long-press for float actions
-            longPressValueThreshold: 0.6  # Threshold (0-1) for float long-press activation
-            deviceBindings:
-              - "<Gamepad>/leftTrigger"
-```
-
-### All YAML Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `schemaFingerprint` | string | auto | Schema version hash; auto-computed on save |
-| `joinAction.type` | Button/Vector2/Float | yes | Action value type |
-| `joinAction.action` | string | yes | Action name |
-| `joinAction.deviceBindings` | string[] | yes | Device binding paths |
-| `playerSlots[].playerId` | int | yes | Player slot index |
-| `playerSlots[].joinAction` | object | no | Per-slot join override |
-| `contexts[].name` | string | yes | Context display name |
-| `contexts[].actionMap` | string | yes | Unity Input System ActionMap name |
-| `bindings[].type` | Button/Vector2/Float | yes | Value type |
-| `bindings[].action` | string | yes | Action name |
-| `bindings[].deviceBindings` | string[] | yes | Device paths (supports inline 2DVector composites) |
-| `bindings[].updateMode` | EventDriven/Polling | no | Auto-detect if omitted; Polling needed for mouse delta |
-| `bindings[].longPressMs` | int | no | Long-press duration; 0 or omitted = disabled |
-| `bindings[].longPressValueThreshold` | float | no | Float threshold (0-1) for long-press; default 0.5 |
-
-## Multi-Player Modes
-
-### Single-Player (Auto-Lock Devices)
-
-All required devices are locked to one player. Call it multiple times safely — returns the existing service if already joined.
-
-```csharp
-var input = InputManager.Instance.JoinSinglePlayer(0);
-```
-
-### Lobby Mode — Device Locking
-
-The first device creates Player 0. Subsequent devices are paired to the same player. Ideal for letting a single player switch between keyboard and gamepad.
-
-```csharp
-InputManager.Instance.OnPlayerInputReady += OnPlayerReady;
-InputManager.Instance.StartListeningForPlayers(true);  // lockDeviceOnJoin = true
-```
-
-### Lobby Mode — Shared Devices
-
-Each new device creates a new player (Player 0, 1, 2...). Perfect for local co-op.
-
-```csharp
-InputManager.Instance.StartListeningForPlayers(false);  // lockDeviceOnJoin = false
-```
-
-### Batch Join
-
-```csharp
-// Synchronous
-var players = InputManager.Instance.JoinPlayersBatch(new List<int> { 0, 1, 2 });
-
-// Asynchronous with timeout
-var players = await InputManager.Instance.JoinPlayersBatchAsync(
-    new List<int> { 0, 1, 2 }, timeoutPerPlayerInSeconds: 5);
-```
-
-### Async Join (Wait for Devices)
-
-```csharp
-var input = await InputManager.Instance.JoinSinglePlayerAsync(0, timeoutInSeconds: 5);
-if (input != null) { /* player joined */ }
-```
-
-### Manual Device Locking
-
-```csharp
-var input = InputManager.Instance.JoinPlayerAndLockDevice(0, Keyboard.current);
-```
-
-### Shared Device Mode
-
-Multiple players share the same keyboard — suitable for turn-based or hot-seat games.
-
-```csharp
-var p0 = InputManager.Instance.JoinPlayerOnSharedDevice(0);
-var p1 = InputManager.Instance.JoinPlayerOnSharedDevice(1);
-```
-
-## Runtime Configuration Management
-
-### Hot Reload
-
-Reload configuration at runtime — existing players keep their current config; new players use the updated one.
-
-```csharp
-bool success = await InputManager.Instance.ReloadConfigurationAsync();
-```
-
-### Save User Configuration
-
-Persist the current configuration to the user directory.
-
-```csharp
-await InputManager.Instance.SaveUserConfigurationAsync();
-```
-
-### Reset to Default
-
-Delete user config and reinitialize from the default. Cross-platform: Windows, macOS, Linux, Android, iOS, WebGL.
-
-```csharp
-var defaultUri = FilePathUtility.GetUnityWebRequestUri("input_config.yaml", UnityPathSource.StreamingAssets);
-var userUri = FilePathUtility.GetUnityWebRequestUri("user_input_settings.yaml", UnityPathSource.PersistentData);
-bool success = await InputSystemLoader.ResetToDefaultAsync(defaultUri, userUri);
-```
-
-### Events
-
-```csharp
-// Player joins or input is refreshed
-InputManager.Instance.OnPlayerInputReady += (IInputPlayer player) => { /* setup contexts */ };
-
-// Configuration reloaded
-InputManager.Instance.OnConfigurationReloaded += () => { /* re-bind UI */ };
-
-// Refresh an already-joined player (e.g., when switching scenes)
-InputManager.Instance.RefreshPlayerInput(0);
-
-// Context changes on a specific player
-input.OnContextChanged += (string contextName) => Debug.Log($"Context: {contextName}");
-```
-
-### Lifecycle Patterns
-
-**Pattern 1: Shared Context Instance** — For static bindings used across scenes:
-
-```csharp
-public static class InputContextManager
-{
-    private static InputContext _shared;
-    public static InputContext GetGameplay(IInputPlayer input)
-    {
-        if (_shared == null)
-            _shared = new InputContext(InputActions.ActionMaps.PlayerActions, InputActions.Contexts.Gameplay)
-                .AddBinding(input.GetVector2Observable(InputActions.Actions.Gameplay_Move), new MoveCommand(OnMove))
-                .AddBinding(input.GetButtonObservable(InputActions.Actions.Gameplay_Confirm), new ActionCommand(OnConfirm));
-        return _shared;
-    }
-}
-```
-
-**Pattern 2: Per-Scene Context** — For dynamic bindings, create a new context in each scene and use `AddTo(this)`.
-
-**Pattern 3: Create-First-Bind-Later** — Create context objects early, add bindings dynamically later, then push:
-
-```csharp
-var ctx = new InputContext(InputActions.ActionMaps.PlayerActions, InputActions.Contexts.Gameplay);
-// ... later:
-ctx.AddBinding(input.GetButtonObservable(InputActions.Actions.Gameplay_Jump), new ActionCommand(OnJump));
-input.PushContext(ctx);  // bindings take effect immediately
-
-// If context is already active, refresh after adding bindings:
-if (input.ActiveContextName.CurrentValue == InputActions.Contexts.Gameplay)
-{
-    ctx.AddBinding(input.GetButtonObservable(InputActions.Actions.Gameplay_Attack), new ActionCommand(OnAttack));
-    input.RefreshActiveContext();  // re-subscribes all bindings
-}
-```
-
-### Fine-Grained Binding Management
-
-Remove individual bindings without affecting the entire context:
-
-```csharp
-var observable = input.GetButtonObservable(InputActions.Actions.Gameplay_Jump);
-ctx.AddBinding(observable, new ActionCommand(OnJump));
-// ... later:
-input.RemoveBindingFromContext(ctx, observable);  // removes only this binding
-```
-
-### Cursor Visibility Management
-
-`InputManager` can auto-manage cursor visibility based on active device:
-
-```csharp
-InputManager.Instance.ManageCursorVisibility = true;  // Hide cursor on gamepad, show on keyboard
-InputManager.Instance.ResetCursorToCenter = true;      // Warp cursor to center when showing
-```
-
-## Input Tools
-
-Tools are in `CycloneGames.InputSystem.Tools.Runtime.asmdef`. Import only when needed.
-
-### 9.1 InputRecorder — Recording & Replay
-
-Record input actions over time and replay them as observable streams. Useful for automated testing, tutorial demos, or ghost runs.
-
-```csharp
-using CycloneGames.InputSystem.Runtime;
-
-var recorder = new InputRecorder();
-recorder.RecordAction("PlayerActions", "Move");
-recorder.RecordAction("PlayerActions", "Jump");
-recorder.RecordAction("PlayerActions", "Attack");
-
-recorder.StartRecording(input);     // recording begins
-// ... player plays ...
-var recording = recorder.StopRecording();
-
-// Replay as observables
-recording.CreateReplayVector2Observable()
-    .Subscribe(dir => MoveCharacter(dir));
-recording.CreateReplayUnitObservable()
-    .Subscribe(_ => Jump());
-```
-
-| Replay Method | Returns |
-|---------------|---------|
-| `CreateReplayVector2Observable()` | `Observable<Vector2>` |
-| `CreateReplayFloatObservable()` | `Observable<float>` |
-| `CreateReplayUnitObservable()` | `Observable<Unit>` |
-
-### 9.2 InputSequenceMatcher — Sequence & Gesture Recognition
-
-Detect sequences of button/direction inputs in a recording. Built-in gesture definitions for fighting game motions.
-
-**Sequence Matching:**
-
-```csharp
-using CycloneGames.InputSystem.Runtime;
-
-// Record a fight sequence
-var recorder = new InputRecorder();
-recorder.RecordAction("PlayerActions", "Move");
-recorder.StartRecording(input);
-// ... player performs inputs ...
-var recording = recorder.StopRecording();
-
-// Define: Punch → Kick within 400ms, Kick within 200ms of Punch
-var sequence = new SequenceStep[]
-{
-    new SequenceStep { ActionMapName = "PlayerActions", ActionName = "Punch", ExpectedType = ActionValueType.Button, MaxDelayMs = 400 },
-    new SequenceStep { ActionMapName = "PlayerActions", ActionName = "Kick", ExpectedType = ActionValueType.Button, MaxDelayMs = 200 }
-};
-
-var result = InputSequenceMatcher.DetectSequence(recording, sequence);
-if (result.Matched)
-    Debug.Log($"Combo detected {result.OccurrenceCount} times. Best: {result.BestTotalDuration:F2}s");
-```
-
-**Gesture Recognition (Fighting Game Motions):**
-
-```csharp
-// Record analog stick
-var recorder = new InputRecorder();
-recorder.RecordAction("PlayerActions", "Move");
-recorder.StartRecording(input);
-// ... player performs quarter-circle forward ...
-var recording = recorder.StopRecording();
-
-// Detect quarter-circle forward (↓↘→)
-var result = InputGestureRecognizer.DetectGesture(recording, GestureDefinition.QuarterCircleForward);
-if (result.Matched)
-    Debug.Log($"Quarter Circle Forward detected! Duration: {result.Duration:F3}s");
-
-// Available built-in gestures:
-//   QuarterCircleForward, QuarterCircleBack, DragonPunch
-//   HalfCircleForward, HalfCircleBack, FullCircle
-//   DashForward, DashBack
-```
-
-Define custom gestures:
-
-```csharp
-var myGesture = new GestureDefinition(
-    "Super Move",
-    new[] { Direction8Way.Right, Direction8Way.Down, Direction8Way.DownRight },
-    timeWindowSec: 0.35f,
-    inputDeadZone: 0.3f
-);
-var result = InputGestureRecognizer.DetectGesture(recording, myGesture);
-```
-
-### 9.3 InputTimingValidator — Anti-Cheat Timing Validation
-
-Analyze input timing for statistical anomalies indicating automation/bots.
-
-**Anti-Cheat Timing Validation:**
-
-```csharp
-using CycloneGames.InputSystem.Runtime;
-
-var recorder = new InputRecorder();
-recorder.RecordAction("RhythmActions", "Hit");
-recorder.StartRecording(input);
-// ... player plays a rhythm section ...
-var recording = recorder.StopRecording();
-
-float[] beats = { 0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f };
-
-var result = InputTimingValidator.ValidateTiming(
-    recording, beats, "RhythmActions", "Hit",
-    TimingValidationConfig.Normal,
-    timingWindowMs: 100f
-);
-
-Debug.Log($"Human score: {result.HumanLikenessScore:F2}");
-Debug.Log($"Mean deviation: {result.MeanDeviationMs:F1}ms");
-Debug.Log($"Definitively bot: {result.IsDefinitivelyBot}");
-Debug.Log($"Suspicious perfect: {result.IsSuspiciousPerfect}");
-Debug.Log($"Autocorrelation: {result.AutocorrelationLag1:F3}");
-```
-
-**Tier 1 — Hard blocks** (physically impossible for humans → near-zero false positive):
-- `IsSuspiciousPerfect` — impossibly consistent timing
-- `IsSuspiciousSubFrame` — 80%+ hits within sub-frame precision
-- `IsSuspiciousUniform` — chi-square test on deviation distribution
-- `IsDefinitivelyBot` — any Tier 1 trigger → definitive bot
-
-**Tier 2 — Soft scoring indicators** (statistical anomalies):
-- `IsSuspiciousRandom` — autocorrelation ≈ 0 (independent timing — no human inertia)
-- `IsSuspiciousDriftless` — no drift slope (humans naturally drift ahead or behind)
-- `IsSuspiciousZeroMean` — near-zero mean deviation with high variance
-
-**Config presets:** `Casual`, `Normal`, `Hard`, `Pro`, `Tournament`, `AntiCheatFocus`.
-
-
-### 9.4 InputBindingValidator — Context-Aware Conflict Detection
-
-Detect binding path conflicts within a context, with severity classification:
-
-```csharp
-// Check all contexts for a player
-var conflicts = InputManager.Instance.CheckBindingConflicts(playerId: 0);
-
-// Check a specific context
-var conflicts = InputManager.Instance.CheckBindingConflicts(0, "Gameplay");
-
-// Format a readable report
-string report = InputManager.FormatConflictsReport(conflicts);
-Debug.Log(report);
-```
-
-Conflict severity:
-- **Critical** — Same type, same binding path (ambiguous)
-- **Warning** — Different type, same binding path
-- **Info** — Same binding path but differentiated by long-press timing
-
-## UGUI Integration: ItemNavigator
-
-`ItemNavigator` is a zero-GC UGUI navigation component set for gamepad and keyboard navigation, with seamless mouse and touch support.
-
-<img src="./Documents~/Input_IntegrateSample.gif" alt="Input integrate preview" style="width: 100%; height: auto; max-width: 854px;" />
+The module targets reviewable YAML authoring with bounded validation, per-player `InputUser` and device ownership for local multiplayer, prioritized contexts (Gameplay, Vehicle, Menu, Modal), event-driven and polling reads, long-press and chords, runtime rebinding with a versioned module-owned JSON profile, and explicit configuration sources and stores.
 
 ### Key Features
 
-- **Zero GC**: all runtime operations are allocation-free
-- **Multi-control**: Button, Toggle, Slider, custom Transform
-- **Vertical and Horizontal** navigators
-- **Smart focus**: movable indicator, auto-skips disabled items
-- **Touch Confirmation Gate**: first touch focuses, second confirms — prevents accidental triggers when switching from gamepad
-- **Unified events**: no need to bind `onClick` / `onValueChanged` separately — use `OnConfirm` callback for everything
+- **Validated YAML authoring**: Bounded shape preflight, schema validation, and Unity Input System registry/graph preflight before commit.
+- **Per-player ownership**: Each joined player gets its own `InputUser`, action asset, contexts, streams, and binding overrides.
+- **Prioritized mapping contexts**: `InputContext` with priority and `BlocksLowerPriority`; capture and global blocking scopes.
+- **R3 streams and synchronous reads**: `GetButtonObservable`, `GetVector2Observable`, `GetScalarObservable`, `TryReadValue<T>`, long-press progress, and chords.
+- **Context-qualified identities**: `InputHashUtility.GetActionId(context, map, action)` produces deterministic FNV-1a 32-bit hashes.
+- **Runtime rebinding**: `RebindAction` applies a chosen path; per-player and manager-level JSON profiles with import/export and bounded budgets.
+- **Explicit configuration storage**: `IInputConfigurationSource` (read) and `IInputConfigurationStore` (read/write/delete); built-in `UriInputConfigurationSource` and `FileInputConfigurationStore`.
+- **Editor tooling and codegen**: Input System Editor window, validation, deterministic `InputActions.cs` generation with context-qualified action IDs.
+- **Optional integrations**: UGUI adapters, VContainer composition, AssetManagement-backed package loading, diagnostic `InputRecorder`/`InputReplayCursor`.
 
-### Usage
+## Architecture
+
+| Assembly | Path | Purpose |
+| --- | --- | --- |
+| `CycloneGames.InputSystem.Runtime` | `Runtime/Scripts/` | Configuration, manager, players, contexts, reactive input, storage boundaries. Depends on Unity Input System, UniTask, R3, VYaml, CycloneGames.Hash, and `CycloneGames.Logging.Core`. |
+| `CycloneGames.InputSystem.Editor` | `Editor/` | YAML authoring, validation, safe file writes, constant generation. Editor-only. |
+| `CycloneGames.InputSystem.Runtime.Integrations.UGUI` | `Runtime/Scripts/Integrations/UGUI/` | `InputDeviceIconSet`, `InputDeviceIconSwitcher`, menu-navigation components. `autoReferenced: false`. |
+| `CycloneGames.InputSystem.Runtime.Integrations.VContainer` | `Runtime/Scripts/Integrations/DI/VContainer/Base/` | Container-owned manager, async startup, resolver adapters. No AssetManagement dependency. |
+| `CycloneGames.InputSystem.Runtime.Integrations.VContainer.AssetManagement` | sibling package | Package-configuration loader adapter; supplied by `CycloneGames.InputSystem.AssetManagement`. |
+| `CycloneGames.InputSystem.Tools.Runtime` | `Runtime/Tools/` | `InputRecorder` and `InputReplayCursor` diagnostic tooling. |
+| `CycloneGames.InputSystem.Sample` | `Samples/` | Opt-in scene and bootstrap example. |
+| `CycloneGames.InputSystem.Tests.Editor` | `Tests/Editor/` | EditMode validation and regression coverage. |
+
+Optional assemblies have `autoReferenced: false`. Add an explicit asmdef reference only where the feature is used. UGUI and VContainer activation use package-derived `versionDefines` with `defineConstraints`; missing packages exclude the corresponding assembly. AssetManagement support is physically separated into the sibling `CycloneGames.InputSystem.AssetManagement` package.
+
+InputSystem emits diagnostics through stable `LogChannel` categories rooted at `CycloneGames.InputSystem`. The logging writer lifecycle belongs to the host. `com.cyclone-games.logging` supplies a safe `NullLogWriter` default; the application composition root may install `com.cyclone-games.logging.pipeline`, optionally add `com.cyclone-games.logging.unity`, or provide any other `ILogWriter` backend.
+
+Each diagnostic-producing asmdef owns an internal `<FeatureName>Log` facade under `Diagnostics/`. The facade centralizes `Category`, ambient `Channel`, and strict `Create(ILogWriter logWriter)` binding; consumers use `Log` for ambient class-local channels and `_log` for explicitly injected instance channels.
+
+The opt-in sample asmdef applies the same convention through `Samples/Diagnostics/InputSystemSampleLog.cs` and preserves `CycloneGames.InputSystem.Sample`.
+
+```mermaid
+flowchart LR
+    A["Default IInputConfigurationSource"] --> L["InputSystemLoader"]
+    U["User IInputConfigurationStore"] --> L
+    L --> S["Bounded shape preflight"]
+    S --> V["Clone, prepare, validate schema"]
+    V --> P["Input System registry and temporary-graph preflight"]
+    P -->|success| M["Immutable InputManager snapshot"]
+    S -->|failure| F["Typed failure; no commit"]
+    V -->|failure| F
+    P -->|failure| F
+    M --> P1["IInputPlayer 0 / owned action asset"]
+    M --> P2["IInputPlayer N / owned action asset"]
+    P1 --> C["Prioritized active InputContexts"]
+    C --> R["R3 streams, commands, synchronous reads"]
+```
+
+The initialization path is transactional. It performs a bounded shape preflight before cloning, then schema preparation and semantic validation on the clone. On the Unity main thread it validates layouts, paths, interactions, processors, composites, and control schemes against the current Input System registry, constructs and resolves temporary action graphs, and disposes those graphs. Only a successful preflight permits the immutable runtime snapshot to become active. Each joined player later receives a separately constructed action asset that the player owns.
+
+## Quick Start
+
+Open `Tools > CycloneGames > Input System Editor` to generate or edit a configuration. No project-owned default under `Assets/StreamingAssets` is required. A product composition root chooses whether configuration comes from a serialized `TextAsset`, StreamingAssets, an asset package, a bounded remote source, a user store, or explicit in-memory content.
+
+For the shortest scene-level integration, a serialized `TextAsset` supplies validated YAML directly:
 
 ```csharp
+using CycloneGames.InputSystem.Runtime;
+using CycloneGames.Logging;
 using UnityEngine;
-using UnityEngine.UI;
+
+public sealed class PlayerInputBootstrap : MonoBehaviour
+{
+    private static readonly LogChannel Log = LogChannel.Create("Game.Input");
+
+    [SerializeField] private TextAsset _configuration;
+
+    private InputManager _manager;
+    private InputContext _gameplay;
+
+    private void Awake()
+    {
+        _manager = new InputManager();
+        InputManagerInitializationResult initialized =
+            _manager.InitializeWithResult(_configuration.text);
+
+        if (!initialized.IsSuccess)
+        {
+            Log.Error($"Input initialization failed: {initialized.Status}: {initialized.Message}");
+            enabled = false;
+            return;
+        }
+
+        IInputPlayer player = _manager.JoinSinglePlayer(0);
+        if (player == null)
+        {
+            Log.Error("No declared control scheme can be matched for player 0.");
+            enabled = false;
+            return;
+        }
+
+        _gameplay = new InputContext("PlayerActions", "Gameplay")
+            .AddBinding(
+                player.GetVector2Observable("Gameplay", "PlayerActions", "Move"),
+                new MoveCommand(OnMove));
+
+        player.PushContext(_gameplay);
+    }
+
+    private void OnMove(Vector2 direction)
+    {
+        // Forward the value to a gameplay-owned movement service.
+    }
+
+    private void OnDestroy()
+    {
+        _gameplay?.Dispose();
+        _manager?.Dispose();
+    }
+}
+```
+
+Keep the `InputManager` owner explicit in a composition root. `InputManager.Instance` is the global entry point; explicit construction makes shutdown, tests, multiple scopes, and DI ownership visible. A disposed manager cannot be initialized again; construct a new one. The configuration defines available contexts but does not push gameplay state — create and push `InputContext` objects when the corresponding product state begins.
+
+For deeper topics, see the [Documents~](Documents~/GettingStarted.md) folder.
+
+## Core Concepts
+
+| Concept | Representation | Responsibility |
+| --- | --- | --- |
+| Action | `ActionBindingConfig` and an internal Unity `InputAction` | Gives a logical name and value type to one or more bindings. |
+| Mapping Context | YAML `ContextDefinitionConfig` plus runtime `InputContext` | Groups actions and command bindings under a priority and lower-context blocking policy. |
+| Interaction | Action-level `interactions` | Uses Unity Input System interaction syntax to decide when an action starts, performs, or cancels. Composite-part interactions are rejected; place the expression on the action. |
+| Processor | `processors` or composite-part `processors` | Uses Unity Input System processor syntax to transform values before consumers read them. |
+| Composite | `CompositeBindingConfig` | Builds values such as `2DVector` from named parts without encoding a composite as a control path. |
+| Control Scheme | `ControlSchemeConfig` | Declares a binding group and required, optional, or alternative device layouts for matching. |
+| Player | `IInputPlayer` backed by an `InputUser` | Owns paired devices, an internal action asset, active contexts, streams, and binding overrides. |
+| Binding Profile | `InputBindingOverrideProfile` or per-player override JSON | Persists stable context/map/action binding selectors independently of configuration storage. |
+
+The [Unity Input System manual](https://docs.unity3d.com/Manual/com.unity.inputsystem.html) is the authority for underlying Unity action, binding, interaction, processor, and device semantics.
+
+### Mapping-Context Arbitration
+
+`PushContext` places a runtime context in the normal context set. Active normal contexts are sorted by descending priority; equal priorities retain stack order. Evaluation includes contexts from the top of that order until an active context whose `BlocksLowerPriority` is `true` is reached. A non-blocking overlay can coexist with Gameplay while a Menu blocks Gameplay.
+
+The two-argument `InputContext(actionMapName, name)` constructor obtains priority and blocking policy from the matching YAML context. The four-argument constructor supplies an explicit runtime policy:
+
+```csharp
+var gameplay = new InputContext("PlayerActions", "Gameplay");
+var menu = new InputContext("UIActions", "Menu", priority: 100, blocksLowerPriority: true);
+```
+
+Names are ordinal and case-sensitive.
+
+### Capture and Global Blocking
+
+`CaptureContext` temporarily selects one capture context ahead of all normal contexts. It returns an idempotent `IDisposable`; disposing the scope reveals the next capture or the normal priority set.
+
+`BlockInputScope` disables all action maps for the player and returns an idempotent scope. Blocks are depth-counted, so input resumes only after all matching scopes or `UnblockInput` calls are released. Prefer the scoped form for asynchronous loading and transitions.
+
+```csharp
+using IDisposable modalCapture = player.CaptureContext(modalContext);
+using IDisposable loadingBlock = player.BlockInputScope();
+```
+
+Do not retain either scope beyond its owning flow, and dispose it on the Unity main thread.
+
+### Event Streams, Polling, and Reads
+
+`EventDriven` value actions emit on performed and emit a neutral value on cancel. `Polling` `Vector2` and `Float` actions are read by the player's single update pump while their map is enabled. Use polling for values that must be sampled continuously, and event-driven mode for discrete state changes. Every subscription needs a visible lifetime; an `InputContext`, `CompositeDisposable`, or owning component should dispose it.
+
+Generated or computed action IDs avoid repeated string lookup and include context identity:
+
+```csharp
+int moveId = InputHashUtility.GetActionId("Gameplay", "PlayerActions", "Move");
+player.GetVector2Observable(moveId).Subscribe(MoveCharacter);
+
+if (player.TryReadValue(moveId, out Vector2 move))
+{
+    ApplyMove(move);
+}
+```
+
+Short action-only and map/action overloads remain available, but return an empty observable when the requested identity is ambiguous. Context-qualified APIs are the stable choice.
+
+## Usage Guide
+
+### Contexts, Priority, Capture, and Blocking
+
+Bind commands before pushing a context. The context owns command mappings; the player owns the live subscriptions while that context is active.
+
+```csharp
+InputContext gameplay = new InputContext("PlayerActions", "Gameplay")
+    .AddBinding(
+        player.GetVector2Observable("Gameplay", "PlayerActions", "Move"),
+        new MoveCommand(MoveCharacter))
+    .AddBinding(
+        player.GetButtonObservable("Gameplay", "PlayerActions", "Confirm"),
+        new ActionCommand(Confirm));
+
+InputContext menu = new InputContext("UIActions", "Menu")
+    .AddBinding(
+        player.GetVector2Observable("Menu", "UIActions", "Navigate"),
+        new MoveCommand(NavigateMenu));
+
+player.PushContext(gameplay);
+player.PushContext(menu); // YAML priority 100 and blocking policy make Menu authoritative.
+
+player.RemoveContext(menu); // Gameplay becomes active again.
+gameplay.Dispose();
+menu.Dispose();
+```
+
+`ActiveContextName` reports the highest active context. Product state should remain the source of truth for which contexts it pushes.
+
+Context stack/capture mutations commit the model before rebuilding the Unity action-map projection. If map enablement or a custom observable subscription throws, the model change remains committed, all projected maps/subscriptions are failed closed, `ActiveContextName` is cleared, and the initiating API rethrows. Remove the failing binding/subscriber, then call `RefreshActiveContext()` to retry. Synchronous reentrant refreshes are coalesced and capped at 16 passes; exceeding the cap leaves input disabled instead of spinning the main thread.
+
+### Local Multiplayer and Device Ownership
+
+| API | Device policy | Typical use |
+| --- | --- | --- |
+| `JoinSinglePlayer` / `JoinSinglePlayerAsync` | Matches the preferred then remaining control schemes from unclaimed devices. | Standard local player creation. |
+| `JoinPlayerAndLockDevice` | Requires the supplied device to participate in a valid declared scheme; claims all matched scheme devices. | A user joined from a known gamepad. |
+| `JoinPlayerOnSharedDevice` | Pairs current keyboard and, when present, mouse without exclusive claiming. | Deliberate shared-keyboard modes. |
+| `StartListeningForPlayers` | Combines configured join paths. A join binding creates a new player from the first unregistered slot; only when every declared slot is occupied does it extend the primary player's device set. | Lobby join flow. |
+| `PairAdditionalDevice` | Explicitly pairs one more declared-layout device to an already joined player. Never creates a player. Fails closed for an unclaimable device or an undeclared layout. | Single-player hot-plug of a second device. |
+| `RemovePlayer` | Disposes the player, unpairs its `InputUser`, and releases claims. | Leave, slot reset, or pre-reinitialize shutdown. |
+
+**Device whitelist and the locked-versus-mixed distinction.** Every player associates its action asset with its `InputUser`, so `InputActionAsset.devices` is always the player's own paired-device whitelist. A locked slot additionally activates a control scheme, which narrows the binding mask to that scheme's group. A slot with `pairAllMatchingDevices: true` leaves the scheme unset: every binding stays live, but only on that player's whitelisted devices. This is what allows a single player to move seamlessly between keyboard/mouse and gamepad without re-joining, while a second local player can still claim the remaining devices. Per-binding `deviceBindingGroups` and the slot's own `controlSchemes` both key off an active scheme, so this mode ignores them by design; the device whitelist is the only boundary there.
+
+`maxDevicesPerLayout` (default `1`, clamped to `1..8`) bounds how many devices of each referenced layout such a slot may claim; without it one player would consume every attached keyboard, mouse and gamepad. `deviceSwitchDebounceMs` (default `0`, clamped to `0..5000`) sets a minimum dwell time before `ActiveDeviceKind` may switch again, collapsing rapid device alternation into one presentation update. `InputPlayer.NotifyDeviceActivity(InputDevice)` is an optional explicit hook for product code that observes device activity outside action callbacks.
+
+Async overloads accept a `CancellationToken`. A single-player timeout returns `null`; caller cancellation is propagated. Batch aggregate timeout or manager shutdown returns the successfully joined prefix. Caller cancellation rolls back only players created by that batch, preserves pre-existing registrations, and then throws. Join methods are idempotent for an already registered player ID and return that player.
+
+`JoinPlayersBatchAsync` spreads the batch across frames: it yields after each player except the last, so a batch of *N* players spans up to *N* frames with one player's construction cost per frame. The frame spread bounds how much of a batch lands in a single frame, but each player's construction still costs tens of milliseconds at the reference configuration of eight players, three contexts and 32 actions per context (the EditMode benchmark measured 739.9 ms total, 92.5 ms per player and a 114.8 ms worst frame). Run the batch during a loading screen and measure on the target platform. The last player adds no trailing frame. The returned list is only complete when the task completes, so a caller must not read the result on the frame the call was made.
+
+Timeout, cancellation, and shutdown semantics are unchanged by the frame spread: a batch aggregate timeout or manager shutdown returns the successfully joined prefix, and caller cancellation rolls back only the players that batch created before it throws. `JoinPlayersBatch`, the synchronous counterpart, is unchanged and still completes inside the calling frame; use it only where the whole batch cost is acceptable within one frame, such as during a loading screen.
+
+Control-scheme matching is driven by `deviceRequirements`. `isOptional` permits a missing device. `isOr` expresses an alternative requirement in Unity Input System scheme order. Bindings should use groups declared by the same player slot. If no schemes are declared, layouts derived from configured direct and composite-part paths are alternatives: the first claimable matching device is selected. When that selected device is a keyboard or mouse, the other claimable keyboard/mouse device is added as its companion. Explicit schemes are preferred because they make ownership reviewable.
+
+Each player exposes paired-device lifecycle changes:
+
+```csharp
+private void ObserveDevices(IInputPlayer player)
+{
+    player.OnDeviceStatusChanged += status =>
+    {
+        switch (status.ChangeKind)
+        {
+            case InputPlayerDeviceChangeKind.Lost:
+                PauseForMissingDevice(status.DeviceId);
+                break;
+            case InputPlayerDeviceChangeKind.Regained:
+                ResumeAfterDeviceReturn(status.DeviceId);
+                break;
+            case InputPlayerDeviceChangeKind.Paired:
+            case InputPlayerDeviceChangeKind.Unpaired:
+                RefreshDevicePresentation(status.DeviceKind, status.Layout);
+                break;
+        }
+    };
+}
+```
+
+`ActiveDeviceKind` changes when meaningful action activity is observed; use it for glyph presentation. A non-zero `deviceSwitchDebounceMs` suppresses rapid alternation, so product UI does not need its own debounce.
+
+### Device Activity and Prompt Replacement
+
+`ActiveDeviceKind` is a coarse, debounced presentation state. For precise prompt replacement, `InputPlayer.DeviceActivity` publishes an `InputDeviceActivity` for every observed activity on that player's own devices:
+
+| Field | Meaning |
+| --- | --- |
+| `PlayerId`, `DeviceId` | Owning slot and concrete Unity device id. |
+| `DeviceLayout` | Concrete layout, for example `DualShockGamepad` or `XInputController`. |
+| `Family` | Fine-grained `InputDeviceFamily`: `Keyboard`, `Mouse`, `Gamepad`, `Touchscreen`, `Joystick`, `Other`. |
+| `PromptKind` | Legacy coarse `InputDeviceKind`, so existing consumers keep working. |
+| `ControlPath` | Full control path of the originating control when known. |
+| `Timestamp` | Player frame timestamp, advanced by `UpdateRuntimeState`. |
+
+The stream is driven automatically by Unity's `onAnyButtonPress` and filtered to the player's own device whitelist, so another local player cannot hijack prompts. Continuous activity (mouse movement, analog drift) can be reported explicitly with `NotifyDeviceActivity(device)` or `NotifyDeviceActivity(device, control)`. `InputDeviceIconSet.GetIcon(kind, deviceLayout)` resolves a per-layout sprite first (Xbox versus PlayStation glyphs) and falls back to the coarse kind; `GetIcon(InputDeviceActivity)` is a convenience overload. `DeviceActivity` is a raw stream and is not debounced — deduplicate by `Family` or `DeviceLayout` in product UI; `ActiveDeviceKind` remains the debounced coarse state. Neither `IInputPlayer` nor `InputDeviceKind` was changed, so this is an additive capability.
+
+### Device Loss Recovery
+
+A control scheme is selected once at join time. If all of a player's paired devices are disconnected, the player stays registered but its whitelist becomes empty, every action resolves zero controls, and the scheme and binding mask remain unchanged. Call `InputManager.ReassignPlayerDevices(playerId)` to remove and re-join that player with the currently available devices — scheme, binding mask and whitelist are refreshed together. Products typically call it from `OnDeviceStatusChanged` when `ChangeKind` is `Lost`/`Unpaired` and `User.pairedDevices.Count == 0`, deferring by one frame so the player is not disposed inside its own callback. `InputManager.AutoReassignOnDeviceLoss` (default `false`) performs the same recovery automatically on a topology change; keep it off when `OnPlayerInputReady` notifications need explicit product-controlled timing.
+
+### Interactions, Processors, Long Press, and Chords
+
+Action-level `interactions` and `processors` are forwarded to Unity Input System when internal actions are created. Composite parts can add `processors`; part-level `interactions` are rejected. Initialization preflight resolves expression names and parameters, layouts, control paths, composites, and composite parts against the currently registered Unity Input System environment. Register product-defined layouts, interactions, processors, and composites before calling `InitializeWithResult` or `ReinitializeWithResult`.
+
+The module's long-press completion stream supports `Button` and `Float`, is enabled by `longPressMs > 0`, and is separate from a Unity `hold(...)` interaction. Long-press progress is available only for `Button` actions:
+
+```csharp
+player.GetLongPressObservable("Gameplay", "PlayerActions", "Confirm")
+    .Subscribe(_ => OpenConfirmDetails());
+
+player.GetLongPressProgressObservable("Gameplay", "PlayerActions", "Confirm")
+    .Subscribe(progress => UpdateHoldMeter(progress));
+```
+
+Button progress is in `0..1` while held. A release before completion emits `-1`. For a `Float` long press, `longPressValueThreshold` must be finite and in `(0,1]`; when long press is disabled, the accepted range is `0..1`.
+
+Chords require two configured button actions. Use context-qualified IDs when names may be reused:
+
+```csharp
+int first = InputHashUtility.GetActionId("Gameplay", "PlayerActions", "Confirm");
+int second = InputHashUtility.GetActionId("Gameplay", "PlayerActions", "Cancel");
+
+player.GetChordObservable(first, second, windowMs: 200f)
+    .Subscribe(_ => OpenShortcut());
+```
+
+The chord stream recognizes the two presses within the requested window and resets after release.
+
+### Rebinding and Binding Profiles
+
+Rebinding operates on the player's internal Unity actions. Prefer the context-qualified overload and pass the original configured path:
+
+```csharp
+bool changed = player.RebindAction(
+    "Gameplay", "PlayerActions", "Confirm",
+    "<Keyboard>/space",
+    "<Keyboard>/f");
+
+string[] effectivePaths = player.GetActionBindings("Gameplay", "PlayerActions", "Confirm");
+
+player.ResetActionBinding("Gameplay", "PlayerActions", "Confirm");
+player.ResetAllActionBindings();
+```
+
+This API applies an already chosen path. A product-owned rebind UI must capture a candidate control, enforce reserved-key and accessibility policy, compare it with current effective paths, ask the user how to resolve a conflict, then apply the override. `CheckBindingConflicts` is an authoring diagnostic for configured direct bindings; it does not evaluate a pending candidate or runtime overrides.
+
+Per-player JSON uses a module-owned schema with context/map/action identity plus a binding ordinal and original binding metadata. Import stages and validates the document before replacing active overrides. A per-player document is limited to 128 override records and 1 MiB of strict UTF-8. Manager profiles aggregate per-player JSON under a 4 MiB total budget and can be imported before players join; pending entries are applied during player construction.
+
+Binding-profile persistence belongs to the product composition root. When a product uses `CycloneGames.Persistence`, inject a product-selected `IPersistenceStorage` and `IPersistenceCodec<string>`, then store the exported profile as opaque JSON. The codec may encode the string as strict UTF-8, but it must not interpret or rewrite the InputSystem schema. `InputManager` is the only profile validator.
+
+The following class belongs in product code or a product-owned integration assembly:
+
+```csharp
+using System.Threading;
+using System.Threading.Tasks;
 using CycloneGames.InputSystem.Runtime;
-using R3;
+using CycloneGames.Persistence;
 
-public class SettingsMenu : MonoBehaviour
+public sealed class InputBindingProfilePersistence
 {
-    [SerializeField] private Slider _volumeSlider;
-    [SerializeField] private Slider _brightnessSlider;
-    [SerializeField] private Toggle _fullscreenToggle;
-    [SerializeField] private Button _backButton;
-    [SerializeField] private Transform _focusIndicator;
+    private const int StoredContentVersion = 1;
+    private const int MaximumPayloadBytes = 1024 * 1024;
 
-    private MenuNavigatorVertical _navigator;
-    private IInputPlayer _input;
-    private InputContext _context;
+    private readonly InputManager _manager;
+    private readonly PersistenceStore<string> _store;
 
-    private void Start()
+    public InputBindingProfilePersistence(
+        InputManager manager,
+        IPersistenceStorage storage,
+        IPersistenceCodec<string> strictUtf8Codec)
     {
-        _navigator = gameObject.AddComponent<MenuNavigatorVertical>();
-        _input = InputManager.Instance.GetInputPlayer(0);
-
-        _navigator.Initialize(
-            setupData: new NavigableItemSetup[]
-            {
-                new NavigableItemSetup
-                {
-                    Slider = _volumeSlider,
-                    SliderConfig = SliderConfig.Default,
-                    OnFocused = t => Debug.Log("Volume focused"),
-                    OnConfirm = () => Debug.Log("Volume confirmed")
-                },
-                new NavigableItemSetup
-                {
-                    Slider = _brightnessSlider,
-                    SliderConfig = new SliderConfig { Step = 0.05f }
-                },
-                new NavigableItemSetup
-                {
-                    Toggle = _fullscreenToggle,
-                    OnConfirm = () => _fullscreenToggle.isOn = !_fullscreenToggle.isOn
-                },
-                new NavigableItemSetup
-                {
-                    Button = _backButton,
-                    OnConfirm = () => CloseMenu()
-                }
-            },
-            focusIndicator: _focusIndicator,
-            defaultFocusIndex: 0,
-            allowLooping: true,
-            focusIndicatorOnTop: true,
-            inputPlayer: _input
-        );
-
-        _context = new InputContext("UIActions", "Settings")
-            .AddBinding(_input.GetVector2Observable("UIActions", "Navigate"),
-                new MoveCommand(dir => _navigator.Navigate(dir)))
-            .AddBinding(_input.GetButtonObservable("UIActions", "Confirm"),
-                new ActionCommand(() => _navigator.ConfirmSelection()))
-            .AddBinding(_input.GetButtonObservable("UIActions", "Cancel"),
-                new ActionCommand(() => _navigator.TryCancelEdit()));
-
-        _context.AddTo(this);
-        _input.PushContext(_context);
+        _manager = manager;
+        _store = new PersistenceStore<string>(
+            storage,
+            new PersistenceProfile<string>(
+                strictUtf8Codec,
+                new PersistenceLimits(MaximumPayloadBytes)));
     }
 
-    private void Update()
+    public async Task<PersistenceOperationResult> SaveAsync(
+        CancellationToken cancellationToken)
     {
-        if (_input != null)
-            _navigator.UpdateSmoothSlider(_input.GetVector2Observable("UIActions", "Navigate")
-                .ToReadOnlyReactiveProperty().CurrentValue);
+        string opaqueJson = _manager.ExportBindingOverrideProfileJson();
+        return await _store.SaveAsync(
+            in opaqueJson,
+            StoredContentVersion,
+            cancellationToken);
     }
 
-    private void CloseMenu() { /* ... */ }
-}
-```
-
-### SliderConfig
-
-| Mode | Step | SmoothSpeed | Behavior |
-|------|------|-------------|----------|
-| **Step** (default) | 0.1 | 0 | Press = discrete step |
-| **Smooth** | 0 | 1.0 | Hold = continuous per-second |
-| **Hybrid** | 0.1 | 0.5 | Press = step, Hold = smooth |
-
-Presets: `SliderConfig.Default`, `SliderConfig.Smooth`, `SliderConfig.Hybrid`.
-
-`RequireConfirmToEdit` — requires confirm to enter Slider edit mode, preventing accidental value changes.
-
-### Horizontal Navigation
-
-For tabs, pagination, etc.:
-
-```csharp
-var navigator = gameObject.AddComponent<MenuNavigatorHorizontal>();
-navigator.Initialize(
-    setupData: new HorizontalNavItemSetup[]
+    public async Task<string> LoadAndApplyAsync(CancellationToken cancellationToken)
     {
-        new HorizontalNavItemSetup { Button = tab1, OnConfirm = () => SwitchTab(0) },
-        new HorizontalNavItemSetup { Button = tab2, OnConfirm = () => SwitchTab(1) }
-    },
-    focusIndicator: indicator,
-    defaultFocusIndex: 0,
-    allowLooping: true,
-    inputPlayer: InputManager.Instance.GetInputPlayer(0)
-);
-```
+        PersistenceLoadResult<string> loaded = await _store.LoadAsync(
+            StoredContentVersion,
+            cancellationToken);
+        if (loaded.Status == PersistenceLoadStatus.Missing)
+            return null;
 
-### Custom Transform Navigation
+        if (!loaded.IsSuccess)
+            return loaded.ErrorCode.ToString();
 
-For non-Selectable components:
+        if (!_manager.ImportBindingOverrideProfileJson(loaded.Value))
+            return "The binding profile does not match the active input configuration.";
 
-```csharp
-new NavigableItemSetup
-{
-    CustomTransform = customComponent.transform,
-    OnConfirm = () => customComponent.Confirm(),
-    OnNavigateLeft = () => customComponent.Previous(),
-    OnNavigateRight = () => customComponent.Next(),
-    OnFocused = t => customComponent.OnFocus(),
-    OnUnfocused = t => customComponent.OnUnfocus()
-}
-```
-
-## VContainer Integration
-
-The package includes a VContainer installer for dependency injection.
-
-### Installation
-
-```csharp
-using VContainer;
-using VContainer.Unity;
-using CycloneGames.InputSystem.Runtime.Integrations.VContainer;
-
-public class GameLifetimeScope : LifetimeScope
-{
-    protected override void Configure(IContainerBuilder builder)
-    {
-        var installer = new InputSystemVContainerInstaller(
-            defaultConfigFileName: "input_config.yaml",
-            userConfigFileName: "user_input_settings.yaml",
-            postInitCallback: async resolver =>
-            {
-                var inputResolver = resolver.Resolve<IInputPlayerResolver>();
-                var player0 = inputResolver.GetInputPlayer(0);
-                // setup contexts...
-            }
-        );
-        installer.Install(builder);
-
-        builder.Register<PlayerController>(Lifetime.Scoped);
+        return null;
     }
 }
 ```
 
-### Usage Pattern
+Construct this owner once at the composition root, load before players join, and save only at explicit settings commits or lifecycle checkpoints. Use `TryExportBindingOverridesJson` or `TryExportBindingOverrideProfile` when budget exhaustion is an expected failure path. Profile JSON contains input preferences rather than secrets, but its storage, account association, retention, integrity, encryption, and platform provider still belong to the product save policy.
+
+### Configuration Loading and Persistence
+
+`IInputConfigurationSource` is read-only. `IInputConfigurationStore` adds save and delete. `FileInputConfigurationStore` accepts a fixed root and relative Unicode Form C logical keys. `/` is the only logical segment separator; `\` is rejected. The store rejects rooted paths, URIs, traversal, unsafe characters, and paths that contain a detectable symbolic link or reparse point at the operation boundary, bounds strict UTF-8 content, writes through a temporary file, and retains one fixed `.bak` for recovery.
+
+`UriInputConfigurationSource` reads defaults from local `StreamingAssets`, Android `jar:file` locations, same-origin StreamingAssets web URLs, or an HTTPS host explicitly supplied to its allowlist. Logical URIs are capped at 4,096 characters. The HTTPS allowlist accepts at most 64 bounded DNS/IPv4 hosts, each no longer than 253 characters. Local paths must remain inside `StreamingAssets`. Allowlisted HTTPS endpoints must use port 443 and contain no credentials or fragment. Redirects are disabled and the read has a byte budget and timeout.
 
 ```csharp
+using System.IO;
 using CycloneGames.InputSystem.Runtime;
-using CycloneGames.InputSystem.Runtime.Integrations.VContainer;
-using VContainer;
+using CycloneGames.Logging;
+using UnityEngine;
 
-public class PlayerController
+LogChannel log = LogChannel.Create("Game.Input");
+var manager = new InputManager();
+var defaults = new UriInputConfigurationSource();
+var users = new FileInputConfigurationStore(Application.persistentDataPath);
+
+string defaultUri = Path.Combine(Application.streamingAssetsPath, "input_config.yaml");
+InputSystemLoadResult load = await InputSystemLoader.LoadAndInitializeAsync(
+    new InputSystemBootstrapOptions(
+        InputSystemBootstrapMode.Optional,
+        defaults,
+        defaultUri,
+        users,
+        "input/user_input_settings.yaml",
+        persistDefaultToUser: true),
+    manager,
+    forceReinitialize: false,
+    cancellationToken: cancellationToken);
+
+if (!load.IsBootstrapComplete)
 {
-    private readonly IInputPlayerResolver _inputResolver;
-    private IInputPlayer _input;
-
-    [Inject]
-    public PlayerController(IInputPlayerResolver inputResolver)
-    {
-        _inputResolver = inputResolver;
-    }
-
-    public void Initialize(int playerId)
-    {
-        _input = _inputResolver.GetInputPlayer(playerId);
-        var ctx = new InputContext(InputActions.ActionMaps.PlayerActions, InputActions.Contexts.Gameplay)
-            .AddBinding(_input.GetVector2Observable(InputActions.Actions.Gameplay_Move), new MoveCommand(OnMove))
-            .AddBinding(_input.GetButtonObservable(InputActions.Actions.Gameplay_Confirm), new ActionCommand(OnConfirm));
-        _input.PushContext(ctx);
-    }
-
-    private void OnMove(Vector2 dir) { /* ... */ }
-    private void OnConfirm() { /* ... */ }
+    log.Error($"Input load failed: {load.Status}: {load.Error}");
 }
 ```
+
+`Disabled` performs no reads. `Optional` returns `NotConfigured` when both user and default content are absent; `Required` reports `DefaultConfigurationUnavailable` when no usable configuration exists. A valid user file is used as-is; a missing file falls back to the validated default and copies it into the user store; an invalid file is preserved while the valid default is used for that session. When the primary file is missing but its `.bak` is readable, the store reports backup recovery. Configuration commits only after schema validation and Input System preflight both succeed.
+
+`InputManager` owns only validated runtime state; it does not retain a URI, source, or store. The composition root owns configuration persistence and performs later load, save, reset, or delete operations through its explicit `IInputConfigurationSource` and `IInputConfigurationStore` instances.
+
+Changing configuration requires a lifecycle decision. `ReinitializeWithResult` refuses replacement while players are active. Remove players, release contexts, reinitialize, then rebuild player services and reapply an accepted binding profile. A failed reinitialize leaves the committed configuration unchanged.
+
+## Advanced Topics
+
+### Configuration Reference
+
+| Level | Field | Meaning |
+| --- | --- | --- |
+| Root | `schemaVersion` | Runtime schema authority. Author new files with value `1`. |
+| Root | `schemaFingerprint` | Optional Editor diagnostic. Does not approve or reject runtime data. |
+| Root | `joinAction` | Optional shared join binding. Player-slot join bindings are also considered. |
+| Root | `playerSlots` | Validated player templates identified by unique non-negative `playerId` values. |
+| Player | `controlSchemes` | Optional deterministic device-matching schemes. |
+| Player | `defaultControlScheme` | Preferred scheme; other declared schemes are tried if it cannot match. |
+| Player | `pairAllMatchingDevices` | Claims devices for every referenced layout and leaves the control scheme unset. The action asset stays confined to that player's device whitelist. |
+| Player | `maxDevicesPerLayout` | Upper bound on devices claimed per referenced layout when `pairAllMatchingDevices` is enabled. Default `1`, clamped to `1..8`. |
+| Player | `deviceSwitchDebounceMs` | Minimum dwell time before `ActiveDeviceKind` may switch again. Default `0` (legacy immediate switching), clamped to `0..5000`. |
+| Player | `contexts` | Named mapping contexts for that player. |
+| Context | `name`, `actionMap` | Context identity and public action-map identity. |
+| Context | `priority` | Higher values are considered first. Default limits accept `-100000..100000`. |
+| Context | `blocksLowerPriority` | Stops activation below this context when `true`. |
+| Action | `type` | `Button`, `Vector2`, or `Float`. |
+| Action | `action` | Logical action name. Context, map, and action form the stable identity. |
+| Action | `expectedControlType` | Unity expected control layout (`Button`, `Vector2`, `Axis`). |
+| Action | `deviceBindings` | Direct Unity control paths. |
+| Action | `deviceBindingGroups` | Optional per-binding control-scheme groups, positionally aligned with `deviceBindings`. An omitted list or an empty entry falls back to `bindingGroups`, so existing configurations are unchanged. |
+| Action | `compositeBindings` | Structured composite name, parameters, groups, and parts. |
+| Action | `bindingGroups` | Semicolon-separated action-level control-scheme binding groups. |
+
+`deviceBindingGroups` is the precise form. Unity Input System binding groups are a binding-level concept: when one action has both a keyboard and a gamepad binding, assigning each binding its own scheme group makes the active control scheme's `bindingMask` an independent second line of defence alongside the `InputUser` device whitelist. Without it, a gamepad binding carrying `KeyboardMouse;Gamepad` still resolves under a `KeyboardMouse` scheme as soon as the whitelist widens (for example after `PairAdditionalDevice`), and device isolation relies on the whitelist alone. The list must have exactly one entry per `deviceBindings` entry; each non-empty entry must name declared scheme groups; an empty entry explicitly falls back to the action-level value.
+| Action | `interactions`, `processors` | Unity Input System expressions applied to the action. |
+| Composite part | `name`, `path`, `processors` | Named part control path with optional part-local processors. A non-empty part `interactions` value is rejected. |
+| Action | `updateMode` | `EventDriven` or `Polling`. Delta paths are treated as polling. |
+| Action | `longPressMs` | Module long-press completion duration for `Button` or `Float`; `0` disables the stream. |
+| Action | `longPressValueThreshold` | `Float` actuation threshold. Must be in `(0,1]` when Float long press is enabled; may be `0..1` when long press is disabled. |
+
+`deviceBindings` contains only direct control paths. A composite must use `compositeBindings`; do not place `2DVector(...)` in `deviceBindings`. Composite `parameters` omits the outer parentheses. Composite parts support `processors` only; a non-empty part `interactions` value fails validation. Put the interaction on the containing action.
+
+### Validation Budgets
+
+Default validation budgets: 8 players, 32 contexts per player, 128 actions per context, 1,024 total actions per player, 16 total direct/composite-part binding entries per action, 16 composites per action, 16 parts per composite, 16 control schemes per player, 16 device requirements per scheme, and 256 characters per technical string. Inject stricter `InputConfigurationLimits` into the `InputManager` constructor.
+
+Before VYaml materialization, runtime and Editor YAML entry points also limit input to 1 MiB strict UTF-8 without BOM, 16,384 lines, 4,096 characters per line, 64 indentation spaces, 65,536 structural tokens, and nesting depth 64. YAML anchors, aliases, explicit tags, directives/document markers, block scalars, tab indentation, forbidden control/format/private-use characters, and non-CR/LF line separators are outside this strict subset.
+
+One action serializes to roughly twelve YAML lines, so the 16,384-line budget caps a serialized configuration at about 1,300 total actions across all players (`InputConfigurationLimits.ApproximateMaxSerializedTotalActions`). The per-player action limits above bound programmatically constructed configuration; at multiplayer scale they are not reachable through the YAML source. Exceeding the line budget is rejected during preflight with a message naming the line limit, so budget authored configuration against the serialized total rather than against the per-player ceiling.
+
+### Editor Workflow and Code Generation
+
+Open `Tools > CycloneGames > Input System Editor`. The left project-settings panel keeps runtime and code-generation paths visible with reveal/ping shortcuts. The right workspace keeps the serialized configuration separate from file operations. Colored badges distinguish editable, valid, review, invalid, and optional states. Validation errors block persistence but never disable the working-copy fields.
+
+1. Select a default-config folder under `Assets`; the file name is `input_config.yaml`.
+2. Select an optional relative user-config subdirectory under `Application.persistentDataPath`.
+3. Load the user or default file, or generate a default working configuration.
+4. Edit join actions, player slots, control schemes, contexts, direct bindings, composites, interactions, processors, priorities, and blocking policies.
+5. Resolve validation errors before saving.
+6. Use `Save User Config`, `Save User + Generate Code`, `Save Project Default`, or `Restore User from Default`.
+7. Select a codegen folder under `Assets` and a namespace, then generate `InputActions.cs`.
+
+The Editor uses a hidden in-memory `ScriptableObject` working copy and `SerializedObject`/`SerializedProperty`, so Undo/Redo and serialized-field handling remain in the Editor path.
+
+Generated code contains `InputActions.Contexts`, `InputActions.ActionMaps`, and context-qualified IDs under `InputActions.Actions`. Each signed `int` action ID is the deterministic FNV-1a 32-bit hash of `context/map/action`. Regenerate after changing context, map, or action identities.
+
+### Optional Integrations
+
+**UGUI** — Add an asmdef reference to `CycloneGames.InputSystem.Runtime.Integrations.UGUI` for `InputDeviceIconSet`, `InputDeviceIconSwitcher`, and horizontal/vertical menu-navigation components. The assembly owns presentation adapters only; core runtime does not reference UGUI.
+
+**VContainer** — The base integration registers a container-owned `InputManager`, `IInputPlayerResolver`, `IInputSystemInitializer`, diagnostics, and an `IAsyncStartable` when auto-initialization is enabled. Pass an explicit `InputSystemBootstrapOptions` to `InputSystemVContainerInstaller`; `Optional` and `Disabled` complete auto-start without throwing. Every consumer in that scope must resolve/inject the same manager; using `InputManager.Instance` alongside it creates a separate session.
+
+AssetManagement-backed package loading requires installing the sibling `CycloneGames.InputSystem.AssetManagement` package and referencing `CycloneGames.InputSystem.Runtime.Integrations.VContainer.AssetManagement`:
+
+```csharp
+var packageLoader =
+    InputSystemAssetManagementVContainerAdapter.CreatePackageConfigurationLoader();
+
+builder.Install(new InputSystemVContainerInstaller(
+    "input_config.yaml",
+    "user_input_settings.yaml",
+    packageLoader));
+```
+
+**Tools** — `CycloneGames.InputSystem.Tools.Runtime` is opt-in diagnostic tooling. `InputRecorder` records selected context-qualified streams into a fixed-capacity in-memory buffer. Overflow increments `DroppedSampleCount`; it never grows the sample buffer while recording. `StopRecording` creates an immutable snapshot, and `InputReplayCursor` lets a caller consume samples in recorded tick/order.
+
+**Sample** — The sample assembly, scene, and fixture are opt-in and are not automatically referenced or added to Build Settings. See [Samples/README.md](Samples/README.md).
+
+### Failure Model
+
+Failures are returned through typed results wherever the operation has a recoverable boundary:
+
+- `InputConfigurationReadResult` and `InputConfigurationStoreResult` report `NotFound`, `InvalidKey`, `TooLarge`, `Unsupported`, `AccessDenied`, or `IoError`.
+- `InputSystemLoadResult` distinguishes user/default success, unavailable defaults, invalid configuration, and manager initialization failure.
+- `InputManagerInitializationResult` reports empty content, wrong thread, active players, disposed manager, parse failure, schema validation failure, or `InputSystemPreflightFailed`. It exposes `Validation` and, when registry/graph preflight ran, `Preflight`.
+- Join methods return `null` when a slot, device, or scheme cannot be resolved; caller cancellation is not converted into success.
+- Rebind/profile APIs return `false` for an unknown identity, selector mismatch, unsupported schema, duplicate entry, or budget violation.
+
+`schemaVersion` is authoritative. Author current files with schema `1`; negative and future values are rejected. Preparation and validation operate on a clone and never rewrite the source file. Persist configuration only through an explicit Editor save or product-owned transaction with backup and rollback.
+
+## Common Scenarios
+
+### Bootstrap a single player
+
+Construct an `InputManager` from a serialized `TextAsset`, join player 0 with the best matching control scheme, and push a Gameplay context (see [Quick Start](#quick-start)).
+
+### Local multiplayer with device locking
+
+A local-coop game joins each player from a known gamepad using `JoinPlayerAndLockDevice`, or uses `StartListeningForPlayers(lockDeviceOnJoin: true)` to let each unclaimed device perform its join binding and become a primary player. `RemovePlayer` releases claims on leave or slot reset.
+
+```csharp
+IInputPlayer player1 = manager.JoinPlayerAndLockDevice(0, gamepad1);
+IInputPlayer player2 = manager.JoinPlayerAndLockDevice(1, gamepad2);
+```
+
+### Modal capture and input blocking
+
+A modal dialog captures input for its lifetime; a loading transition blocks all input until it completes:
+
+```csharp
+IDisposable capture = player.CaptureContext(modalDialogContext);
+try
+{
+    // Drive the modal flow.
+}
+finally
+{
+    capture.Dispose();
+}
+
+using (player.BlockInputScope())
+{
+    // Synchronous transition. For async code, keep the scope in a try/finally.
+}
+```
+
+### Long-press and chord
+
+```csharp
+player.GetLongPressObservable("Gameplay", "PlayerActions", "Confirm")
+    .Subscribe(_ => OpenConfirmDetails());
+
+player.GetLongPressProgressObservable("Gameplay", "PlayerActions", "Confirm")
+    .Subscribe(progress => UpdateHoldMeter(progress));
+
+int confirm = InputHashUtility.GetActionId("Gameplay", "PlayerActions", "Confirm");
+int cancel = InputHashUtility.GetActionId("Gameplay", "PlayerActions", "Cancel");
+player.GetChordObservable(confirm, cancel, windowMs: 200f)
+    .Subscribe(_ => OpenShortcut());
+```
+
+### Rebinding profile save and load
+
+```csharp
+using CycloneGames.Logging;
+
+LogChannel log = LogChannel.Create("Game.Input");
+PersistenceOperationResult saved = await profilePersistence.SaveAsync(cancellationToken);
+if (!saved.IsSuccess)
+    log.Warning($"Binding profile save failed: {saved.ErrorCode}");
+
+string loadError = await profilePersistence.LoadAndApplyAsync(cancellationToken);
+if (loadError != null)
+    log.Warning($"Binding profile load failed: {loadError}");
+```
+
+Keep the configured defaults active when loading fails. Missing data is a normal first-run state; corrupted, future-version, or schema-incompatible data must not be applied silently. Do not expose persistence exception messages directly — send detailed exceptions only to a product-owned logging pipeline that applies redaction and access control.
+
+## Performance and Memory
+
+| Area | Runtime behavior | Engineering guidance |
+| --- | --- | --- |
+| Initialization | Bounded shape checks, clones/migrates/validates DTOs, validates Input System registrations, constructs/resolves/disposes temporary action graphs, commits immutable snapshot. | Initialize outside input-sensitive frames and after all custom Input System registrations. Reuse the committed manager. |
+| Event-driven actions | Unity callbacks forward to pre-created subjects while the action map is enabled. | Prefer for buttons and discrete values. Subscription callbacks must remain bounded. |
+| Polling and holds | One update subscription per player services all polling actions and hold progress. | Use `Polling` only when continuous sampling is required. |
+| Context changes | Disposes active command subscriptions, disables maps, sorts active contexts, enables selected maps, recreates command subscriptions. | Change contexts on state transitions, not every frame. |
+| Rebinding/profile operations | Enumerates bindings and allocates arrays/JSON during export, import, conflict checks, reporting. Manager import builds and disposes a temporary action graph for each staged player. | Keep these operations in settings/save flows, not gameplay hot paths. |
+| Device activity | Uses action activity and Input System device/user notifications; `ActiveDeviceKind` is a presentation hint. | Debounce product UI if noisy hardware causes rapid glyph changes. |
+| Tools recording | Fixed-capacity list while recording; snapshot creation copies samples. `CancelRecording(maximumSamplesToDiscard)` stops subscriptions and releases sample references in caller-bounded chunks without exporting a snapshot. | Inspect `WasTruncated`/`DroppedSampleCount`; do not leave diagnostics enabled unintentionally. Cancellation discards diagnostic evidence and therefore requires an explicit product policy. |
+
+Profile initialization and player construction with Unity Profiler markers `CycloneGames.Input.Initialize`, `CycloneGames.Input.JoinPlayer`, and `CycloneGames.Input.BuildAsset`.
+
+### Ownership
+
+- The composition root owns and disposes `InputManager`.
+- Subsystem registration invalidates every still-active manager so domain-reload-disabled play sessions cannot retain users, actions, listeners, or the static listening count; product owners must still dispose managers during normal teardown.
+- `InputManager` owns registered players and disposes them on removal or manager disposal.
+- `InputPlayer` owns its `InputUser`, generated `InputActionAsset`, subjects, update subscription, and device subscriptions.
+- Product state owns `InputContext` instances and capture/block scopes; disposing a context removes it from every player using it.
+- Subscription owners dispose direct R3 subscriptions not managed through an active `InputContext`.
+- Storage owners choose roots, keys, retention, encryption, backup, and format-update policy.
+
+`InputManager.GetMemoryStats()` and `InputPlayer.GetMemoryStats()` expose main-thread, allocation-free count snapshots for explicit diagnostics. Recorder count/capacity/drop properties are also scalar reads. Caller-owned adapters may consume these APIs; global telemetry and pressure callbacks stay with the host.
+
+Configurable `InputConfigurationLimits` values also have public absolute ceilings, preventing a caller from replacing a practical product budget with an `int.MaxValue` allocation/iteration budget. Repeated capture scopes are independently capped at `InputPlayer.MaximumContextCaptureDepth` (`1024`); a leaked scope fails closed instead of growing the capture stack indefinitely.
+
+### Threading
+
+Unity API and player/context operations are main-thread confined. `UriInputConfigurationSource` switches to the Unity main thread before using `UnityWebRequest`. `FileInputConfigurationStore` exposes asynchronous I/O but does not make `InputManager`, `IInputPlayer`, or `InputContext` thread-safe. Carry cancellation through async loading, return to the Unity main thread before manager mutation, and dispose Unity-owned state on that thread.
+
+### Platform Support
+
+| Target | Default configuration path | User persistence | Required validation |
+| --- | --- | --- | --- |
+| Windows Editor/Player | Local `StreamingAssets` through `UriInputConfigurationSource` | `FileInputConfigurationStore` under `persistentDataPath` | EditMode tests, Player build, unplug/replug, filesystem fault tests. |
+| macOS Editor/Player | Local `StreamingAssets` file | `FileInputConfigurationStore` | Path casing, replacement/backup behavior, permissions, notarized build, device layouts. |
+| Linux Editor/Player | Local `StreamingAssets` file | `FileInputConfigurationStore` | Case-sensitive paths, controller layouts, filesystem semantics, headless behavior. |
+| Android | `jar:file`/StreamingAssets through `UnityWebRequest` | `FileInputConfigurationStore` under app persistent data | APK/AAB reads, cancellation, lifecycle resume, controller reconnect, IL2CPP. |
+| iOS | Local StreamingAssets URI/file path | `FileInputConfigurationStore` under app persistent data | Sandbox backup policy, atomic replacement, controller lifecycle, stripping, device suspension. |
+| WebGL | Same-origin StreamingAssets web URI | Product-supplied `IInputConfigurationStore` | Implement bounded browser persistence; test quota, corruption, format updates, refresh, cancellation. |
+| Consoles | Platform-approved source adapter or packaged StreamingAssets path | Platform-approved store adapter | Review SDK storage, suspend/resume, user ownership, controller assignment, AOT/stripping, certification under NDA. |
+| Remote HTTPS | Allowlisted HTTPS host, port 443, no credentials/fragments/redirects | Product-selected store | Certificate policy, timeout, payload budget, offline fallback, update authenticity, rollout/rollback. |
+
+Input control paths and device layouts vary by platform and package version. Validate every shipped scheme with Unity Input Debugger and representative hardware.
+
+### Persistence
+
+| Data | Owner | Default path/key | Format | Cleanup and recovery |
+| --- | --- | --- | --- | --- |
+| Default input configuration | Product composition root | Product-selected source/key; StreamingAssets optional | YAML, schema-versioned | Remove only after changing bootstrap policy or supplying another validated source. |
+| User input configuration | Product runtime via `IInputConfigurationStore` | `input/user_input_settings.yaml` under `persistentDataPath` | YAML plus one sibling `.bak` | Created from validated defaults when missing; invalid content preserved; `DeleteAsync` removes both primary and `.bak`. |
+| Binding override profile | Product composition root | Product-selected bound entry | Module-owned opaque JSON, schema `1`; optional outer Persistence Record V1 selected by the product | Reset bindings and persist the new profile, or delete the bound entry through the selected provider. Per-player: 128 records/1 MiB; manager: 4 MiB. |
+| Editor-local settings | Input System Editor | `UserSettings/CycloneGames.InputSystem.EditorSettings.asset` | Unity serialized Editor settings | Close window and delete file to restore defaults. |
+| Generated constants | Project/code owner | `Assets/.../InputActions.cs` | Generated C# | Regenerate from YAML; do not hand-edit. |
+
+These records never use `PlayerPrefs`, `EditorPrefs`, or `SessionState`.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Resolution |
+| --- | --- | --- |
+| Initialization not successful | Empty/oversized content, YAML parse error, schema error, invalid identity, duplicate, configured limit, unavailable Input System registration, or graph-resolution failure | Inspect `InputManagerInitializationResult.Status`, `Message`, `Validation.Issues`, `Preflight.Issues`. Register custom layouts/interactions/processors/composites before initialization. |
+| Valid user settings ignored | Read or validation failure | Inspect `InputSystemLoadResult.UserStorageStatus`; preserve and compare the user file with the default. |
+| `JoinSinglePlayer` returns `null` | Unknown player ID, no successful scheme match, required device absent, or device already claimed | Inspect player slot schemes and currently paired/reserved devices in Input Debugger. |
+| No action stream events | Context not pushed, context/map/action case mismatch, context blocked/captured, input globally blocked, wrong value getter, or action ambiguous | Use context-qualified getters and inspect `ActiveContextName`. |
+| Polling value stays neutral | Map disabled, device not paired, binding masked by scheme, wrong control layout, or value type mismatch | Verify active context, scheme groups, paired devices, and control path. |
+| Long-press getter empty | `longPressMs` is `0`, action missing, or identity ambiguous | Enable a bounded duration and use the context-qualified getter. |
+| Reinitialize reports `ActivePlayers` | Registered players still own action assets and configuration-derived state | Remove players and contexts, then reinitialize and recreate them. |
+| Binding-profile import returns `false` | Profile schema/size invalid, or context/map/action/binding selectors no longer match | Keep configured defaults, preserve the profile, offer a product-owned reset. |
+| File store reports `InvalidKey` | Rooted path, URI, traversal, empty segment, unsafe character, or reparse-point path | Pass a relative logical key under the store's fixed root. |
+| VContainer types unavailable | Package-derived define absent or consumer asmdef lacks the optional reference | Install the package through the project dependency source and add the integration asmdef reference. |
+| Constant generation fails | Invalid namespace/identifier, duplicate generated name, action-ID collision, or unsafe output path | Fix YAML identities or Editor settings; do not edit the generated file. |
+
+## Validation
+
+Run focused tests from Unity Test Runner:
+
+```text
+<UnityEditor> -batchmode -nographics -projectPath <repo-root>/UnityStarter -runTests -testPlatform EditMode -assemblyNames CycloneGames.InputSystem.Tests.Editor -testResults <result-path> -quit
+```
+
+Use the Unity executable matching `UnityStarter/ProjectSettings/ProjectVersion.txt`. A passing EditMode run does not replace PlayMode, Player, IL2CPP, hardware, persistence-fault, or target-platform validation.
 
 ## API Reference
 
-### IInputPlayer
+| Type | Use |
+| --- | --- |
+| `InputManager` | Validate/commit configuration, join/remove players, listen for joins, aggregate profiles, own player services. |
+| `InputManagerInitializationResult` | Inspect parse, schema validation, Input System preflight, lifecycle, preparation outcomes through `Status`, `Validation`, `Preflight`, `WasMigrated`. |
+| `InputConfigurationPreflightResult` | Inspect main-thread registry and temporary action-graph validation through `Status`, bounded `Issues`, `WasTruncated`. |
+| `IInputPlayer` | Read actions, manage contexts, observe device state, rebind, import/export per-player overrides. |
+| `InputContext` | Bind R3 streams to commands; supply priority/blocking policy. |
+| `InputConfigurationValidator` / `InputConfigurationLimits` | Validate untrusted DTOs under explicit allocation/iteration budgets. |
+| `InputConfigurationYamlPreflight` / `InputConfigurationYamlCodec` | Enforce the strict pre-materialization YAML subset; serialize a prepared configuration into bounded canonical YAML. |
+| `IInputConfigurationSource` / `IInputConfigurationStore` | Implement explicit read and persistence adapters. |
+| `UriInputConfigurationSource` / `FileInputConfigurationStore` | Built-in bounded default-source and root-confined local-store implementations. |
+| `InputSystemLoader` | Select user/default content, preserve invalid user data, initialize only from validated content. |
+| `InputHashUtility` | Generate deterministic map hashes and context-qualified action IDs. |
+| `InputBindingValidator` | Detect configured direct-binding conflicts for a player or context. |
+| `InputRx` | Low-level R3 wrappers for keyboard, pointer, gamepad, touch, users, actions, `PlayerInput`. |
 
-| Member | Type | Description |
-|--------|------|-------------|
-| `ActiveContextName` | `ReadOnlyReactiveProperty<string>` | Current active context name |
-| `ActiveDeviceKind` | `ReadOnlyReactiveProperty<InputDeviceKind>` | Active device: KeyboardMouse/Gamepad/Touchscreen/Other |
-| `OnContextChanged` | `event Action<string>` | Fires when context stack top changes |
-| `PlayerId` | `int` | Player ID (InputPlayer only) |
-| `User` | `InputUser` | Unity Input System user (InputPlayer only) |
+## References
 
-**Observables** (3 overloads each: `actionName`, `map+action`, `actionId`):
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `GetButtonObservable` | `Observable<Unit>` | Button press stream |
-| `GetVector2Observable` | `Observable<Vector2>` | 2D directional stream |
-| `GetScalarObservable` | `Observable<float>` | Scalar value stream |
-| `GetLongPressObservable` | `Observable<Unit>` | Long-press completion |
-| `GetLongPressProgressObservable` | `Observable<float>` | Long-press 0→1 progress, -1 on cancel |
-| `GetPressStateObservable` | `Observable<bool>` | Press state (true/false) |
-| `GetChordObservable` | `Observable<Unit>` | Two-button chord within window |
-| `GetActiveDeviceKindObservableForContext` | `Observable<InputDeviceKind>` | Device kind scoped to context |
-
-**Context Management:**
-
-| Method | Description |
-|--------|-------------|
-| `PushContext(InputContext)` | Push to stack (auto-focus if already present) |
-| `RemoveContext(InputContext)` | Remove by object reference from anywhere |
-| `PopContext()` | Remove top (avoid with `AddTo`) |
-| `RefreshActiveContext()` | Re-subscribe all bindings for active context |
-
-**Input Control:**
-
-| Method | Description |
-|--------|-------------|
-| `BlockInput()` / `UnblockInput()` | Temporarily disable/re-enable all input |
-| `RebindAction(map, action, old, new)` | Override a binding at runtime |
-| `ResetActionBinding(map, action)` | Reset single action to default |
-| `ResetAllActionBindings()` | Reset all actions to defaults |
-| `GetActionBindings(map, action)` | Get current effective binding paths |
-| `IsLeftMouseButtonPressed` | Left mouse button polling |
-| `IsRightMouseButtonPressed` | Right mouse button polling |
-| `IsMiddleMouseButtonPressed` | Middle mouse button polling |
-
-### InputManager
-
-| Member | Type | Description |
-|--------|------|-------------|
-| `Instance` | `static InputManager` | Singleton instance |
-| `IsListeningForPlayers` | `static bool` | Lobby listening state |
-| `ManageCursorVisibility` | `bool` | Auto-hide cursor on gamepad |
-| `ResetCursorToCenter` | `bool` | Warp cursor to center on show |
-
-**Events:**
-
-| Event | Signature | Description |
-|-------|-----------|-------------|
-| `OnPlayerInputReady` | `Action<IInputPlayer>` | Player joined or refreshed |
-| `OnConfigurationReloaded` | `Action` | Config hot-reloaded |
-
-**Player Join:**
-
-| Method | Description |
-|--------|-------------|
-| `JoinSinglePlayer(id)` | Sync join, auto-lock devices |
-| `JoinSinglePlayerAsync(id, timeout)` | Async join with device wait |
-| `JoinPlayersBatch(ids)` | Sync batch join |
-| `JoinPlayersBatchAsync(ids, timeout)` | Async batch join |
-| `JoinPlayerOnSharedDevice(id)` | Shared keyboard join |
-| `JoinPlayerAndLockDevice(id, device)` | Lock specific device |
-| `GetInputPlayer(id)` | Get existing player or null |
-| `RefreshPlayerInput(id)` | Re-fire `OnPlayerInputReady` |
-| `RemovePlayer(id)` | Remove and dispose player |
-
-**Lobby:**
-
-| Method | Description |
-|--------|-------------|
-| `StartListeningForPlayers(lockDevice)` | Begin join detection |
-| `StopListeningForPlayers()` | Stop join detection |
-
-**Configuration:**
-
-| Method | Description |
-|--------|-------------|
-| `ReloadConfigurationAsync()` | Hot-reload config |
-| `SaveUserConfigurationAsync()` | Persist current config |
-
-**Conflict Detection:**
-
-| Method | Description |
-|--------|-------------|
-| `CheckBindingConflicts(playerId)` | All contexts for a player |
-| `CheckBindingConflicts(playerId, contextName)` | Specific context only |
-| `FormatConflictsReport(conflicts)` | Human-readable report |
-
-### InputContext
-
-| Member | Description |
-|--------|-------------|
-| `Name` | Display name (defaults to ActionMapName) |
-| `ActionMapName` | Unity Input System ActionMap |
-| `AddBinding(Observable<Unit>, IActionCommand)` | Button binding |
-| `AddBinding(Observable<Vector2>, IMoveCommand)` | Vector2 binding |
-| `AddBinding(Observable<float>, IScalarCommand)` | Float binding |
-| `AddBinding(Observable<bool>, IBoolCommand)` | Bool binding |
-| `RemoveBinding(Observable<T>)` | Remove specific binding |
-| `Dispose()` | Auto-remove from all owners |
-
-### InputRecorder
-
-| Member | Description |
-|--------|-------------|
-| `IsRecording` | Whether currently recording |
-| `RecordAction(map, action)` | Register action to record |
-| `StartRecording(IInputPlayer)` | Begin recording |
-| `StopRecording()` | Stop and return `InputRecording` |
-| `Dispose()` | Cleanup |
-
-**InputRecording:**
-
-| Member | Description |
-|--------|-------------|
-| `Duration` | Total recording duration |
-| `FrameCount` | Number of recorded frames |
-| `CreateReplayVector2Observable()` | Replay as `Observable<Vector2>` |
-| `CreateReplayFloatObservable()` | Replay as `Observable<float>` |
-| `CreateReplayUnitObservable()` | Replay as `Observable<Unit>` |
-
-### InputSequenceMatcher (static)
-
-| Method | Description |
-|--------|-------------|
-| `DetectSequence(recording, sequence)` | Find sequence occurrences in recording |
-
-### InputGestureRecognizer (static)
-
-| Method | Description |
-|--------|-------------|
-| `DetectGesture(recording, gesture)` | Detect a gesture in recording |
-| `QuantizeDirection(input, deadZone)` | Convert Vector2 to 8-way direction |
-
-**Built-in GestureDefinition presets:** `QuarterCircleForward`, `QuarterCircleBack`, `DragonPunch`, `HalfCircleForward`, `HalfCircleBack`, `FullCircle`, `DashForward`, `DashBack`.
-
-### InputTimingValidator (static)
-
-| Method | Description |
-|--------|-------------|
-| `ValidateTiming(recording, beats, map, action, config, window)` | Anti-cheat timing analysis |
-
-**TimingValidationConfig presets:** `Casual`, `Normal`, `Hard`, `Pro`, `Tournament`, `AntiCheatFocus`.
-
-### InputBindingValidator (static)
-
-| Method | Description |
-|--------|-------------|
-| `DetectConflicts(config)` | All contexts |
-| `DetectConflicts(config, contextName)` | Specific context |
-| `FormatConflictsReport(conflicts)` | Human-readable report |
-
-## Game Genre Adaptation Guide
-
-| Game Genre | Core Input | Chord | Recorder | Gesture | Anti-Cheat |
-|------------|:---:|:---:|:---:|:---:|:---:|
-| FPS/Shooter | ✓ | ✓ | — | — | — | — |
-| Fighting | ✓ | ✓ | — | — | — |
-| Rhythm | ✓ | — | ✓ | — | ✓ | ✓ |
-| Action RPG | ✓ | ✓ | — | — | — |
-| Platformer | ✓ | ✓ | — | — | — |
-| Local Multiplayer | ✓ | ✓ | — | — | — |
-| Puzzle | ✓ | ✓ | — | — | — |
-| Turn-Based | ✓ | — | — | — | — | — |
-| Racing | ✓ | — | ✓ | — | — | — |
-| Sports | ✓ | ✓ | ✓ | — | ✓ | ✓ |
+- [Unity Input System manual](https://docs.unity3d.com/Manual/com.unity.inputsystem.html) — underlying Unity action, binding, interaction, processor, device semantics
+- [Getting Started](Documents~/GettingStarted.md) | [Configuration guide](Documents~/Configuration.md) | [Runtime guide](Documents~/RuntimeGuide.md) | [Sample](Samples/README.md)

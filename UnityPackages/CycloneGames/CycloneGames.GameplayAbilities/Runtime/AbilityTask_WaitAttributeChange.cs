@@ -1,14 +1,16 @@
 using System;
 using CycloneGames.GameplayTags.Core;
+using CycloneGames.Logging;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
     /// <summary>
     /// AbilityTask that waits for a specific attribute to change value.
-    /// UE5: UAbilityTask_WaitAttributeChange.
     /// </summary>
     public class AbilityTask_WaitAttributeChange : AbilityTask
     {
+        private static readonly LogChannel Log = GameplayAbilitiesLog.Channel;
+
         /// <summary>
         /// Fired when the watched attribute changes. Provides (oldValue, newValue).
         /// </summary>
@@ -18,6 +20,13 @@ namespace CycloneGames.GameplayAbilities.Runtime
         private GameplayAttribute watchedAttribute;
         private bool onlyTriggerOnce;
         private Action<float, float> attributeChangeCallback;
+        private bool terminalCallbackStarted;
+
+        public override void InitTask(GameplayAbility ability)
+        {
+            base.InitTask(ability);
+            terminalCallbackStarted = false;
+        }
 
         /// <summary>
         /// Creates a WaitAttributeChange task.
@@ -37,7 +46,7 @@ namespace CycloneGames.GameplayAbilities.Runtime
         {
             if (watchedAttribute == null)
             {
-                GASLog.Warning("WaitAttributeChange: Attribute not found.");
+                Log.Warning("WaitAttributeChange: Attribute not found.");
                 EndTask();
                 return;
             }
@@ -50,18 +59,43 @@ namespace CycloneGames.GameplayAbilities.Runtime
         {
             if (!IsActive || IsCancelled) return;
 
-            OnAttributeChanged?.Invoke(oldValue, newValue);
-
             if (onlyTriggerOnce)
             {
-                EndTask();
+                if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                        this,
+                        ref terminalCallbackStarted,
+                        out ulong leaseGeneration)) return;
+                try
+                {
+                    OnAttributeChanged?.Invoke(oldValue, newValue);
+                }
+                finally
+                {
+                    EndTaskIfCurrentLease(leaseGeneration);
+                }
+                return;
             }
+
+            OnAttributeChanged?.Invoke(oldValue, newValue);
         }
 
         public override void CancelTask()
         {
-            OnCancelled?.Invoke();
-            base.CancelTask();
+            if (!AbilityTaskTerminalCallbackGuard.TryBegin(
+                    this,
+                    ref terminalCallbackStarted,
+                    out ulong leaseGeneration)) return;
+            try
+            {
+                OnCancelled?.Invoke();
+            }
+            finally
+            {
+                if (IsCurrentLease(leaseGeneration))
+                {
+                    base.CancelTask();
+                }
+            }
         }
 
         protected override void OnDestroy()

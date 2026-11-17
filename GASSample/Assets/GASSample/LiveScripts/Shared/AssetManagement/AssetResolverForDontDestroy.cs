@@ -1,8 +1,8 @@
 using System.Collections.Generic;
 using CycloneGames.AssetManagement.Runtime;
-using CycloneGames.Logger;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
+using CycloneGames.Logging;
 
 namespace GASSample.AssetManagement
 {
@@ -44,6 +44,7 @@ namespace GASSample.AssetManagement
     /// </remarks>
     public class AssetResolverForDontDestroy : MonoBehaviour
     {
+        private static readonly LogChannel Log = LogChannel.Create("GASSample");
         private const string DEBUG_FLAG = "[AssetResolver]";
 
         [SerializeField]
@@ -58,7 +59,7 @@ namespace GASSample.AssetManagement
                 var prefab = pkg.LoadAssetAsync<GameObject>(pathData.AddressablePath);
                 await prefab.Task;
                 await InstantiateAsync(prefab.AssetObject);
-                CLogger.LogInfo($"{DEBUG_FLAG} Instantiate: {prefab.AssetObject.name}");
+                Log.Info($"{DEBUG_FLAG} Instantiate: {prefab.AssetObject.name}");
             }
         }
     }

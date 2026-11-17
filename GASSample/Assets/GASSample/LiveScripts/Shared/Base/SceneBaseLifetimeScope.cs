@@ -1,9 +1,9 @@
 using CycloneGames.AssetManagement.Runtime;
 using CycloneGames.Factory.Runtime;
-using CycloneGames.Service.Runtime;
 using CycloneGames.UIFramework.Runtime;
+using CycloneGames.UIFramework.Runtime.Integrations;
 using GASSample.AssetManagement;
-using GASSample.UI;
+using UnityEngine;
 using VContainer;
 using VContainer.Unity;
 
@@ -17,22 +17,38 @@ namespace GASSample.Scene
         protected override void Configure(IContainerBuilder builder)
         {
             base.Configure(builder);
-            
+
             builder.Register<IAssetPathBuilderFactory, GASSampleAssetPathBuilderFactory>(Lifetime.Singleton);
             builder.Register<IUnityObjectSpawner, GASSampleObjectSpawner>(Lifetime.Singleton);
-            builder.Register<IUIService, GASSampleUIService>(Lifetime.Singleton);
+            builder.Register<IUIService>(CreateUIService, Lifetime.Singleton);
+        }
 
-            builder.RegisterBuildCallback(resolver =>
+        /// <summary>
+        /// UIService is constructed lazily: it needs the UIRoot that lives in the persistent UI prefab
+        /// and the default asset package, neither of which exists while the scope is still configuring.
+        /// </summary>
+        private static IUIService CreateUIService(IObjectResolver resolver)
+        {
+            var assetPathFactory = resolver.Resolve<IAssetPathBuilderFactory>();
+            var assetModule = resolver.Resolve<IAssetModule>();
+            var package = assetModule.GetPackage(AssetPackageName.DefaultPackage);
+
+            var uiRoot = Object.FindFirstObjectByType<UIRoot>();
+            if (uiRoot == null)
             {
-                var uiService = resolver.Resolve<IUIService>();
-                var assetPathFactory = resolver.Resolve<IAssetPathBuilderFactory>();
-                var objectSpawner = resolver.Resolve<IUnityObjectSpawner>();
-                var cameraService = resolver.Resolve<IMainCameraService>();
-                var assetModule = resolver.Resolve<IAssetModule>();
-                var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
+                throw new MissingReferenceException(
+                    "UIService requires a UIRoot in the loaded scenes. Add the UIFramework prefab to the initial scene.");
+            }
 
-                uiService.Initialize(assetPathFactory, objectSpawner, cameraService, pkg);
-            });
+            var assetProvider = new AssetManagementUIWindowAssetProvider(
+                package,
+                assetPathFactory.Create("UI"));
+
+            // Windows are instantiated by UIService, not by the container, so their [Inject]
+            // fields are filled through the explicit VContainer binder.
+            var binders = new IUIWindowBinder[] { new VContainerWindowBinder(resolver) };
+
+            return new UIService(uiRoot, assetProvider, binders: binders);
         }
     }
 }

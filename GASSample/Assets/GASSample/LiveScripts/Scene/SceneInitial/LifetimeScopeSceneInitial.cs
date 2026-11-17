@@ -1,9 +1,8 @@
 using MackySoft.Navigathena.SceneManagement.VContainer;
 using VContainer;
 using VContainer.Unity;
-using CycloneGames.Service.Runtime;
 using System;
-using CycloneGames.Logger;
+using CycloneGames.Logging;
 
 /// Pipeline:  VContainer   Awake
 ///         -> VContainer   OnEnable
@@ -26,6 +25,7 @@ namespace GASSample.Scene
 {
     public class LifetimeScopeSceneInitial : SceneBaseLifetimeScope
     {
+        private static readonly LogChannel Log = LogChannel.Create("GASSample");
         private const string DEBUG_FLAG = "[SceneInitial] VContainer";
         private int updateIdx = 0;
 
@@ -33,7 +33,7 @@ namespace GASSample.Scene
         {
             base.Configure(builder);
 
-            CLogger.LogInfo($"{DEBUG_FLAG} Configure");
+            Log.Info($"{DEBUG_FLAG} Configure");
 
             builder.RegisterSceneLifecycle<LifecycleSceneInitial>();
             builder.RegisterEntryPoint<ApplicationInitialPresenter>();
@@ -43,7 +43,7 @@ namespace GASSample.Scene
         {
             base.Awake();
 
-            CLogger.LogInfo($"{DEBUG_FLAG} Awake");
+            Log.Info($"{DEBUG_FLAG} Awake");
         }
 
         void Update()
@@ -51,51 +51,52 @@ namespace GASSample.Scene
             if (updateIdx == 0)
             {
                 updateIdx++;
-                CLogger.LogInfo($"{DEBUG_FLAG} First Update");
+                Log.Info($"{DEBUG_FLAG} First Update");
             }
         }
 
         void OnEnable()
         {
-            CLogger.LogInfo($"{DEBUG_FLAG} OnEnable");
+            Log.Info($"{DEBUG_FLAG} OnEnable");
         }
 
         void OnDisable()
         {
-            CLogger.LogInfo($"{DEBUG_FLAG} OnDisable");
+            Log.Info($"{DEBUG_FLAG} OnDisable");
         }
 
         void Start()
         {
-            CLogger.LogInfo($"{DEBUG_FLAG} Unity Start");
+            Log.Info($"{DEBUG_FLAG} Unity Start");
         }
 
         override protected void OnDestroy()
         {
             base.OnDestroy();
 
-            CLogger.LogInfo($"{DEBUG_FLAG} OnDestroy");
+            Log.Info($"{DEBUG_FLAG} OnDestroy");
         }
     }
 
     //  Caution: because of Navigathena, if developer trigger Navigathena's SceneManagement(Push), we may not Trigger VContainer.Start form IStartable even Construct, this class not recommand be child of IStartable
     public class ApplicationInitialPresenter : IDisposable, IStartable
     {
+        private static readonly LogChannel Log = LogChannel.Create("GASSample");
         private const string DEBUG_FLAG = "[SceneInitial] VContainer Presenter";
 
-        public ApplicationInitialPresenter(IGraphicsSettingService graphicsSettingService)
+        public ApplicationInitialPresenter()
         {
-            CLogger.LogInfo($"{DEBUG_FLAG} Construct");
+            Log.Info($"{DEBUG_FLAG} Construct");
         }
 
         public void Dispose()
         {
-            CLogger.LogInfo($"{DEBUG_FLAG} Dispose");
+            Log.Info($"{DEBUG_FLAG} Dispose");
         }
 
         public void Start()
         {
-            CLogger.LogInfo($"{DEBUG_FLAG} Start");
+            Log.Info($"{DEBUG_FLAG} Start");
         }
     }
 }

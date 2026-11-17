@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CycloneGames.GameplayAbilities.Core;
+using CycloneGames.Logging;
 
 namespace CycloneGames.GameplayAbilities.Runtime
 {
@@ -10,12 +11,21 @@ namespace CycloneGames.GameplayAbilities.Runtime
     /// </summary>
     public class GameplayAttribute
     {
+        private static readonly LogChannel Log = GameplayAbilitiesLog.Channel;
+
         public string Name { get; }
         public AttributeSet OwningSet { get; internal set; }
         private long baseValueRaw;
         private long currentValueRaw;
+        private readonly GASCallbackList<Action<float, float>> currentValueObservers = new GASCallbackList<Action<float, float>>(2);
+        private readonly GASCallbackList<Action<float, float>> baseValueObservers = new GASCallbackList<Action<float, float>>(2);
         internal bool IsDirty;
+        internal bool OverflowReported;
         internal readonly List<ActiveGameplayEffect> AffectingEffects = new List<ActiveGameplayEffect>(8);
+        // Effects whose magnitude reads this attribute live (NotSnapshot). Allocated on first
+        // dependent only, so attributes nobody reads live pay nothing.
+        internal List<LiveDependencySlot> LiveDependents;
+        public int ActiveModifierSourceCount => AffectingEffects.Count;
 
         public long BaseValueRaw => baseValueRaw;
         public long CurrentValueRaw => currentValueRaw;
@@ -24,8 +34,33 @@ namespace CycloneGames.GameplayAbilities.Runtime
         public float BaseValue => BaseFixedValue.ToFloat();
         public float CurrentValue => CurrentFixedValue.ToFloat();
 
-        public event Action<float, float> OnCurrentValueChanged; // old, new
-        public event Action<float, float> OnBaseValueChanged; // old, new
+        public event Action<float, float> OnCurrentValueChanged
+        {
+            add
+            {
+                AssertObserverSubscriptionAccess(false);
+                currentValueObservers.Add(value);
+            }
+            remove
+            {
+                AssertObserverSubscriptionAccess(true);
+                currentValueObservers.RemoveLast(value);
+            }
+        }
+
+        public event Action<float, float> OnBaseValueChanged
+        {
+            add
+            {
+                AssertObserverSubscriptionAccess(false);
+                baseValueObservers.Add(value);
+            }
+            remove
+            {
+                AssertObserverSubscriptionAccess(true);
+                baseValueObservers.RemoveLast(value);
+            }
+        }
 
         public GameplayAttribute(string name)
         {
@@ -44,11 +79,22 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         public void SetBaseValueRaw(long valueRaw)
         {
+            if (OwningSet?.OwningAbilitySystemComponent != null)
+            {
+                OwningSet.SetBaseValueRaw(this, valueRaw);
+                return;
+            }
+
+            SetBaseValueRawUnchecked(valueRaw);
+        }
+
+        internal void SetBaseValueRawUnchecked(long valueRaw)
+        {
             long oldRaw = baseValueRaw;
             baseValueRaw = valueRaw;
             if (oldRaw != valueRaw)
             {
-                OnBaseValueChanged?.Invoke(GASFixedValue.FromRaw(oldRaw).ToFloat(), GASFixedValue.FromRaw(valueRaw).ToFloat());
+                InvokeValueObserversSafely(baseValueObservers, oldRaw, valueRaw, "OnBaseValueChanged");
             }
         }
 
@@ -64,12 +110,106 @@ namespace CycloneGames.GameplayAbilities.Runtime
 
         public void SetCurrentValueRaw(long valueRaw)
         {
+            if (OwningSet?.OwningAbilitySystemComponent != null)
+            {
+                OwningSet.SetCurrentValueRaw(this, valueRaw);
+                return;
+            }
+
+            SetCurrentValueRawUnchecked(valueRaw);
+        }
+
+        internal void SetCurrentValueRawUnchecked(long valueRaw)
+        {
             long oldRaw = currentValueRaw;
             currentValueRaw = valueRaw;
             if (oldRaw != valueRaw)
             {
-                OnCurrentValueChanged?.Invoke(GASFixedValue.FromRaw(oldRaw).ToFloat(), GASFixedValue.FromRaw(valueRaw).ToFloat());
+                InvokeValueObserversSafely(currentValueObservers, oldRaw, valueRaw, "OnCurrentValueChanged");
             }
+        }
+
+        private void InvokeValueObserversSafely(
+            GASCallbackList<Action<float, float>> observers,
+            long oldRaw,
+            long newRaw,
+            string observerName)
+        {
+            float oldValue = GASFixedValue.FromRaw(oldRaw).ToFloat();
+            float newValue = GASFixedValue.FromRaw(newRaw).ToFloat();
+            AbilitySystemComponent owner = OwningSet?.OwningAbilitySystemComponent;
+            owner?.EnterRuntimeCallbackDispatch();
+            bool callbackListDispatchStarted = false;
+            try
+            {
+                int count = observers.BeginDispatch();
+                callbackListDispatchStarted = true;
+                for (int i = 0; i < count; i++)
+                {
+                    Action<float, float> observer = observers.GetCallback(i);
+                    if (observer == null)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        observer.Invoke(oldValue, newValue);
+                    }
+                    catch (Exception exception)
+                    {
+                        Log.Error(exception, $"{observerName} observer failed after the attribute value was committed.");
+                    }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    if (callbackListDispatchStarted)
+                    {
+                        observers.EndDispatch();
+                    }
+                }
+                finally
+                {
+                    owner?.ExitRuntimeCallbackDispatch();
+                }
+            }
+        }
+
+        private void AssertObserverSubscriptionAccess(bool removal)
+        {
+            AbilitySystemComponent owner = OwningSet?.OwningAbilitySystemComponent;
+            if (owner == null)
+            {
+                return;
+            }
+
+            if (removal)
+            {
+                owner.AssertRuntimeSubscriptionRemovalAccess();
+            }
+            else
+            {
+                owner.AssertRuntimeSubscriptionAccess();
+            }
+        }
+    }
+
+    /// <summary>
+    /// One live attribute read: the effect and the modifier that reads
+    /// <see cref="GameplayAttribute.LiveDependents"/>'s owner.
+    /// </summary>
+    internal readonly struct LiveDependencySlot
+    {
+        internal readonly ActiveGameplayEffect Effect;
+        internal readonly int ModifierIndex;
+
+        internal LiveDependencySlot(ActiveGameplayEffect effect, int modifierIndex)
+        {
+            Effect = effect;
+            ModifierIndex = modifierIndex;
         }
     }
 }

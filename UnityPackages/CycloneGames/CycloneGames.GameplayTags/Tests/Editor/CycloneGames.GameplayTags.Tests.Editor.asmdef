@@ -2,13 +2,17 @@
     "name": "CycloneGames.GameplayTags.Tests.Editor",
     "rootNamespace": "CycloneGames.GameplayTags.Tests.Editor",
     "references": [
-        "CycloneGames.GameplayTags.Core"
+        "CycloneGames.GameplayTags.Core",
+        "CycloneGames.GameplayTags.Integrations.Logging",
+        "CycloneGames.GameplayTags.Unity.Runtime",
+        "CycloneGames.GameplayTags.Unity.Editor",
+        "CycloneGames.Logging.Core"
     ],
     "includePlatforms": [
         "Editor"
     ],
     "excludePlatforms": [],
-    "allowUnsafeCode": true,
+    "allowUnsafeCode": false,
     "overrideReferences": false,
     "precompiledReferences": [],
     "autoReferenced": false,
@@ -17,5 +21,5 @@
     "optionalUnityReferences": [
         "TestAssemblies"
     ],
-    "noEngineReferences": true
+    "noEngineReferences": false
 }

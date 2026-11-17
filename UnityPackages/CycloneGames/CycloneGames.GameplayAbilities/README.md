@@ -1,790 +1,359 @@
-> **Note:** This document was written with AI assistance. If you are looking for absolute accuracy, please read the source code directly. Both the **source code** and the **examples** were written by the author.
-
-[**English**] | [**简体中文**](README.SCH.md)
-
 # CycloneGames.GameplayAbilities
 
-A powerful, data-driven Gameplay Ability System (GAS) for Unity, inspired by Unreal Engine 5's GAS architecture.
+English | [简体中文](./README.SCH.md)
 
-Whether you are building an RPG, MOBA, action game, or any project with complex character abilities, buffs, and stats — this framework provides a production-ready, scalable foundation.
-
-<img src="./Documents~/DemoPreview_1.gif" alt="Demo Preview" style="width: 100%; max-width: 800px;" />
-
----
-
-## Key Features
-
-| Feature                    | Description                                                                                   |
-| -------------------------- | --------------------------------------------------------------------------------------------- |
-| **Data-Driven Abilities**  | Define abilities entirely in ScriptableObjects — designers iterate without code changes       |
-| **GameplayEffects**        | Instant / Duration / Infinite effects with stacking, periodic ticks, and overflow policies    |
-| **Tag-Based Architecture** | Decouple all logic through hierarchical GameplayTags — abilities, states, cooldowns, factions |
-| **Attribute System**       | Flexible character stats with validation hooks, derived attributes, and modifier aggregation  |
-| **AbilityTasks**           | 10+ built-in async tasks — delays, event waits, attribute watches, targeting, repeats         |
-| **Targeting System**       | Sphere overlap, line trace, cone trace, ground select — or write your own `ITargetActor`      |
-| **GameplayCues**           | VFX/SFX completely separated from gameplay logic — artists iterate independently              |
-| **Execution Calculations** | Complex multi-attribute damage formulas as reusable data assets                               |
-| **Object Pooling**         | Zero-GC runtime with three-tier adaptive pools, platform-aware sizing, and health monitoring  |
-| **Network-Ready**          | Transport-agnostic prediction keys and execution policies (Local / Server / Predicted)        |
-
----
+Modelled on Unreal Engine's Gameplay Ability System (GAS), CycloneGames.GameplayAbilities brings attribute-driven ability activation, tag-based state blocking, stacked gameplay effects, prediction bookkeeping, and cosmetic cues to Unity. If you've built with GAS before, you'll recognize the division between `AbilitySystemComponent`, `GameplayAbility`, `GameplayEffect`, `AttributeSet`, and `AbilityTask` — the core concepts map directly, but the implementation is built for Unity's ecosystem with a Unity-free state model that works in headless sims, CLI tests, and Dedicated Server builds.
 
 ## Table of Contents
 
-**I. Understanding GAS**
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Core Concepts](#core-concepts)
+- [Usage Guide](#usage-guide)
+- [Advanced Topics](#advanced-topics)
+- [Common Scenarios](#common-scenarios)
+- [Performance and Memory](#performance-and-memory)
+- [Troubleshooting](#troubleshooting)
 
-1. [Why GAS?](#1-why-gas) — The problem it solves
-2. [Mental Model](#2-mental-model) — Glossary and how pieces fit together
-3. [Architecture](#3-architecture) — System diagrams
+## Overview
 
-**II. Getting Started** 4. [Quick Start](#4-quick-start-build-a-heal-ability) — Build a Heal ability from scratch
+Every action-heavy game hits the same questions: can the player use this skill right now? What does it cost? How does it change character stats? When does the effect wear off? What blocks what? GAS answers these with a consistent pipeline — abilities check tags and attributes before activation, effects modify attributes over time, and everything leaves a prediction trail the authority can commit or roll back.
 
-**III. Core Systems** 5. [GameplayTags](#5-gameplaytags) — The universal language 6. [Attributes & AttributeSets](#6-attributes--attributesets) — Character stats 7. [GameplayEffects](#7-gameplayeffects) — Modifiers, duration, stacking 8. [GameplayAbilities](#8-gameplayabilities) — The ability lifecycle
+Use this package when gameplay actions need one or more of: reusable activation rules, costs, cooldowns, and cancellation; numeric attributes modified by instant, duration, infinite, or periodic effects; tag-driven state such as stun, immunity, or cooldown; stacking, dispel, and effect execution calculations; local prediction bookkeeping with explicit commit and rollback; cosmetic cues that live outside authoritative state; and reusable targeting tasks with bounded target counts.
 
-**IV. Advanced Systems** 9. [AbilityTasks](#9-abilitytasks) — Async ability logic 10. [Targeting System](#10-targeting-system) — Finding and selecting targets 11. [Execution Calculations](#11-execution-calculations) — Complex formulas 12. [GameplayCues](#12-gameplaycues) — VFX/SFX management 13. [Networking](#13-networking) — Prediction and replication
+Input, transport, save files, matchmaking, and animation live in their own modules — this framework handles the rules layer and only the rules layer.
 
-**V. Production** 14. [Object Pooling & Performance](#14-object-pooling--performance) — Zero-GC strategies 15. [Editor Tools & Debugging](#15-editor-tools--debugging) — Inspector, debugger window, runtime overlay 16. [Samples Walkthrough](#16-samples-walkthrough) — Fireball, Purify, Leveling 17. [FAQ & Troubleshooting](#17-faq--troubleshooting) 18. [Dependencies](#18-dependencies)
+## Architecture
 
----
+| Path | Responsibility |
+| --- | --- |
+| `Core/` | Unity-free fixed-point data, state/facade APIs, stable IDs, prediction records, registries, process-local reconciliation buffers, and authoritative activation results |
+| `Runtime/` | `AbilitySystemComponent`, abilities, effects, attributes, tasks, target data, cues, Unity authoring bridges, and runtime diagnostics |
+| `Editor/` | Inspectors, property drawers, debugger, trace window, and overlay configuration tooling |
+| `Runtime/Integrations/AssetManagement/` | Active adapter from `CycloneGames.AssetManagement` handles to the cue-facing `IResourceLocator` contract |
+| `Runtime/Integrations/DataTable/` | Optional UPM-gated DataTable adapters, isolated behind an integration assembly |
+| `Samples/` | Playable examples, authoring assets, target actors, manual composition, headless composition, and optional DI composition |
+| `Tests/Editor/` | Core hardening, deterministic behavior, attribute registration, lease/cache, Runtime contract, and integration tests |
+| `Tests/PlayMode/` | Runtime overlay registration, capacity, cleanup, and Unity lifecycle tests |
 
-# I. Understanding GAS
-
-## 1. Why GAS?
-
-### The Problem
-
-Ability systems in games tend to start simple — a `UseFireball()` method, a few boolean flags — but quickly grow into unmanageable complexity:
-
-| Stage       | What Happens                                                                  | The Pain                                                                         |
-| ----------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| **Early**   | `PlayerController.UseFireball()` hard-coded                                   | Works for 1 character, but enemies need the same skill → copy-paste              |
-| **Growing** | A monolithic `SkillManager` with `isStunned`, `isPoisoned`, `isBurning` flags | Fragile state machine; every new interaction adds exponential `if/else` branches |
-| **Late**    | Designers can't tweak `damage = 10` without touching C# code                  | Iteration speed drops; bugs from mixing data and logic in one file               |
-
-This trajectory is unsustainable. The number of potential interactions between N skills and M status effects grows as O(N×M), creating the classic "spaghetti code" problem.
-
-### The GAS Solution
-
-GAS solves this by treating abilities and effects as **data**, not functions:
-
-- **Abilities are data assets** — a `ScriptableObject` defines what an ability is (cost, cooldown, tags, effects). Your character merely "has" an ability identified by a tag.
-- **Status effects are data objects** — a character is not `isPoisoned`; instead it has an active instance of a "Poison" `GameplayEffect` that carries its own duration, periodic tick, tag grants, and stacking rules. The system manages its lifecycle automatically.
-- **Tags replace booleans** — instead of `if (isCasting && !isStunned)`, the system asks "does the owner have `State.Casting`?" and "does the owner lack `State.Stunned`?". Tags are hierarchical, queryable, and entirely data-driven.
-
-### Comparison
-
-| Aspect                  | Traditional System                 | GAS                                                 |
-| ----------------------- | ---------------------------------- | --------------------------------------------------- |
-| **Architecture**        | Monolithic `SkillManager`          | Decoupled `AbilitySystemComponent` + data assets    |
-| **Data & Logic**        | Mixed in one C# file               | Strictly separated — SO for data, class for logic   |
-| **State Management**    | Boolean flags + manual timers      | Self-managing `GameplayEffect` instances            |
-| **Extensibility**       | Modify core classes to add content | Add new SO assets — zero existing code changes      |
-| **Reusability**         | Player-specific code               | Same ability asset works on Player, AI, or a barrel |
-| **Interaction Scaling** | O(N×M) if/else branches            | O(1) tag lookups                                    |
-
----
-
-## 2. Mental Model
-
-If you have never used Unreal Engine's GAS, this section maps every key concept so you can build a clear mental picture before reading any code.
-
-### Glossary
-
-| Concept                          | What It Is                                                                                                           | Analogy                                |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| **AbilitySystemComponent (ASC)** | The central manager on each actor. Owns abilities, effects, attributes, and tags.                                    | The actor's "ability brain"            |
-| **GameplayAbility**              | A discrete action an actor can perform (attack, heal, dash). Contains activation logic.                              | A "skill card" in the actor's hand     |
-| **GameplayAbilitySO**            | ScriptableObject that defines an ability's data (name, tags, cost, cooldown). Creates the runtime `GameplayAbility`. | The "card template" designers edit     |
-| **GameplayAbilitySpec**          | Runtime wrapper that tracks a granted ability's state (level, active status).                                        | The actor's "equipped card slot"       |
-| **GameplayEffect**               | Immutable definition of something that happens to an actor — modifies attributes, grants tags, ticks periodically.   | A "recipe" written on a card           |
-| **GameplayEffectSO**             | ScriptableObject for designers to configure a GameplayEffect in the Inspector.                                       | The "recipe card template"             |
-| **GameplayEffectSpec**           | A stamped-out, mutable instance of a GameplayEffect carrying context (source, level, SetByCaller values).            | A filled-out "recipe order"            |
-| **ActiveGameplayEffect**         | A GameplayEffectSpec that is currently applied to an ASC — tracks time remaining, stack count, inhibition.           | The "recipe cooking on the stove"      |
-| **GameplayAttribute**            | A single numeric stat (Health, Mana, AttackPower). Floats modified by GameplayEffects.                               | One line on a character sheet          |
-| **AttributeSet**                 | A grouped collection of related GameplayAttributes with validation hooks.                                            | A page on the character sheet          |
-| **GameplayTag**                  | A hierarchical string identifier (`Ability.Skill.Fireball`, `Status.Debuff.Poison`).                                 | A sticky label                         |
-| **GameplayTagContainer**         | A set of GameplayTags, used for queries (`HasTag`, `HasAll`, `HasAny`).                                              | A collection of sticky labels          |
-| **AbilityTask**                  | An async operation inside an ability — wait for time, wait for input, watch for tag changes.                         | A "step" in a recipe                   |
-| **ITargetActor**                 | An object that performs spatial queries (sphere overlap, raycast) to find targets.                                   | A "radar scanner"                      |
-| **TargetData**                   | The result of a targeting query — contains hit actors and physics info.                                              | The "scan results"                     |
-| **GameplayCue**                  | A VFX/SFX triggered by tag, completely decoupled from gameplay logic.                                                | A "special effect sticker" on a recipe |
-| **ExecutionCalculation**         | A code class that computes complex multi-attribute formulas (damage = ATK × 1.5 − DEF × 0.5).                        | A "calculator subroutine"              |
-
-### How the Pieces Fit Together
+The assembly dependency direction is:
 
 ```mermaid
 flowchart LR
-    subgraph Designer["🎨 Designer Creates"]
-        direction TB
-        AbilitySO["GameplayAbilitySO"]
-        EffectSO["GameplayEffectSO"]
-        EffectDef["GameplayEffect<br/>(immutable definition)"]
-        AbilitySO -->|references| EffectSO
-        EffectSO -->|creates| EffectDef
-    end
+    Tags["CycloneGames.GameplayTags.Core"]
+    Math["CycloneGames.DeterministicMath.Core"]
+    Hash["CycloneGames.Hash.Core"]
+    Core["GameplayAbilities.Core<br/>noEngineReferences"]
+    Asset["CycloneGames.AssetManagement.Runtime"]
+    AssetIntegration["GameplayAbilities.Runtime.Integrations.AssetManagement"]
+    DataTableCore["CycloneGames.DataTable.Core"]
+    UniTask["UniTask"]
+    Logging["CycloneGames.Logging.Core assembly<br/>CycloneGames.Logging API"]
+    Runtime["GameplayAbilities.Runtime"]
+    Editor["GameplayAbilities.Editor<br/>Editor only"]
+    DataTable["GameplayAbilities.Runtime.Integrations.DataTable<br/>conditional UPM integration"]
+    Samples["GameplayAbilities.Sample"]
+    Tests["GameplayAbilities.Tests.Editor"]
+    PlayTests["GameplayAbilities.Tests.PlayMode"]
 
-    subgraph Runtime["⚙️ Runtime Flow"]
-        direction TB
-        Ability["GameplayAbility"]
-        Activate["ActivateAbility()"]
-        Commit["CommitAbility()"]
-        CostCD["Apply Cost + Cooldown"]
-        Spec["GameplayEffectSpec"]
-        Apply["ASC.ApplySpecToSelf()"]
-        ActiveGE["ActiveGameplayEffect"]
-        Ability --> Activate --> Commit --> CostCD
-        CostCD --> Spec --> Apply --> ActiveGE
-    end
-
-    subgraph Result["📊 Result"]
-        direction TB
-        ModAttr["Modify Attributes"]
-        GrantTag["Grant Tags"]
-        TrigCue["Trigger GameplayCues"]
-    end
-
-    AbilitySO -->|"CreateAbility()"| Ability
-    EffectDef -->|"Spec.Create()"| Spec
-    ActiveGE --> ModAttr
-    ActiveGE --> GrantTag
-    ActiveGE --> TrigCue
+    Tags --> Core
+    Math --> Core
+    Hash --> Core
+    Core --> Runtime
+    Tags --> Runtime
+    Hash --> Runtime
+    UniTask --> Runtime
+    Logging --> Runtime
+    Logging --> AssetIntegration
+    Logging --> Editor
+    Logging --> Samples
+    Logging --> Tests
+    Asset --> AssetIntegration
+    UniTask --> AssetIntegration
+    Runtime --> AssetIntegration
+    DataTableCore --> DataTable
+    Core --> DataTable
+    Runtime --> Editor
+    Runtime --> Samples
+    Asset --> Samples
+    AssetIntegration --> Samples
+    Core --> Tests
+    Runtime --> Tests
+    Runtime --> PlayTests
+    Runtime --> DataTable
 ```
 
----
+`CycloneGames.GameplayAbilities.Core` has `noEngineReferences: true` and does not expose `UnityEngine` types. `CycloneGames.GameplayAbilities.Runtime` is the Unity adapter and authoring layer. Runtime code must not be moved into Core merely to share an implementation.
 
-## 3. Architecture
+`AbilitySpecContainer`, `PredictionManager`, and `ReplicationStateBuilder` are internal Runtime assembly implementation types. Public consumers use the `AbilitySystemComponent` facade, stable `GASReadOnlyListView<T>`, `GASReadOnlySetView<T>`, and `GASReadOnlyTagView` instances, query methods, and diagnostics; they do not receive mutable container or builder access. These internal types are not extension points. Consolidating mutation authority in the ASC narrows the public API and long-term compatibility surface.
 
-### System Architecture Overview
+The package metadata declares its direct package requirements. In an `Assets/ThirdParty` checkout, `package.json` is descriptive metadata; Unity compilation is determined by the actual asmdef graph, installed packages, constraints, and symbols. The main Runtime assembly directly references the backend-neutral `CycloneGames.Logging.Core` contract assembly but does not reference AssetManagement, DataTable, or a concrete logging backend; optional feature dependencies terminate in their integration assemblies.
 
-```mermaid
-flowchart TB
-    subgraph Data["📦 Data Assets (ScriptableObjects)"]
-        GAbilitySO["GameplayAbilitySO<br/>― ability definition"]
-        GEffectSO["GameplayEffectSO<br/>― effect definition"]
-        GCueSO["GameplayCueSO<br/>― VFX/SFX definition"]
-        ExecCalcSO["ExecutionCalculationSO<br/>― formula definition"]
-    end
+### Logging contract and backend integration
 
-    subgraph Runtime["⚙️ Runtime Core"]
-        ASC["AbilitySystemComponent<br/>― central manager"]
-        AttrSet["AttributeSet<br/>― stats container"]
-        GAbility["GameplayAbility<br/>― skill logic"]
-        GEffect["GameplayEffect<br/>― immutable definition"]
-    end
+Runtime, Editor, Samples, the AssetManagement integration, and focused logging tests use `CycloneGames.Logging.LogChannel` with the stable category `CycloneGames.GameplayAbilities`. Each diagnostic-producing assembly owns a uniquely named facade under `Diagnostics/`: `GameplayAbilitiesLog`, `GameplayAbilitiesEditorLog`, `GameplayAbilitiesAssetManagementLog`, `GameplayAbilitiesSampleLog`, or `GameplayAbilitiesSampleEditorLog`. Every facade exposes the standard `Category`, `Channel`, and `Create(ILogWriter logWriter)` members; implementation files use `Log` for ambient static fields and `_log` for explicitly injected instance fields. Gameplay code does not call `LogChannel.Create`, direct platform logging APIs, or concrete pipeline APIs outside those boundaries. Exceptions use the same severity methods as messages, for example `Log.Warning(exception, message)` or `Log.Error(exception, message)`, so a backend receives the exception separately from its contextual message.
 
-    subgraph Active["🔄 Active Instances (Pooled)"]
-        GSpec["GameplayAbilitySpec"]
-        GESpec["GameplayEffectSpec"]
-        ActiveGE["ActiveGameplayEffect"]
-    end
+`LogRuntime` starts with `NullLogWriter.Instance`. When a host installs no backend, every channel call is a safe no-op; GameplayAbilities initialization and behavior do not change, and no scripting define is required. A product may install any `ILogWriter` at its composition root. The optional standard backend is split between `com.cyclone-games.logging.pipeline`, which provides `LogPipeline`, and `com.cyclone-games.logging.unity`, which owns Unity bootstrap, settings, and Console integration. GameplayAbilities has no assembly or package dependency on either backend package.
 
-    subgraph Async["⏱️ Async Systems"]
-        Task["AbilityTask"]
-        Target["ITargetActor"]
-    end
-
-    subgraph Cue["🎨 Presentation Layer"]
-        CueMgr["GameplayCueManager"]
-    end
-
-    GAbilitySO -->|"CreateAbility()"| GAbility
-    GEffectSO -->|"GetGameplayEffect()"| GEffect
-    ExecCalcSO -->|"CreateExecutionCalculation()"| GEffect
-
-    ASC -->|owns| AttrSet
-    ASC -->|manages| GSpec
-    ASC -->|tracks| ActiveGE
-
-    GSpec -->|wraps| GAbility
-    GAbility -->|spawns| Task
-    Task -->|uses| Target
-
-    GEffect -->|"Spec.Create()"| GESpec
-    GESpec -->|"ApplyToSelf()"| ActiveGE
-    ActiveGE -->|modifies| AttrSet
-    ActiveGE -->|triggers| CueMgr
-
-    GCueSO -.->|registered in| CueMgr
-```
-
-### GameplayEffect Lifecycle
-
-```mermaid
-flowchart LR
-    subgraph Def["Definition"]
-        SO["GameplayEffectSO<br/>📋 Data Asset"]
-        GE["GameplayEffect<br/>📝 Immutable Template"]
-    end
-
-    subgraph Inst["Instantiation"]
-        Spec["GameplayEffectSpec<br/>📦 Pooled Instance<br/>• Source ASC<br/>• Level / SetByCaller<br/>• Dynamic Tags"]
-    end
-
-    subgraph Apply["Application"]
-        Active["ActiveGameplayEffect<br/>⏱️ On Target ASC<br/>• TimeRemaining<br/>• StackCount<br/>• IsInhibited"]
-    end
-
-    subgraph Exec["Execution"]
-        Instant["Instant ✅"]
-        Duration["HasDuration ⏳"]
-        Infinite["Infinite ♾️"]
-    end
-
-    SO -->|"CreateGameplayEffect()"| GE
-    GE -->|"GameplayEffectSpec.Create()"| Spec
-    Spec -->|"ASC.ApplySpecToSelf()"| Active
-
-    Active --> Instant
-    Active --> Duration
-    Active --> Infinite
-
-    Duration -->|"Expired"| Pool["🔄 Pool"]
-    Infinite -->|"Manually Removed"| Pool
-    Spec -->|"After Use"| Pool
-```
-
-### Ability Execution Flow
-
-```mermaid
-flowchart TB
-    subgraph Input["1️⃣ Input"]
-        Trigger["Player Input / AI Decision / Tag Trigger"]
-    end
-
-    subgraph Check["2️⃣ Activation Check"]
-        Try["TryActivateAbility()"]
-        Tags["Tag Check<br/>ActivationRequiredTags ✓<br/>ActivationBlockedTags ✗<br/>Source/Target Tags"]
-        Cost["CheckCost()"]
-        CD["CheckCooldown()"]
-    end
-
-    subgraph Run["3️⃣ Execution"]
-        Activate["ActivateAbility()"]
-        Tasks["AbilityTasks<br/>WaitDelay / WaitTargetData<br/>WaitGameplayEvent / ..."]
-        Commit["CommitAbility()<br/>Apply Cost + Cooldown"]
-    end
-
-    subgraph Effects["4️⃣ Effects"]
-        ApplyGE["Apply GameplayEffects"]
-        Cues["Trigger GameplayCues"]
-    end
-
-    subgraph End["5️⃣ Cleanup"]
-        EndAbility["EndAbility()"]
-        ReturnPool["Return to Pool"]
-    end
-
-    Trigger --> Try
-    Try --> Tags
-    Tags -->|Pass| Cost
-    Tags -->|Fail| Blocked["❌ Blocked"]
-    Cost -->|Pass| CD
-    Cost -->|Fail| NoCost["❌ Insufficient Resource"]
-    CD -->|Pass| Activate
-    CD -->|Fail| OnCD["❌ On Cooldown"]
-
-    Activate --> Tasks
-    Tasks --> Commit
-    Commit --> ApplyGE
-    ApplyGE --> Cues
-    Cues --> EndAbility
-    EndAbility --> ReturnPool
-```
-
----
-
-# II. Getting Started
-
-## 4. Quick Start: Build a Heal Ability
-
-This step-by-step tutorial creates a fully functional Heal ability from scratch. By the end you will understand all core concepts.
-
-### The Simplest GAS Flow (No Abilities Needed)
-
-Before building a full ability, understand the absolute minimum data flow. You can modify attributes with **just an ASC, an AttributeSet, and a GameplayEffect** — no ability required:
+GameplayAbilities exposes no package-specific public logging facade. External production assemblies should use their own assembly-local facade and cache its channel:
 
 ```csharp
-// 1. Get the ASC
-var asc = GetComponent<AbilitySystemComponentHolder>().AbilitySystemComponent;
-asc.InitAbilityActorInfo(this, gameObject);
+private static readonly LogChannel Log = ProductAbilityLog.Channel;
 
-// 2. Add attributes
-var attrs = new PlayerAttributeSet();
-asc.AddAttributeSet(attrs);
-
-// 3. Create an effect and apply it — done!
-var healEffect = new GameplayEffect("Heal", EDurationPolicy.Instant, 0, 0,
-    new() { new ModifierInfo(attrs.Health, EAttributeModifierOperation.Add, 25f) });
-asc.ApplyGameplayEffectSpecToSelf(GameplayEffectSpec.Create(healEffect, asc));
-// Health is now +25. That's it — 3 lines of real logic.
+Log.Warning("Ability activation was rejected.");
+Log.Error(exception, "Ability activation failed.");
 ```
 
-```mermaid
-flowchart LR
-    A["ASC + AttributeSet"] -->|"GameplayEffectSpec.Create()"| B["GameplayEffectSpec"]
-    B -->|"ApplySpecToSelf()"| C["Health += 25"]
-```
+Consumers may remove a concrete logging backend without changing GameplayAbilities asmdefs; logging naturally returns to the no-op writer.
 
-**GameplayAbilities add structure on top of this flow** — activation checks, cost/cooldown, async tasks, targeting — but the core data path is always: **Effect → Spec → Apply → Attribute changes**.
+## Runtime model
 
-### Prerequisites
+The main types follow a GAS-style division of responsibility:
 
-- Unity 2021.3+
-- `CycloneGames.GameplayAbilities` package installed
-- Dependencies installed: `GameplayTags`, `Logger`, `AssetManagement`, `Factory`
+| Type | Responsibility |
+| --- | --- |
+| `GASRuntimeContext` | Composition root and owner of authority/replica role, services, registries, entity IDs, thread policy, one-shot runtime lease accounting, and bounded internal backing storage for one simulation world or partition |
+| `AbilitySystemComponent` (ASC) | Stable facade for one gameplay entity: granted abilities, active effects, attributes, tags, prediction, replication state, and events |
+| `AttributeSet` | Explicitly registered attributes and attribute-specific validation or post-processing |
+| `GameplayAbility` | Once-initialized immutable definition configuration plus executable runtime behavior on owned instances |
+| `GameplayAbilitySpec` | ASC-local granted state: handle, level, active state, template, instance, and granting effect |
+| `GameplayEffect` | Immutable reusable runtime definition for modifiers, duration, tags, stacking, requirements, cues, and granted abilities |
+| `GameplayEffectSpec` | Leased per-application data: source, target, level, calculated magnitudes, context, prediction key, SetByCaller values, and dynamic tags |
+| `ActiveGameplayEffect` | A duration or infinite effect owned by the target ASC |
+| `AbilityTask` | Ability-owned asynchronous or multi-frame work |
+| `TargetData` | Callback-scoped or explicitly transferred one-shot target payload with prediction metadata |
+| `IGameplayCueManager` | Presentation boundary for cosmetic cues |
+| `GASRuntimeAuthorityMode` | Immutable `Authority` or `Replica` role selected when the runtime context is constructed |
+| `GASAuthorityActivationResult` | Allocation-free terminal decision returned by the authority-owned `TryExecuteAuthorityAbility` boundary |
 
-### Step 1 — Create an AttributeSet
-
-An `AttributeSet` holds character stats. Every attribute is a `GameplayAttribute` — a named float that effects can modify.
+An ASC is a plain C# object, not a `MonoBehaviour`. A project component may own it and forward Unity lifecycle events:
 
 ```csharp
-using CycloneGames.GameplayAbilities.Runtime;
-using UnityEngine;
-
-public class PlayerAttributeSet : AttributeSet
+public sealed class AbilitySystemHost : MonoBehaviour
 {
-    public readonly GameplayAttribute Health    = new("Player.Attribute.Health");
-    public readonly GameplayAttribute MaxHealth = new("Player.Attribute.MaxHealth");
-    public readonly GameplayAttribute Mana      = new("Player.Attribute.Mana");
-    public readonly GameplayAttribute MaxMana   = new("Player.Attribute.MaxMana");
+    public AbilitySystemComponent ASC { get; private set; }
 
-    // Called BEFORE a value changes — use for clamping
-    public override void PreAttributeChange(GameplayAttribute attribute, ref float newValue)
+    private void Awake()
     {
-        if (attribute.Name == Health.Name)
-            newValue = Mathf.Clamp(newValue, 0, GetCurrentValue(MaxHealth));
-        if (attribute.Name == Mana.Name)
-            newValue = Mathf.Clamp(newValue, 0, GetCurrentValue(MaxMana));
+        ASC = new AbilitySystemComponent();
+        ASC.InitAbilityActorInfo(this, gameObject);
     }
 
-    // Called AFTER a value changes — use for side effects
-    public override void PostAttributeChange(GameplayAttribute attribute, float oldValue, float newValue)
+    private void Update()
     {
-        if (attribute.Name == Health.Name && newValue <= 0 && oldValue > 0)
-            Debug.Log("Character died!");
+        ASC.Tick(Time.deltaTime, isServer: true);
+    }
+
+    private void OnDestroy()
+    {
+        ASC?.Dispose();
     }
 }
 ```
 
-### Step 2 — Set Up the Character
+The parameterless constructor owns a private authoritative `GASRuntimeContext`. It is convenient for isolated actors, offline play, and tests. Interacting actors should normally share one explicit context so they share role, context-local IDs, registries, process-local reconciliation references, cues, and memory policy. Applying an effect across different contexts is rejected. A remote replica must use an explicitly constructed context with `GASRuntimeAuthorityMode.Replica`.
+
+### Core state modes
+
+`GASAbilitySystemRuntimeOptions` selects how an ASC uses the Unity-free state model:
+
+- `RuntimeOnly` is the default. It omits the mirror when a project does not consume Core state, reducing duplicate state and synchronization work.
+- `MirrorRuntime` must be selected explicitly. Runtime remains authoritative while locally generated ability, attribute, effect, and modifier changes are mirrored into `GASAbilitySystemState` for Core diagnostics and state checksums.
+
+Select the state mode at composition time. Do not switch state ownership between models during a session. The current verification set does not establish complete synchronization of a process-local `GASAbilitySystemStateDeltaBuffer` application into the Core mirror. Do not rely on `MirrorRuntime` as proof that a reconciled receiver's Core state remains complete without project-specific parity tests.
+
+## Composition and lifetime
+
+### Explicit construction without DI
+
+Create one context for a gameplay world, inject it into every participating ASC, and dispose in reverse ownership order:
 
 ```csharp
-using CycloneGames.GameplayAbilities.Runtime;
-using UnityEngine;
+var cacheProfile = new GASRuntimeCacheProfile(
+    effectSpecBackingCapacity: 128);
 
-[RequireComponent(typeof(AbilitySystemComponentHolder))]
-public class PlayerCharacter : MonoBehaviour
-{
-    [SerializeField] private GameplayAbilitySO healAbilitySO;
+var limits = new GASRuntimeLimits(
+    maxAttributeSets: 32,
+    maxAttributes: 512,
+    maxGrantedAbilities: 256,
+    maxActiveEffects: 1024,
+    maxPredictionWindows: 128,
+    maxTargetsPerTargetData: 128,
+    maxPeriodicEffectExecutionsPerTick: 8,
+    maxAbilityTaskRepeatExecutionsPerTick: 8);
 
-    private AbilitySystemComponentHolder ascHolder;
-    private PlayerAttributeSet attributes;
+var options = new GASAbilitySystemRuntimeOptions(
+    coreStateMode: GASCoreStateMode.RuntimeOnly,
+    limits: limits);
 
-    void Awake()
-    {
-        ascHolder = GetComponent<AbilitySystemComponentHolder>();
-    }
+var context = new GASRuntimeContext(
+    authorityMode: GASRuntimeAuthorityMode.Authority,
+    threadPolicy: GASRuntimeThreadPolicy.Throw,
+    cacheProfile: cacheProfile);
 
-    void Start()
-    {
-        var asc = ascHolder.AbilitySystemComponent;
+var playerASC = new AbilitySystemComponent(context, options);
+var enemyASC = new AbilitySystemComponent(context, options);
 
-        // 1. Initialize actor info (required before any ASC operation)
-        asc.InitAbilityActorInfo(this, gameObject);
+// During shutdown:
+enemyASC.Dispose();
+playerASC.Dispose();
+context.Dispose();
+```
 
-        // 2. Add attributes
-        attributes = new PlayerAttributeSet();
-        asc.AddAttributeSet(attributes);
+`GASRuntimeCacheProfile` controls only the bounded internal backing cache used by `GameplayEffectSpec`; it never retains a public runtime object. `GASRuntimeLimits` controls hard gameplay and payload bounds. They solve different problems and should be configured separately. `cacheProfile` is the optional final `GASRuntimeContext` constructor parameter; `null` selects `GASRuntimeCacheProfile.Default`, which retains at most `64` backing records. An explicit capacity may be `0..4096`.
 
-        // 3. Set initial values via an Instant effect
-        var initEffect = new GameplayEffect("GE_Init", EDurationPolicy.Instant, 0, 0,
-            new() {
-                new ModifierInfo(attributes.MaxHealth, EAttributeModifierOperation.Override, 100),
-                new ModifierInfo(attributes.Health,    EAttributeModifierOperation.Override, 100),
-                new ModifierInfo(attributes.MaxMana,   EAttributeModifierOperation.Override, 50),
-                new ModifierInfo(attributes.Mana,      EAttributeModifierOperation.Override, 50),
-            });
-        asc.ApplyGameplayEffectSpecToSelf(GameplayEffectSpec.Create(initEffect, asc));
+### GameplayCue composition
 
-        // 4. Grant abilities
-        if (healAbilitySO != null)
-            asc.GrantAbility(healAbilitySO.CreateAbility());
-    }
+A visual client can initialize a `GameplayCueManager` with an explicit GameObject pool policy and inject it into the context:
 
-    void Update()
-    {
-        if (Input.GetKeyDown(KeyCode.H))
+```csharp
+var cuePoolConfig = new GameObjectPoolManager.PoolConfig(
+    maxAssetPools: 128,
+    maxActiveLeases: 2048,
+    maxActiveLeasesPerPool: 256,
+    maxRetainedInstancesPerPool: 128,
+    minRetainedInstancesPerPool: 0,
+    idleExpirationTime: 60f,
+    maxTotalRetainedInstances: 1024);
+
+IResourceLocator cueResources =
+    new AssetManagementResourceLocator(assetPackage);
+
+var cueManager = new GameplayCueManager(cuePoolConfig);
+cueManager.Initialize(cueResources);
+
+var context = new GASRuntimeContext(cueManager: cueManager);
+```
+
+The `AssetManagementResourceLocator` type belongs to `CycloneGames.GameplayAbilities.Runtime.Integrations.AssetManagement`; the main Runtime assembly knows only `IResourceLocator`. A project using another asset system supplies another adapter. The concrete resource boundary is `GameplayCueManager.Initialize(IResourceLocator)`; the Core `IGameplayCueManager` contract does not expose `Initialize`. The caller owns injected services. Dispose every ASC, then the context, then `GameplayCueManager`. A headless process should inject `NullGameplayCueManager.Instance` and avoid loading visual assets.
+
+### DI composition
+
+No runtime type depends on a DI container. Register concrete instances in the project composition root:
+
+```csharp
+builder.Register<IResourceLocator>(
+    _ => new AssetManagementResourceLocator(assetPackage),
+    Lifetime.Singleton);
+
+builder.Register(
+        resolver =>
         {
-            var asc = ascHolder.AbilitySystemComponent;
-            foreach (var spec in asc.GetActivatableAbilities())
-            {
-                if (spec.Ability.AbilityTags.HasTag("Ability.Action.Heal"))
-                {
-                    asc.TryActivateAbility(spec);
-                    break;
-                }
-            }
+            var manager = new GameplayCueManager(cuePoolConfig);
+            manager.Initialize(resolver.Resolve<IResourceLocator>());
+            return manager;
+        },
+        Lifetime.Singleton)
+    .As<GameplayCueManager>();
+
+    builder.Register(
+        resolver => new GASRuntimeContext(
+            authorityMode: GASRuntimeAuthorityMode.Authority,
+            cueManager: resolver.Resolve<GameplayCueManager>(),
+            cacheProfile: cacheProfile),
+        Lifetime.Singleton)
+    .As<GASRuntimeContext>();
+```
+
+Container disposal must preserve the same order: ASC owners first, then context, then injected services. `GASRuntimeContext.Dispose()` refuses to run while ASCs remain registered.
+
+Construct a separate `Replica` context for remote replicated state. Authority and replica instances must not share one mutable context, and the role cannot change during that context's lifetime. Network sessions, transports, connection state, and endpoint lifetimes belong to product composition, not to `GASRuntimeContext`.
+
+## Tutorial: a complete minimal ability
+
+This example creates a health attribute, a reusable healing effect, an ability, and one ASC without any scene dependency.
+
+### 1. Define an AttributeSet
+
+Attribute registration is explicit. It does not scan properties with reflection.
+
+```csharp
+using CycloneGames.GameplayAbilities.Core;
+using CycloneGames.GameplayAbilities.Runtime;
+
+public sealed class CombatAttributes : AttributeSet
+{
+    public GameplayAttribute Health { get; } =
+        new GameplayAttribute("Attribute.Vital.Health");
+
+    public GameplayAttribute MaxHealth { get; } =
+        new GameplayAttribute("Attribute.Vital.MaxHealth");
+
+    protected override void RegisterAttributes()
+    {
+        RegisterAttribute(Health);
+        RegisterAttribute(MaxHealth);
+    }
+
+    public override void PreAttributeChange(
+        GameplayAttribute attribute,
+        ref GASFixedValue newValue)
+    {
+        if (attribute == Health)
+        {
+            newValue = GASFixedValue.Clamp(
+                newValue,
+                GASFixedValue.Zero,
+                MaxHealth.CurrentFixedValue);
         }
     }
 }
 ```
 
-### Step 3 — Create the Ability (Runtime Logic)
+Every attribute name must be non-empty and unique inside the set. Add the set before an effect or ability attempts to resolve its attributes.
+
+`GameplayAttribute.ActiveModifierSourceCount` is a diagnostic count of active modifier contributors. `RemoveAttributeSet` rejects detachment while an attribute is referenced by an active effect or an open prediction snapshot; use the count together with active-effect and prediction diagnostics when investigating a rejected detach. The count is observability data, not an authority or synchronization primitive.
+
+### 2. Define an effect
+
+Runtime definitions are reusable and should be treated as immutable after construction:
+
+```csharp
+using System.Collections.Generic;
+using CycloneGames.GameplayAbilities.Runtime;
+
+var healEffect = new GameplayEffect(
+    name: "GE_Heal",
+    durationPolicy: EDurationPolicy.Instant,
+    modifiers: new List<ModifierInfo>
+    {
+        new ModifierInfo(
+            "Attribute.Vital.Health",
+            EAttributeModifierOperation.Add,
+            new ScalableFloat(baseValue: 25f, scalingFactorPerLevel: 5f))
+    });
+```
+
+`Instant` effects execute immediately. `HasDuration` effects become active for a positive duration. `Infinite` effects remain until explicitly removed. An instant effect cannot have a period.
+
+### 3. Implement an ability
+
+`CommitAbility` performs the cost/cooldown preflight and returns a structured result. Stop gameplay execution when commit fails.
 
 ```csharp
 using CycloneGames.GameplayAbilities.Runtime;
+using CycloneGames.GameplayTags.Core;
 
-public class HealAbility : GameplayAbility
+public sealed class HealAbility : GameplayAbility
 {
-    public override void ActivateAbility(
-        GameplayAbilityActorInfo actorInfo,
-        GameplayAbilitySpec spec,
-        GameplayAbilityActivationInfo activationInfo)
+    private readonly GameplayEffect healEffect;
+
+    public HealAbility(GameplayEffect healEffect)
     {
-        // CommitAbility applies cost, cooldown, and commit effects
-        CommitAbility(actorInfo, spec);
-        EndAbility();
-    }
-
-    public override GameplayAbility CreatePoolableInstance() => new HealAbility();
-}
-```
-
-### Step 4 — Create the Ability (ScriptableObject)
-
-```csharp
-using UnityEngine;
-using CycloneGames.GameplayAbilities.Runtime;
-
-[CreateAssetMenu(fileName = "GA_Heal", menuName = "GAS/Abilities/Heal")]
-public class HealAbilitySO : GameplayAbilitySO
-{
-    public override GameplayAbility CreateAbility()
-    {
-        var ability = new HealAbility();
-        InitializeAbility(ability); // Copies all Inspector data to the runtime instance
-        return ability;
-    }
-}
-```
-
-### Step 5 — Create GameplayEffect Assets
-
-In the Unity Editor, create three `GameplayEffectSO` assets:
-
-| Asset Name         | Duration Policy  | Modifiers  | Granted Tags          |
-| ------------------ | ---------------- | ---------- | --------------------- |
-| `GE_Heal`          | Instant          | Health +25 | —                     |
-| `GE_Heal_Cost`     | Instant          | Mana −10   | —                     |
-| `GE_Heal_Cooldown` | HasDuration (5s) | —          | `Cooldown.Skill.Heal` |
-
-### Step 6 — Configure the Ability Asset
-
-Create a `GA_Heal` asset and configure in Inspector:
-
-- **Ability Tags**: `Ability.Action.Heal`
-- **Cost Effect**: `GE_Heal_Cost`
-- **Cooldown Effect**: `GE_Heal_Cooldown`
-- **Commit Gameplay Effects**: `GE_Heal`
-
-### Step 7 — Wire Up in Scene
-
-1. Create a GameObject with `AbilitySystemComponentHolder` + your `PlayerCharacter` component
-2. Drag `GA_Heal` into the `healAbilitySO` field
-3. Press Play, press **H** — the character heals, spends mana, and enters cooldown
-
----
-
-# III. Core Systems
-
-## 5. GameplayTags
-
-GameplayTags are the **universal language** of GAS. Every interaction — activation rules, immunities, cooldowns, targeting filters — is expressed through tags rather than direct code references.
-
-### Tag Conventions
-
-```
-Ability.Skill.Fireball          ← identifies an ability
-Ability.Passive.Regeneration    ← passive ability
-Cooldown.Skill.Fireball         ← applied during cooldown
-Status.Debuff.Poison            ← status effect
-Status.Buff.Shield              ← buff
-State.Casting                   ← transient state
-State.Dead                      ← permanent state
-Damage.Type.Fire                ← damage classification
-Faction.Player                  ← faction membership
-GameplayCue.Impact.Fireball     ← VFX/SFX trigger
-Event.Character.LeveledUp       ← gameplay event
-```
-
-### Using Tags
-
-```csharp
-// Check if character has a tag
-if (asc.CombinedTags.HasTag("Status.Debuff.Poison"))
-{
-    // Character is poisoned
-}
-
-// Remove all poison effects by their granted tag
-var poisonTag = GameplayTagContainer.FromTag("Status.Debuff.Poison");
-targetASC.RemoveActiveEffectsWithGrantedTags(poisonTag);
-```
-
-### Tag Containers on Different Objects
-
-| Container                         | Where           | Purpose                                                               |
-| --------------------------------- | --------------- | --------------------------------------------------------------------- |
-| **AbilityTags**                   | GameplayAbility | Identifies the ability (`Ability.Skill.Fireball`)                     |
-| **AssetTags**                     | GameplayEffect  | Metadata describing the effect (`Damage.Type.Fire`)                   |
-| **GrantedTags**                   | GameplayEffect  | Tags applied to target while effect is active (`Status.Burning`)      |
-| **ActivationBlockedTags**         | GameplayAbility | If owner has ANY of these → ability cannot activate                   |
-| **ActivationRequiredTags**        | GameplayAbility | Owner must have ALL of these → otherwise blocked                      |
-| **ActivationOwnedTags**           | GameplayAbility | Tags granted to owner while ability is active                         |
-| **CancelAbilitiesWithTag**        | GameplayAbility | Active abilities with these tags are cancelled                        |
-| **BlockAbilitiesWithTag**         | GameplayAbility | Abilities with these tags cannot activate                             |
-| **SourceRequiredTags**            | GameplayAbility | Source (caster's ASC) must have all these tags                        |
-| **SourceBlockedTags**             | GameplayAbility | Source must NOT have any of these tags                                |
-| **TargetRequiredTags**            | GameplayAbility | Target's ASC must have all these tags                                 |
-| **TargetBlockedTags**             | GameplayAbility | Target must NOT have any of these tags                                |
-| **ApplicationTagRequirements**    | GameplayEffect  | Target must satisfy tag requirements for effect to apply              |
-| **OngoingTagRequirements**        | GameplayEffect  | Effect is inhibited if requirements stop being met                    |
-| **RemoveGameplayEffectsWithTags** | GameplayEffect  | On application, remove effects whose GrantedTags match                |
-| **ImmunityTags**                  | ASC             | Incoming effects with matching Asset/GrantedTags are blocked entirely |
-| **GameplayCues**                  | GameplayEffect  | Tags that trigger VFX/SFX through GameplayCueManager                  |
-
-### Tag Events
-
-You can react to tag changes on any ASC:
-
-```csharp
-asc.RegisterTagEventCallback("Status.Debuff.Poison", (tag, newCount) =>
-{
-    if (newCount > 0) ShowPoisonIcon();
-    else              HidePoisonIcon();
-});
-```
-
----
-
-## 6. Attributes & AttributeSets
-
-### GameplayAttribute
-
-A `GameplayAttribute` is a named float value with two layers:
-
-- **BaseValue** — permanent, set by Instant effects or direct assignment
-- **CurrentValue** — BaseValue plus all active modifiers from Duration/Infinite effects
-
-```csharp
-// Listen to value changes
-attribute.OnCurrentValueChanged += (oldVal, newVal) => UpdateHealthBar(newVal);
-attribute.OnBaseValueChanged    += (oldVal, newVal) => { /* ... */ };
-```
-
-### AttributeSet
-
-Group related attributes and add validation logic:
-
-```csharp
-public class CharacterAttributeSet : AttributeSet
-{
-    public readonly GameplayAttribute Health      = new("Character.Health");
-    public readonly GameplayAttribute MaxHealth   = new("Character.MaxHealth");
-    public readonly GameplayAttribute AttackPower = new("Character.AttackPower");
-    public readonly GameplayAttribute Defense     = new("Character.Defense");
-
-    // Clamp before change
-    public override void PreAttributeChange(GameplayAttribute attribute, ref float newValue)
-    {
-        if (attribute.Name == Health.Name)
-            newValue = Mathf.Clamp(newValue, 0, GetCurrentValue(MaxHealth));
-    }
-
-    // React after change
-    public override void PostAttributeChange(GameplayAttribute attr, float oldVal, float newVal) { }
-
-    // Intercept instant effects (e.g., apply armor reduction to damage)
-    public override void PreProcessInstantEffect(GameplayEffectSpec spec) { }
-    public override void PostGameplayEffectExecute(GameplayEffectModCallbackData data) { }
-
-    // Derived attribute example
-    public override float GetCurrentValue(GameplayAttribute attribute)
-    {
-        if (attribute.Name == "Character.HealthPercent")
-        {
-            float max = GetCurrentValue(MaxHealth);
-            return max > 0 ? GetCurrentValue(Health) / max : 0f;
-        }
-        return base.GetCurrentValue(attribute);
-    }
-}
-```
-
-### Accessing Attributes
-
-```csharp
-var healthAttr = asc.GetAttribute("Character.Health");
-float current  = healthAttr.CurrentValue;
-float baseVal  = healthAttr.BaseValue;
-```
-
----
-
-## 7. GameplayEffects
-
-GameplayEffects are the **building blocks** of GAS. They modify attributes, grant tags, trigger cues, and manage their own lifecycle.
-
-### Duration Policies
-
-| Policy          | Behavior                                     | Use Cases                        |
-| --------------- | -------------------------------------------- | -------------------------------- |
-| **Instant**     | Applies modifiers once, immediately consumed | Damage, healing, mana cost       |
-| **HasDuration** | Active for a fixed time, then auto-removed   | Buffs, debuffs, cooldowns, DoTs  |
-| **Infinite**    | Active until manually removed                | Equipment stats, auras, passives |
-
-### Modifiers
-
-Each modifier targets one attribute with an operation:
-
-| Operation    | Effect                      |
-| ------------ | --------------------------- |
-| **Add**      | `CurrentValue += Magnitude` |
-| **Multiply** | `CurrentValue *= Magnitude` |
-| **Division** | `CurrentValue /= Magnitude` |
-| **Override** | `CurrentValue = Magnitude`  |
-
-> **Duration/Infinite modifiers** are aggregated — they modify `CurrentValue` while `BaseValue` stays unchanged. When the effect is removed, the modifier is automatically reversed.
->
-> **Instant modifiers** permanently change `BaseValue`.
-
-### Creating Effects in Code
-
-```csharp
-// Poison DoT: -5 HP every 1s for 10s
-var poison = new GameplayEffect(
-    name: "Poison DoT",
-    durationPolicy: EDurationPolicy.HasDuration,
-    duration: 10f,
-    period: 1f,
-    modifiers: new() { new ModifierInfo(healthAttr, EAttributeModifierOperation.Add, -5f) },
-    grantedTags: new GameplayTagContainer { "Status.Debuff.Poison" }
-);
-```
-
-### Stacking
-
-Configure how multiple applications of the same effect interact:
-
-| Property             | Options                                                                        | Description                       |
-| -------------------- | ------------------------------------------------------------------------------ | --------------------------------- |
-| **StackingType**     | `None` / `AggregateBySource` / `AggregateByTarget`                             | Grouping axis                     |
-| **StackLimit**       | int                                                                            | Maximum stack count               |
-| **DurationPolicy**   | `RefreshOnSuccessfulApplication` / `NeverRefresh`                              | Whether new stacks reset duration |
-| **ExpirationPolicy** | `ClearEntireStack` / `RemoveSingleStackAndRefreshDuration` / `RefreshDuration` | What happens when a stack expires |
-
-### Overflow Effects
-
-When an effect would be applied but the target has already reached `StackLimit`:
-
-- **OverflowEffects** — a list of secondary GameplayEffects to apply instead
-- **DenyOverflowApplication** — if `true`, the original effect is not applied at all (only overflow effects fire)
-
-### OngoingTagRequirements & Inhibition
-
-Duration/Infinite effects can be temporarily **inhibited** (suppressed) rather than removed:
-
-- Define `OngoingTagRequirements` on the effect
-- If the target's tags stop meeting the requirements, the effect's modifiers are suspended
-- When requirements are met again, modifiers resume
-- The `ActiveGameplayEffect.IsInhibited` property and `OnInhibitionChanged` event expose this state
-
-### ExecutePeriodicEffectOnApplication
-
-Set to `true` to trigger the first periodic tick immediately when the effect is applied, rather than waiting one full period.
-
-### SetByCaller Magnitudes
-
-Pass dynamic values into an effect at runtime:
-
-```csharp
-var spec = GameplayEffectSpec.Create(damageEffect, sourceASC);
-spec.SetByCallerMagnitude("Damage.Base", 50f);
-asc.ApplyGameplayEffectSpecToSelf(spec);
-```
-
-### DynamicGrantedTags & DynamicAssetTags
-
-Add extra tags to a specific `GameplayEffectSpec` instance at runtime, beyond what the base definition provides:
-
-```csharp
-spec.DynamicGrantedTags.AddTag("Status.Buff.Empowered");
-spec.DynamicAssetTags.AddTag("Source.Player");
-```
-
-### Custom Application Requirements
-
-Implement `ICustomApplicationRequirement` to add arbitrary logic gates:
-
-```csharp
-public class RequireMinHealth : ICustomApplicationRequirement
-{
-    public bool CanApplyGameplayEffect(GameplayEffectSpec spec, AbilitySystemComponent target)
-    {
-        var health = target.GetAttribute("Character.Health");
-        return health != null && health.CurrentValue > 10f;
-    }
-}
-```
-
-### Attribute Snapshotting
-
-Modifiers can capture attribute values at different times:
-
-- **Snapshot** — the source's attribute value is captured at effect creation time
-- **NotSnapshot** — the source's attribute value is read live when recalculating
-
-Configure via `EGameplayEffectAttributeCaptureSnapshot` on `ModifierInfo`.
-
----
-
-## 8. GameplayAbilities
-
-### Lifecycle
-
-```
-GrantAbility()          → Ability is added to the ASC
-  └─ OnGiveAbility()    → (optional) called once when granted
-
-TryActivateAbility()    → Runs all checks
-  ├─ Tag requirements   → ActivationRequired/Blocked/Source/Target Tags
-  ├─ CheckCost()        → Sufficient resources?
-  └─ CheckCooldown()    → No cooldown tag present?
-
-ActivateAbility()       → Your logic runs here
-  ├─ AbilityTasks       → Async operations (delays, targeting, etc.)
-  └─ CommitAbility()    → Applies Cost + Cooldown effects
-
-EndAbility()            → Cleanup, return to pool
-  └─ ASC fires OnAbilityEndedEvent
-```
-
-### Creating an Ability
-
-Every ability needs two classes:
-
-**1. Runtime Logic** — extends `GameplayAbility`:
-
-```csharp
-public class GA_Fireball : GameplayAbility
-{
-    private GameplayEffect damageEffect;
-    private float damageMultiplier;
-
-    public void SetupData(GameplayEffect damage, float multiplier)
-    {
-        damageEffect = damage;
-        damageMultiplier = multiplier;
+        this.healEffect = healEffect;
+
+        Initialize(
+            name: "GA_Heal",
+            instancingPolicy: EGameplayAbilityInstancingPolicy.InstancedPerExecution,
+            executionPolicy: EAbilityExecutionPolicy.LocalOnly,
+            cost: null,
+            cooldown: null,
+            abilityTags: new GameplayTagContainer(),
+            activationBlockedTags: new GameplayTagContainer(),
+            activationRequiredTags: new GameplayTagContainer(),
+            cancelAbilitiesWithTag: new GameplayTagContainer(),
+            blockAbilitiesWithTag: new GameplayTagContainer());
     }
 
     public override void ActivateAbility(
@@ -792,734 +361,712 @@ public class GA_Fireball : GameplayAbility
         GameplayAbilitySpec spec,
         GameplayAbilityActivationInfo activationInfo)
     {
-        CommitAbility(actorInfo, spec);
-
-        // Create spec & pass dynamic data
-        var dmgSpec = MakeOutgoingGameplayEffectSpec(damageEffect, spec.Level);
-        dmgSpec.SetByCallerMagnitude("Damage.Multiplier", damageMultiplier);
-
-        // Apply to target
-        var targetASC = FindTarget();
-        ApplyGameplayEffectToTarget(dmgSpec, targetASC);
-
-        EndAbility();
-    }
-
-    public override GameplayAbility CreatePoolableInstance() => new GA_Fireball();
-}
-```
-
-**2. ScriptableObject** — extends `GameplayAbilitySO`:
-
-```csharp
-[CreateAssetMenu(menuName = "GAS/Abilities/Fireball")]
-public class GA_Fireball_SO : GameplayAbilitySO
-{
-    [SerializeField] private GameplayEffectSO damageEffectSO;
-    [SerializeField] private float damageMultiplier = 1.5f;
-
-    public override GameplayAbility CreateAbility()
-    {
-        var ability = new GA_Fireball();
-        InitializeAbility(ability); // Copies tags, cost, cooldown from Inspector
-        ability.SetupData(damageEffectSO.GetGameplayEffect(), damageMultiplier);
-        return ability;
-    }
-}
-```
-
-### Ability Triggers
-
-Abilities can auto-activate in response to events or tag changes:
-
-```csharp
-// In GameplayAbilitySO Inspector, add an AbilityTriggerData:
-// TriggerTag: "Event.Character.Hit"
-// TriggerSource: GameplayEvent
-
-// Or configure programmatically:
-ability.AbilityTriggers = new List<AbilityTriggerData>
-{
-    new() { TriggerTag = "Event.Character.Hit", TriggerSource = EAbilityTriggerSource.GameplayEvent },
-    new() { TriggerTag = "Status.Debuff.Poison", TriggerSource = EAbilityTriggerSource.OwnedTagAdded },
-};
-```
-
-| TriggerSource     | When It Fires                                                    |
-| ----------------- | ---------------------------------------------------------------- |
-| `GameplayEvent`   | When `ASC.HandleGameplayEvent()` is called with the matching tag |
-| `OwnedTagAdded`   | When the trigger tag is added to the ASC's combined tags         |
-| `OwnedTagRemoved` | When the trigger tag is removed from the ASC                     |
-
-### Source/Target Tags
-
-Beyond standard `ActivationRequired/BlockedTags` (which check the **owner's** tags), abilities support four additional tag containers:
-
-| Container              | Checks Against | Purpose                                                  |
-| ---------------------- | -------------- | -------------------------------------------------------- |
-| **SourceRequiredTags** | Caster's ASC   | Caster must have all of these to activate                |
-| **SourceBlockedTags**  | Caster's ASC   | Caster must NOT have any of these                        |
-| **TargetRequiredTags** | Target's ASC   | Target must have all of these (via `CanApplyToTarget()`) |
-| **TargetBlockedTags**  | Target's ASC   | Target must NOT have any of these                        |
-
-**Use case**: A healing ability might require `SourceRequiredTags = State.InHealingStance` (caster check) and `TargetBlockedTags = State.Dead` (can't heal dead targets).
-
-### InputPressed / InputReleased
-
-Virtual hooks for input-driven abilities (e.g., charged attacks, hold-to-channel):
-
-```csharp
-public override void InputPressed(GameplayAbilitySpec spec)
-{
-    // Called when the bound input action is pressed while ability is active
-    StartCharging();
-}
-
-public override void InputReleased(GameplayAbilitySpec spec)
-{
-    // Called when released
-    ReleaseCharge();
-    EndAbility();
-}
-```
-
-These methods are deliberately **input-agnostic** — they don't reference any specific input system. Your input layer (Unity Input System, CycloneGames.InputSystem's R3 Observables, etc.) calls them.
-
-### Lifecycle Events on ASC
-
-```csharp
-asc.OnAbilityActivated += (ability) => { /* fired on activation */ };
-asc.OnAbilityCommitted += (ability) => { /* fired on commit   */ };
-asc.OnAbilityEndedEvent += (ability) => { /* fired on end      */ };
-```
-
-### Instancing Policies
-
-| Policy                  | Behavior                                        | Use Case                              |
-| ----------------------- | ----------------------------------------------- | ------------------------------------- |
-| `NonInstanced`          | Shared instance, no per-actor state             | Simple instant abilities              |
-| `InstancedPerActor`     | One instance per ASC, reused across activations | Most abilities                        |
-| `InstancedPerExecution` | New instance per activation                     | Abilities with overlapping executions |
-
----
-
-# IV. Advanced Systems
-
-## 9. AbilityTasks
-
-AbilityTasks enable **asynchronous, multi-step ability logic**. Without them, everything would run synchronously inside `ActivateAbility()`.
-
-### Built-In Tasks
-
-| Task                              | Purpose                                            |
-| --------------------------------- | -------------------------------------------------- |
-| `AbilityTask_WaitDelay`           | Wait for a time duration                           |
-| `AbilityTask_WaitTargetData`      | Wait for targeting to provide target data          |
-| `AbilityTask_WaitGameplayEvent`   | Wait for a gameplay event with a specific tag      |
-| `AbilityTask_WaitGameplayTag`     | Wait for a tag to be added or removed from the ASC |
-| `AbilityTask_WaitGameplayEffect`  | Wait for an effect to be applied or removed        |
-| `AbilityTask_WaitAttributeChange` | Wait for an attribute's value to change            |
-| `AbilityTask_WaitConfirmCancel`   | Wait for external confirm/cancel signals           |
-| `AbilityTask_WaitAbilityActivate` | Wait for another ability to activate               |
-| `AbilityTask_WaitAbilityEnd`      | Wait for another ability to end                    |
-| `AbilityTask_Repeat`              | Repeatedly execute logic at an interval            |
-
-### Usage Patterns
-
-**Callback style:**
-
-```csharp
-public override void ActivateAbility(...)
-{
-    CommitAbility(actorInfo, spec);
-
-    var waitTask = NewAbilityTask<AbilityTask_WaitDelay>();
-    waitTask.WaitTime = 2.0f;
-    waitTask.OnFinished = () =>
-    {
-        ApplyDamage();
-        EndAbility();
-    };
-    waitTask.Activate();
-}
-```
-
-**Async/await style:**
-
-```csharp
-public override async void ActivateAbility(...)
-{
-    CommitAbility(actorInfo, spec);
-
-    // Step 1: Charge up
-    var chargeTask = NewAbilityTask<AbilityTask_WaitDelay>();
-    chargeTask.WaitTime = 2.0f;
-    await chargeTask.ActivateAsync();
-
-    // Step 2: Pick target
-    var targetTask = NewAbilityTask<AbilityTask_WaitTargetData>();
-    // ... configure target actor ...
-    var targetData = await targetTask.ActivateAsync();
-
-    // Step 3: Apply
-    ApplyDamageToTargets(targetData);
-    EndAbility();
-}
-```
-
-**Task chaining:**
-
-```csharp
-taskA.OnFinished = () =>
-{
-    var taskB = NewAbilityTask<NextTask>();
-    taskB.OnFinished = () => EndAbility();
-    taskB.Activate();
-};
-taskA.Activate();
-```
-
-**Timeout pattern:**
-
-```csharp
-var targetTask = NewAbilityTask<AbilityTask_WaitTargetData>();
-var timeoutTask = NewAbilityTask<AbilityTask_WaitDelay>();
-timeoutTask.WaitTime = 5.0f;
-timeoutTask.OnFinished = () =>
-{
-    targetTask.Cancel();
-    EndAbility();
-};
-timeoutTask.Activate();
-targetTask.Activate();
-```
-
-### Creating Custom Tasks
-
-```csharp
-public class AbilityTask_WaitForInput : AbilityTask, IAbilityTaskTick
-{
-    public Action OnJumpPressed;
-
-    protected override void OnActivate() { /* subscribe */ }
-
-    public void Tick(float deltaTime)
-    {
-        if (!IsActive) return;
-        if (Input.GetKeyDown(KeyCode.Space))
+        GameplayAbilityCommitResult commit = CommitAbility(actorInfo, spec);
+        if (!commit.Succeeded)
         {
-            OnJumpPressed?.Invoke();
-            EndTask();
+            EndAbility();
+            return;
         }
-    }
 
-    protected override void OnDestroy()
-    {
-        OnJumpPressed = null;
-    }
-}
-```
+        GameplayEffectApplicationResult result =
+            ApplyGameplayEffectToOwner(healEffect, spec.Level);
 
-### Rules
-
-1. **Always** create tasks via `NewAbilityTask<T>()` (never `new` — pools are bypassed)
-2. Clean up event subscriptions in `OnDestroy()`
-3. Call `EndTask()` when done
-4. Check `IsActive` before executing logic
-5. All active tasks are force-ended when the ability ends
-
----
-
-## 10. Targeting System
-
-The targeting system decouples "how to find targets" from "what to do with targets".
-
-### ITargetActor Interface
-
-```csharp
-public interface ITargetActor
-{
-    event Action<TargetData> OnTargetDataReady;
-    event Action OnCanceled;
-
-    void Configure(GameplayAbility ability, Action<TargetData> onReady, Action onCancelled);
-    void StartTargeting();
-    void ConfirmTargeting();
-    void CancelTargeting();
-    void Destroy();
-}
-```
-
-### Built-In Target Actors
-
-| Actor                                        | Behavior                                                |
-| -------------------------------------------- | ------------------------------------------------------- |
-| `GameplayAbilityTargetActor_SphereOverlap`   | Finds all targets in a sphere radius with tag filtering |
-| `GameplayAbilityTargetActor_SingleLineTrace` | Single raycast to the first hit                         |
-| `GameplayAbilityTargetActor_ConeTrace`       | Cone/sweep shaped detection                             |
-| `GameplayAbilityTargetActor_GroundSelect`    | Interactive ground placement with visual indicator      |
-
-### Target Data Types
-
-| Type                                        | Description                             |
-| ------------------------------------------- | --------------------------------------- |
-| `GameplayAbilityTargetData_ActorArray`      | List of target actors                   |
-| `GameplayAbilityTargetData_SingleTargetHit` | Single target with `RaycastHit` details |
-| `GameplayAbilityTargetData_MultiTarget`     | Multiple targets from bulk physics      |
-
-### Example: Sphere Overlap in an Ability
-
-```csharp
-public override void ActivateAbility(...)
-{
-    CommitAbility(actorInfo, spec);
-
-    var targetActor = new GameplayAbilityTargetActor_SphereOverlap(
-        radius: 5f,
-        requiredTags: GameplayTagContainer.FromTag("Faction.Player")
-    );
-
-    var task = AbilityTask_WaitTargetData.WaitTargetData(this, targetActor);
-    task.OnValidData = (targetData) =>
-    {
-        // Process each target
-        // Apply effects, remove debuffs, etc.
-        EndAbility();
-    };
-    task.OnCancelled = () => EndAbility();
-    task.Activate();
-}
-```
-
----
-
-## 11. Execution Calculations
-
-For formulas that involve multiple attributes from both source and target, use `GameplayEffectExecutionCalculation`.
-
-### When to Use
-
-| Scenario                              | Use                   |
-| ------------------------------------- | --------------------- |
-| Heal 50 HP                            | Simple Modifier       |
-| Damage = ATK × 1.5 − DEF × 0.5        | Execution Calculation |
-| Healing = BaseHeal + SpellPower × 0.3 | Execution Calculation |
-
-### Example
-
-```csharp
-public class ExecCalc_Damage : GameplayEffectExecutionCalculation
-{
-    public override void Execute(GameplayEffectExecutionCalculationContext context)
-    {
-        var source = context.Spec.Source;
-        var target = context.Target;
-
-        float atk = source.GetAttribute("Character.AttackPower")?.CurrentValue ?? 0;
-        float def = target.GetAttribute("Character.Defense")?.CurrentValue ?? 0;
-        float dmg = Mathf.Max(0, atk * 1.5f - def * 0.5f);
-
-        var healthAttr = target.GetAttribute("Character.Health");
-        if (healthAttr != null)
+        if (!result.Succeeded)
         {
-            context.AddOutputModifier(new ModifierInfo(
-                healthAttr, EAttributeModifierOperation.Add, -dmg
-            ));
+            // Project code may translate result.Code into UI or telemetry.
         }
+
+        EndAbility();
+    }
+
+    public override GameplayAbility CreateRuntimeInstance()
+    {
+        return new HealAbility(healEffect);
     }
 }
 ```
 
-Create a `GameplayEffectExecutionCalculationSO` wrapper and assign it to your `GameplayEffectSO`'s Execution field.
-
----
-
-## 12. GameplayCues
-
-GameplayCues separate **presentation** (VFX, SFX, camera shakes) from **gameplay logic** completely.
-
-### Why?
+### 4. Grant and activate
 
 ```csharp
-// ❌ Coupled: VFX mixed with logic
-void DealDamage(float dmg) {
-    target.Health -= dmg;
-    Instantiate(explosionVFX, target.Position);
-}
+using var context = new GASRuntimeContext();
+using var asc = new AbilitySystemComponent(context);
 
-// ✅ Decoupled: VFX triggered by tag
-var spec = GameplayEffectSpec.Create(damageEffect, sourceASC);
-// damageEffect has GameplayCues tag "GameplayCue.Impact.Fire"
-targetASC.ApplyGameplayEffectSpecToSelf(spec);
-// GameplayCueManager handles VFX automatically
+var attributes = new CombatAttributes();
+asc.AddAttributeSet(attributes);
+attributes.MaxHealth.SetBaseValue(100f);
+attributes.MaxHealth.SetCurrentValue(100f);
+attributes.Health.SetBaseValue(50f);
+attributes.Health.SetCurrentValue(50f);
+
+asc.InitAbilityActorInfo(owner: playerModel, avatar: playerGameObject);
+
+GameplayAbilitySpec spec = asc.GrantAbility(
+    new HealAbility(healEffect),
+    level: 1);
+
+bool activationStarted = asc.TryActivateAbility(spec);
 ```
 
-### Cue Event Types
+The ASC owns the granted spec. Call `ClearAbility(spec)` to revoke it; do not retain a spec after it is cleared or its ASC is disposed.
 
-| Event         | When                                     | Example                |
-| ------------- | ---------------------------------------- | ---------------------- |
-| `Executed`    | Instant effect applied, or periodic tick | Impact VFX, hit sound  |
-| `OnActive`    | Duration/Infinite effect first applied   | Buff glow, status icon |
-| `WhileActive` | Continuous while effect is active        | Looping fire particles |
-| `Removed`     | Effect expires or is removed             | Fade-out VFX           |
+## Ability workflow
 
-### Creating a Cue
+### Granting and instancing
+
+`GameplayAbility.Initialize` publishes configuration exactly once. Tag inputs use `IReadOnlyGameplayTagContainer`; initialization never requires or retains mutation authority over the caller's container. Before any property is committed, it validates a non-empty name no longer than `MaxNameLength` (`256`), known instancing and network policies, valid tag data within the aggregate `MaxAggregateTagCount` (`256`), and no more than `MaxTriggerCount` (`64`) valid triggers. A trigger pair with the same tag and source is rejected as a duplicate. Only after all validation succeeds does it copy tag inputs into immutable `GameplayDefinitionTagSet` values, snapshot triggers into a read-only collection, and expose configuration through private-set properties. A second initialization throws, and `GrantAbility` rejects a definition that was never initialized. Construct the complete definition before registration; runtime activation state belongs to an instance, not to the shared definition.
+
+`GrantAbility` allocates an ASC-local handle and returns a `GameplayAbilitySpec`. The same ability definition may be granted more than once; address the grant by its spec or handle rather than by list position.
+
+Instancing policies are:
+
+- `NonInstanced`: reserved for stateless simulation in the Unity-free Core model. Unity Runtime `GrantAbility` rejects this policy because a shared `GameplayAbility` object cannot safely own ASC, activation, or task state.
+- `InstancedPerActor`: one runtime instance owns execution state for the lifetime of the grant and is invalidated when the grant is cleared.
+- `InstancedPerExecution`: every activation receives a distinct runtime instance that is invalidated when that activation ends.
+
+Unity Runtime abilities must use `InstancedPerActor` or `InstancedPerExecution`. Pure Core consumers may use `GASInstancingPolicy.NonInstanced` only for commands that keep all mutable state outside the shared definition. The runtime memory owner calls `CreateRuntimeInstance()` for each runtime lease, requires a distinct object of the same runtime type, and copies the sealed base configuration from the definition. The factory must not capture scene ownership that outlives the ASC.
+
+Each runtime instance retains the exact definition/template reference that created it. Two definitions of the same derived type can therefore carry different immutable configuration without sharing runtime state. Runtime instances are one-shot lease objects: release invalidates and discards the object instead of making it available to another grant or activation.
+
+Derived abilities that own mutable references or sensitive state should override `ResetRuntimeState()` to close that state when the runtime lease is released:
 
 ```csharp
-[CreateAssetMenu(menuName = "GAS/Cues/Fireball Impact")]
-public class GC_Fireball_Impact : GameplayCueSO
+protected override void ResetRuntimeState()
 {
-    public string ImpactVFXPrefab;
-    public string ImpactSound;
-
-    public override async UniTask OnExecutedAsync(
-        GameplayCueParameters parameters, IGameObjectPoolManager poolManager)
-    {
-        if (parameters.TargetObject == null) return;
-
-        var vfx = await poolManager.GetAsync(
-            ImpactVFXPrefab, parameters.TargetObject.transform.position, Quaternion.identity);
-
-        // Return to pool after lifetime
-        ReturnToPoolAfterDelay(poolManager, vfx, 2f).Forget();
-    }
+    chargeSeconds = 0f;
+    cachedTargetIds.Clear();
 }
 ```
 
-### Persistent Cues
+The base release path always clears `Spec`, `AbilitySystemComponent`, `ActorInfo`, activation data, and task tracking. `ResetRuntimeState()` must not release shared definition data. An `InstancedPerActor` ability must also reset activation-specific fields in its normal end workflow when those fields must not cross activations; the final release hook alone is not an activation reset. If the hook throws, the lease still becomes invalid and the object is discarded, while `ReleaseFailures` records the cleanup failure. Treat that exception as a lifecycle defect.
 
-For looping effects (burn particles, shield glow), implement `IPersistentGameplayCue`:
+### Activation checks
+
+`TryActivateAbility` evaluates:
+
+- ASC disposal, spec validity, and active state;
+- execution policy and local ownership;
+- required and blocked ability tags;
+- source and target tag requirements;
+- ability blocking and cancellation relationships;
+- cooldown tags;
+- cost affordability;
+- the ability's `CanActivate` override.
+
+`CanActivate` should be deterministic and free of externally visible side effects. Reserve irreversible work for activation after a successful commit.
+
+### Commit, cost, and cooldown
+
+The commit contract is two-phase:
+
+1. Construct cost and cooldown specs.
+2. Validate definitions, tags, limits, custom requirements, cooldown, and affordability.
+3. Apply the cooldown.
+4. Apply the instant cost.
+5. Remove the applied cooldown if cost application is rejected.
+6. Publish `OnAbilityCommitted` only after success.
+
+A cost definition must be `Instant`. A cooldown definition must be `HasDuration` or `Infinite` and normally grants a cooldown tag. Override `CreateCostEffectSpec` or `CreateCooldownEffectSpec` when the ability must add SetByCaller data before validation.
+
+`GameplayAbilityCommitResult.Code` distinguishes missing ownership, invalid definitions, insufficient cost, active cooldown, and effect rejection. `EffectResult` preserves the underlying effect rejection code.
+
+Always call `EndAbility()` or `CancelAbility()` on every terminal path. Ending cancels owned tasks, removes configured ability-owned effects, releases owned tags, and invalidates and discards the instanced-per-execution runtime instance.
+
+### Input and events
+
+The project input adapter should map input actions to granted specs and call `TryActivateAbility`, `InputPressed`, or `InputReleased` on the simulation owner thread. Gameplay events use `GameplayEventData` and tag-keyed callbacks; event tags describe gameplay intent and should not carry transport-specific objects.
+
+### Runtime callbacks and observer ordering
+
+ASC ability/effect/prediction/replication events, tag callbacks, gameplay-event callbacks, and ASC-bound `GameplayAttribute` value events use owner-thread-confined typed callback lists. Subscription and removal are cold-path operations: multicast expansion, dictionary insertion, and list growth can allocate. Register stable delegates during composition or ability/task activation, remove them during the matching teardown, and do not subscribe every Tick.
+
+Dispatch captures the current callback count. Removing a subscriber during dispatch tombstones its current entry, so it will not run later in that dispatch; adding a subscriber appends it for the next dispatch. The outermost dispatch compacts tombstones in place. Each subscriber is invoked through an independent exception boundary, so one failure is logged and later subscribers still run. Attribute, ability, effect, prediction-closure, replication, and tag observers run only after their corresponding authoritative state is committed. Steady-state dispatch can avoid managed allocation after capacity is established, but exception logging and subscription changes are outside that result.
+
+The ASC's internal count-container callbacks perform committed-state reconciliation for tag-trigger activation, ongoing-effect inhibition, attribute dirtiness, and replication tracking. If that reconciliation throws, the count container still delivers later subscribers and then returns an `AggregateException` stating that tag state is already committed. Treat this as an integrity incident: do not retry the tag mutation; stop further authority changes for the entity and recover from a validated authoritative snapshot or shut the entity down.
+
+`GameplayEvent` observers are intent listeners rather than authority. They run before tag-matched authority triggers; an observer failure is isolated and does not prevent the trigger from activating its ability. Observer callbacks cannot dispose the ASC while dispatch is active. The current spec cannot be cleared during its ability override or `OnAbilityActivated` delivery, and the ending spec cannot be cleared during the complete end window, including `OnAbilityEndedEvent` delivery and per-execution instance cleanup. Re-entering end for the same spec lease also fails fast. Defer those destructive operations until the current activation or end call returns.
+
+## GameplayEffect workflow
+
+### Definition, spec, and active effect
+
+A `GameplayEffect` is a reusable definition. A `GameplayEffectSpec` is a leased application request. An `ActiveGameplayEffect` is target-owned persistent state.
+
+The `GameplayEffect` constructor validates its complete definition before publication: non-empty name; known duration and stacking policies; finite duration, period, and magnitude inputs; positive duration and stack limits where required; valid modifier operations, capture policies, calculations, and SetByCaller keys; non-null requirements and overflow entries; and compatible granted abilities. Instant definitions cannot be periodic or grant abilities, and Runtime-granted abilities cannot use `NonInstanced`. Definition collections, modifier records, and tag containers are copied for runtime use.
+
+Ability and effect levels in Runtime state and reconciliation buffers are integers in the inclusive range `1..65535`, with the upper bound exposed as `GASRuntimeDataContract.MaxGameplayLevel`. Ability grant, spec creation, effect reconciliation, and state-delta validation reject values outside that range. Helper overloads that accept `-1` use it only as an instruction to inherit the current ability level and resolve it before creating a spec.
+
+Published collections are exposed as `IReadOnlyList<T>`. Definition tags use `GameplayDefinitionTagSet`, which implements only `IReadOnlyGameplayTagContainer`; Effect requirements use `GameplayEffectTagRequirements` containing the same read-only definition sets. Mutation authority is absent from these public definition values. Call `ToMutableContainer()` or `ToMutableRequirements()` only to build an isolated authoring or composition value, then construct another definition. Referenced strategy objects such as executions, custom magnitude calculations, and application requirements are shared rather than deep-cloned, so their implementations must remain stateless after definition construction.
+
+`GameplayEffectSpec.DynamicGrantedTags` and `DynamicAssetTags` return `GameplayEffectSpecTagView`, a generation-checked `readonly struct` view over storage owned by the current spec lease. Every read and mutation validates the originating lease generation; mutation additionally requires caller ownership. A captured view throws after the spec is consumed or discarded and never owns or extends the backing storage lifetime.
+
+```mermaid
+flowchart LR
+    Definition["GameplayEffect definition"] --> Spec["GameplayEffectSpec<br/>source + level + context + magnitudes"]
+    Spec --> Validate["ASC preflight<br/>requirements + immunity + limits"]
+    Validate -->|"Instant"| Execute["Execute and consume spec"]
+    Validate -->|"Duration / Infinite"| Active["ActiveGameplayEffect<br/>owned by target ASC"]
+    Active --> Tick["Periodic execution / aggregation / expiry"]
+    Active --> Remove["Removal / dispel / shutdown"]
+```
+
+`GameplayEffectSpec.Create` returns a caller-owned spec. Configure SetByCaller values, dynamic tags, context metadata, and reserved capacity only while that caller ownership is current. `ApplyGameplayEffectSpecToSelf` attempts to transfer ownership immediately and consumes the spec on every accepted transfer path, including rejection results. After passing a spec to that method, do not mutate, discard, or submit it again. If a caller-owned spec will never be submitted, call its public `Discard()` method exactly once; there is no public memory-owner release API.
+
+`GameplayEffectSpec` owns its concrete, inheritable `GameplayEffectContext`. `GameplayEffectSpec.Create`, `GameplayEffectSpec.Context`, `AbilitySystemComponent.MakeEffectContext`, and `IGameplayEffectContextFactory.Create` all use this type. The base context carries only `Instigator`, `AbilityInstance`, and `PredictionKey`; targeting data remains in the separate AbilityTask and TargetData lease workflow. Supplying a context to `GameplayEffectSpec.Create` attaches it to the spec. The base context records that exact owning spec as its ownership token; after attachment, only the same spec may update prediction state or release the context, while caller mutation, `Reset`, and `Dispose` throw. The caller may dispose only an independently created context that was never attached. Derived contexts may override protected `ResetCustomState()` to clear only their own mutable fields; the base class remains responsible for base metadata and ownership state, and the hook must not release the context. Discarding or consuming the spec releases its context; a duration/infinite application transfers the spec and context into the target-owned active effect until removal. Do not share one context between specs or retain it from a cue callback.
+
+An `ActiveGameplayEffect` returned by an application result or ASC query is borrowed state owned exclusively by the target ASC. Consumers cannot release it directly. Request removal through owner APIs such as `TryRemoveActiveEffect`, or let stacking, expiry, clear, and ASC disposal remove it. After removal, neither the active effect nor its spec/context may be accessed.
+
+`ActiveEffectContainer` is internal implementation state. Public enumeration goes through the stable `GASReadOnlyListView<ActiveGameplayEffect>` returned by `AbilitySystemComponent.ActiveEffects`, while detailed inspection uses public debugger and diagnostic APIs. The view and every element are borrowed; consumers must not depend on internal indexes, stacking maps, or mutation order.
+
+`ModifierMagnitudes`, `ModifierMagnitudeRawValues`, and `TargetAttributes` are borrowed `ReadOnlySpan<T>` views over spec-owned buffers. They avoid exposing mutable arrays and are valid only while that spec lease remains valid. Read or copy required values before submitting the spec or otherwise ending its lease; never retain a span or derive a long-lived reference from it.
+
+`GameplayEffectApplicationResult.Code` is the complete application outcome contract:
+
+| Outcome group | Codes |
+| --- | --- |
+| Committed success | `Applied`, `Executed`, `Stacked` |
+| Invalid input or context | `InvalidSpec`, `InvalidDefinition`, `RuntimeContextMismatch` |
+| Runtime state or phase rejection | `StateResyncRequired`, `ReentrantMutationRejected` |
+| Rule rejection | `BlockedByImmunity`, `MissingRequiredTags`, `BlockedByForbiddenTags`, `BlockedByCustomRequirement` |
+| Capacity or prediction rejection | `ActiveEffectLimitReached`, `PredictionLimitReached`, `PredictionUnsupported`, `GrantedAbilityLimitReached` |
+| Execution or commit failure | `ExecutionFailed`, `DurationCommitFailed` |
+
+Use `CanApplyGameplayEffectSpec` for preflight. It checks framework-owned requirements and budgets but cannot prove that project callbacks will not throw. Custom application requirements called from preflight must be pure because they may run more than once.
+
+Effect application follows phase-scoped failure-atomic rules for framework-owned ASC state. Validation and capacity failures occur before mutation. Instant execution snapshots every touched attribute and restores those values if execution or an attribute hook throws. A failed first insertion of a duration effect removes the uncommitted effect from indexes, Core state, granted abilities, tags, and modifier links, then invalidates its one-shot lease before returning `DurationCommitFailed`. Removal-tag processing and cue dispatch occur only after the corresponding effect operation commits.
+
+Definition-granted tags and spec dynamic-granted tags are separate ownership edges. Effect removal, rollback, and ASC shutdown attempt each edge independently against both effect-owned and combined tag state. A failure in one tag-removal callback or cleanup step is recorded without skipping the remaining definition or dynamic-tag cleanup, modifier/index cleanup, or effect lease release. Effect observers are then delivered per subscriber after the authoritative removal has committed.
+
+Effect mutation transactions and active-effect iteration are non-reentrant phases. A direct apply, remove, update, internal reconciliation apply, `Tick`, ASC `Dispose`, or ability end issued from inside those phases is rejected immediately through that API's result, `false`, or `InvalidOperationException` contract. A reentrant `ApplyGameplayEffectSpecToSelf` consumes and releases a caller-owned spec when ownership transfer succeeds, then returns `ReentrantMutationRejected`; after submission, do not call `Discard()`, mutate, or resubmit that spec. Queue unrelated work for a later owner-thread phase.
+
+Activation requested by `ActivateAbilityOnGranted`, `OwnedTagAdded`, `OwnedTagRemoved`, or a `GameplayEvent` trigger uses a bounded deferred path while either phase is active. Requests are deduplicated by spec identity, bounded by `MaxGrantedAbilities`, and flushed only after the outer mutation or iteration has committed. A flush uses the same bounded budget and logs and discards any remainder. This path does not make arbitrary callbacks or effect mutations reentrant.
+
+This is not a transaction over an entire effect graph. Stacking and overflow apply child operations in order; a child that already committed is not undone if later stacking work fails. Atomicity also does not cover irreversible work performed by project callbacks, custom calculations, observers, logs, network sends, or external services. Keep those hooks side-effect-free until commit, or provide project compensation. A reported rollback-cleanup failure is an integrity incident; stop further authority changes for that entity and recover from a validated authoritative snapshot.
+
+### SetByCaller
+
+SetByCaller values provide per-application magnitudes without mutating the shared definition:
 
 ```csharp
-public class GC_Burn_Loop : GameplayCueSO, IPersistentGameplayCue
+GameplayTag damageTag =
+    GameplayTagManager.RequestTag("Data.Damage");
+
+GameplayEffectSpec spec =
+    GameplayEffectSpec.Create(damageEffect, sourceASC, level: 3);
+
+spec.SetSetByCallerMagnitude(damageTag, 85f);
+
+GameplayEffectApplicationResult result =
+    targetASC.ApplyGameplayEffectSpecToSelf(spec);
+```
+
+Tag keys are preferred for stable gameplay contracts. Name keys are available for local cases. The combined number of tag and name entries is bounded by `MaxSetByCallerEntries`. SetByCaller changes recalculate affected modifier magnitudes.
+
+Internal magnitude initialization reads missing SetByCaller inputs without logging. When submission successfully transfers ownership, the spec performs one bounded pass over its authored SetByCaller modifiers and emits the configured missing-key warnings once. A failed transfer or caller `Discard()` does not perform this warning pass. An explicit `GetSetByCallerMagnitude(..., warnIfNotFound: true)` remains an immediate diagnostic read and can warn independently.
+
+### Spec duration override
+
+`GameplayEffectSpec.SetDuration` / `SetDurationRaw` override the duration of one caller-owned spec instance before submission (UE5: `FGameplayEffectSpec::SetDuration`). The shared `GameplayEffect` definition is never mutated:
+
+```csharp
+protected override GameplayEffectSpec CreateCooldownEffectSpec(
+    AbilitySystemComponent asc, GameplayAbilitySpec spec)
 {
-    public string BurnVFXPrefab;
+    GameplayEffectSpec cooldownSpec = base.CreateCooldownEffectSpec(asc, spec);
+    // Example: cooldown = base interval / attack speed, or base CD * (1 - cooldown reduction).
+    cooldownSpec?.SetDuration(computedCooldownSeconds);
+    return cooldownSpec;
+}
+```
 
-    public async UniTask<GameObject> OnActiveAsync(GameplayCueParameters parameters, IGameObjectPoolManager poolManager)
+The override is only valid while the caller owns the spec (before submission); submission itself is the lock, so UE's `bDurationLocked` flag is unnecessary. The definition must use `EDurationPolicy.HasDuration`; `Instant` and `Infinite` definitions reject the call. `SetDuration` requires a positive finite value; `SetDurationRaw` additionally accepts zero (the effect expires on its first tick). Active-effect initialization, stacking duration refresh, and the authoritative replication channel all read the per-spec duration, so the override flows through every consumption path. `GetCooldownInfo` reports the per-instance spec duration, matching UE's `GetCooldownTimeRemainingAndDuration`.
+
+For data-driven durations that need no ability code at all, the definition can instead carry a `DurationMagnitude` (UE5: `FGameplayEffectDurationMagnitude`): a level-scalable constant, a captured attribute (e.g. a cooldown-reduction stat), or a SetByCaller key. Each created spec evaluates it once through the fixed-point magnitude pipeline, the server-replicated `durationRaw` carries the result to every client without client-side re-evaluation, and an explicit `SetDuration` call always wins over later SetByCaller-driven re-evaluation. Evaluated negative durations clamp to zero. When no `DurationMagnitude` is configured, `def.Duration` behaves exactly as before.
+
+```csharp
+var cooldownEffect = new GameplayEffect(
+    "GE.Cooldown.Fireball",
+    EDurationPolicy.HasDuration,
+    duration: 0f, // ignored when DurationMagnitude is set
+    durationMagnitude: new DurationMagnitudeInfo(
+        new AttributeBasedMagnitude("CooldownDuration")));
+```
+
+The same source is authorable on `GameplayEffectSO` assets: enable **Duration Magnitude** in the Inspector (visible for `HasDuration` effects), pick the calculation type, and fill only the relevant fields. The Inspector summary shows `Duration: data-driven (<type>)`, and validation warns on rejected combinations (magnitude on non-`HasDuration` policies, SetByCaller without a key, `ExtendDuration` without `ClearEntireStack` expiration).
+
+### Attribute capture timing
+
+`AttributeBasedMagnitude` resolves captures at the following times:
+
+| Policy | Source capture | Target capture |
+| --- | --- | --- |
+| `Snapshot` | Spec creation | Effect application |
+| `NotSnapshot` | Every evaluation | Every evaluation |
+
+A periodic execution is an evaluation: a `NotSnapshot` periodic effect re-reads the attribute on each tick, while `Snapshot` retains the creation-time (source) or application-time (target) value. Live captures settle a dirty attribute before reading it, so a base value written earlier in the same frame is visible to an effect applied before the next tick.
+
+Periodic executions scale the evaluated magnitude by the stack count: two stacks of a 15-per-tick bleed deal 30 per tick. Multiply and Division compose once per stack, following the aggregation contract; Override is not scaled.
+
+`Samples/Scripts/CombatCaptureTimingSample.cs` prints per-tick timelines for live and snapshot ignite, %-current-health poison, stacked bleed, and heal-over-time.
+
+### Magnitudes, aggregation, and execution
+
+Modifier operations are `Add`, `Multiply`, `Division`, and `Override`. Magnitudes can be:
+
+- `ScalableFloat`, using level-based fixed input;
+- `AttributeBased`, using source or target capture with snapshot policy;
+- `SetByCaller`;
+- `CustomCalculation` for bounded calculation logic.
+
+Evaluation channels provide ordered aggregation when effects need independent modifier lanes. Execution calculations support multi-attribute instant or periodic logic. Keep execution calculations deterministic when they participate in prediction, and do not perform transport, asset loading, or unbounded allocation inside them.
+
+`GameplayEffectExecutionCalculation.Execute` receives a stack-only `GameplayEffectExecutionOutput`. Call `Add` for each result; null results and additions beyond `GASRuntimeLimits.MaxModifiersPerEffect` fail before attribute mutation begins. The output cannot be retained or replaced by the calculation. Its backing scratch and instant-effect rollback scratch are owned by the target ASC, cleared in `finally`, and released during ASC disposal. Scratch lists that grow beyond 256 entries are discarded after the operation instead of retaining an exceptional peak for the ASC lifetime.
+
+### Stacking and ongoing state
+
+`GameplayEffectStacking` selects no stacking, aggregation by source, or aggregation by target; it also defines stack limit, duration refresh, and expiration behavior. Overflow effects and denial policy handle applications at the limit.
+
+`Stack Limit Mode` is either `Limited` (the stack count stops at `Limit`, validated into `[1, MaxStackCount]`) or `Unlimited` (no gameplay cap). `Unlimited` resolves to `ushort.MaxValue` because the Core mirror stores the stack count as a `ushort`, so the value saturates instead of wrapping. `GameplayEffectStacking.ResolveStackLimit()` is the only place that resolves the two; every clamp and replication check reads it, so a future limit mode only has to be taught to one function.
+
+`Magnitude Policy` decides how this effect's stack count scales its `Multiply` and `Division` magnitudes. It is orthogonal to `GASModifierAggregationMode`, which only decides how several modifiers of the same channel combine.
+
+| Policy | Formula | x1.1 at 5 stacks | Intended for |
+| --- | --- | --- | --- |
+| `LinearBias` (default) | `(M - 1) * stack + 1` | x1.5 | The ARPG/MMORPG convention: every stack adds the same delta. Numerically identical to UE's stacked magnitude. |
+| `Exponential` | `M ^ stack` | x1.61 | Deliberate "double per stack" designs. Authoring rejects any limit whose worst-case product leaves the Q32.32 range. |
+
+`Add` modifiers always scale as `magnitude * stackCount`, and `Override` ignores the stack count, so the policy is inert for effects without a multiplicative modifier. The effect inspector hides the row in that case, and shows it locked when a non-default policy is dormant.
+
+> Set `Magnitude Policy = Exponential` only on effects that require compounding per stack. Every other multiplicative effect resolves through `LinearBias`. The policy is stored per effect definition, so changing it changes the resulting magnitude and requires re-verification of the balance values.
+
+Three stacking duration policies are supported (UE5: `EGameplayEffectStackingDurationPolicy`). `RefreshOnSuccessfulApplication` resets the remaining time to the new application's duration, including `SetDuration` overrides; the active effect keeps its original spec lease and adopts only the incoming duration. `NeverRefresh` keeps the original timer. `ExtendDuration` sums the new application's duration onto the remaining time with saturating fixed-point arithmetic and must be paired with `ClearEntireStack` expiration, which the definition validator enforces. Predicted applications that would stack onto an existing effect fail closed with `PredictionUnsupported` before any mutation, so predicted paths cannot perturb an authoritative duration timer.
+
+Application requirements run before insertion. Ongoing requirements control whether an active effect contributes while tags change. Removal tags support dispel behavior. Duration and infinite effects may grant tags and abilities for their active lifetime.
+
+## GameplayTags
+
+Tags are the shared vocabulary for activation, blocking, cancellation, immunity, effect identity, granted state, cooldowns, events, cues, and SetByCaller data.
+
+Recommended namespaces include:
+
+```text
+Ability.Attack.Primary
+Ability.Movement.Dash
+Cooldown.Ability.Dash
+State.CrowdControl.Stunned
+State.Immune.Fire
+Effect.Damage.Fire
+GameplayCue.Fire.Impact
+Data.Damage
+Attribute.Vital.Health
+```
+
+`CombinedTags` aggregates loose tags and tags granted by active effects. It and `ImmunityTags` are query-only `GASReadOnlyTagView` instances; mutation remains on ASC methods such as `AddLooseGameplayTag`, `RemoveLooseGameplayTag`, `AddImmunityTag`, and `RemoveImmunityTag`. Loose tags are explicitly owned by project code: every `AddLooseGameplayTag` must have a defined removal path. Effect-granted tags are owned by the active effect and are removed with it.
+
+Ability and effect construction snapshots tag queries used by hot paths. Treat runtime definitions as immutable; create or reload an authoring asset when configuration changes.
+
+## AbilityTasks and target data
+
+AbilityTasks provide ability-owned work such as delays, repeats, tag waits, attribute waits, gameplay event waits, effect waits, confirmation/cancellation, and targeting. Create them with the ability factory, subscribe, then activate according to the task API. The ability owns cancellation and final release of each task.
+
+Terminal callbacks do not own task teardown. One-shot, cancellation, target-data, delay, repeat, tag, attribute, gameplay-event, effect, and ability-wait tasks record terminal ownership before invoking project code and close through guarded cleanup. `AbilityTask_WaitTargetData` nests TargetData release and task teardown so `EndTask` is still attempted when either the consumer callback or TargetData reset throws. Callback exceptions are not swallowed and can still propagate to the caller, but the tested task lease is removed from active ownership. A reentrant second terminal signal is ignored.
+
+Every AbilityTask is freshly constructed for one lease. Terminal `finally` blocks, `Activate` failure cleanup, Tick failure cleanup, prediction-cancellation snapshots, and task initialization compare the captured internal lease generation before ending or registering the task. Generation exhaustion and post-release access fail closed. The generation is internal bookkeeping rather than a public handle; retain neither the task nor its mutable callback state after `EndTask`, cancellation, ability end, or owner disposal. The released object is discarded and is never issued for a later lease, so a stale task reference cannot alias another operation through sequential object reuse.
+
+`AbilityTask_WaitGameplayTagAdded` and `AbilityTask_WaitGameplayTagRemoved` subscribe before inspecting current tag state, so an edge cannot be lost between the check and registration. With `triggerOnce: false`, an already-satisfied state is reported immediately after subscription and that callback is the final operation of the activation frame. If it ends the task, the earlier stack performs no later field write, and generation-checked activation failure cleanup cannot operate on the released lease.
+
+`EndAbility` marks the ability as ending before cancellation, preventing cancellation callbacks from creating another task. It attempts cancellation and release for every active task even when individual callbacks throw, clears task indexes, and reports the first failure only after teardown has been attempted. During ASC shutdown, every granted spec runs its removal path before active effects are removed, and spec release remains in `finally`; effect state therefore remains available while ability-owned task and effect cleanup runs.
+
+### TargetData lease rule
+
+`ITargetActor.Configure(ability, onTargetDataReady, onCancelled)` is a single-operation request/response boundary. It wires exactly one completion callback and one cancellation callback. For each configured operation, the TargetActor must invoke exactly one of those terminal callbacks exactly once; it must not expose, combine, or invoke them as multicast notifications. Completion transfers one `TargetData` lease to the task exactly once. The TargetActor must not retain, release, reuse, or publish that lease after transfer; cancellation transfers no lease.
+
+`AbilityTask_WaitTargetData` is the sole owner of the transferred lease. `OnValidData` receives only callback-scoped borrowed access, and the task calls `TargetData.Release()` in a `finally` block immediately after that callback. Assign one result consumer rather than combining delegates, then read or copy all durable information inside the callback:
+
+```csharp
+task.OnValidData = data =>
+{
+    var actors = (GameplayAbilityTargetData_ActorArray)data;
+    for (int i = 0; i < actors.ActorCount; i++)
     {
-        var vfx = await poolManager.GetAsync(BurnVFXPrefab, parameters.TargetObject.transform.position, Quaternion.identity);
-        vfx.transform.SetParent(parameters.TargetObject.transform);
-        return vfx; // Tracked by manager
+        stableTargetIds.Add(targetIdResolver(actors.GetActor(i)));
     }
 
-    public async UniTask OnRemovedAsync(GameObject instance, GameplayCueParameters parameters)
+    // Do not retain data or actor references through the TargetData lease.
+};
+```
+
+Lease-protected operations throw after release. Every `TargetData` object, including a standalone public construction, is one-shot and becomes permanently invalid when `Release()` succeeds, so a stale raw reference cannot become valid for a later operation. This closes sequential raw-reference ABA, but it does not extend the callback lifetime: never retain or access `TargetData`, actor references obtained from it, or mutable payload state after the callback or an explicit `Release()`. Target arrays are bounded by `MaxTargetsPerTargetData`. Runtime TargetActors should use `AbilitySystemComponent.RentTargetData<T>()` so the context owns lease accounting and applies its configured target limit; standalone construction is not included in context memory statistics.
+
+### Local TargetData validation
+
+`TargetData` and `AbilitySystemComponent.TryValidateTargetData` remain local Runtime APIs. Validation enforces the owning ASC/spec/prediction relationship, configured target count, object lifetime, finite coordinates, and the caller's finite non-negative range before gameplay consumes the one-shot lease. The data remains owned by exactly one local workflow on the context owner thread, must be released exactly once by its owner, and must not be published through multicast or retained after its scope.
+
+Local `TargetData` leases are never serialized. The optional `CycloneGames.GameplayAbilities.Networking` package provides bounded `ActorList` and `SingleHit` wire records plus confirm/cancel commands. Its authority handler receives stable identities and portable values, not Unity objects or local leases. Product authorization and authoritative range, visibility, collision, faction, lifetime, and rate checks remain mandatory before gameplay consumes the intent.
+
+## GameplayCues
+
+GameplayCues are presentation events. They must not decide damage, cost, cooldown, authority, or any other gameplay invariant.
+
+Events are:
+
+- `OnActive`: a persistent effect becomes active;
+- `WhileActive`: active presentation;
+- `Executed`: an instant or periodic execution;
+- `Removed`: persistent presentation ends.
+
+`AbilitySystemComponent.OnGameplayCueCommitted` is the synchronous owner-thread observation boundary for non-presentation consumers. It publishes a readonly, strongly typed `GameplayCueCommitted` value only after the corresponding effect mutation has committed. Instant `Executed` cues carry a zero active-effect reconciliation ID; `OnActive`, `Removed`, and each actual periodic `Executed` occurrence carry the same positive process-local reconciliation ID for that active effect. Source ability policy, source spec handle, prediction key, and the target ASC state version are captured before a long-lived effect releases its borrowed ability-instance reference.
+
+Each committed-cue observer is invoked independently. An exception is logged and cannot undo the committed effect or suppress later observers; a local `IGameplayCueManager` failure likewise does not suppress committed observation. The callback is not a transport or global event bus. Its ASC and effect references are borrowed for the synchronous call; consumers that cross a lifetime or thread boundary must copy only the stable values they own. Subscription, removal, and dispatch use the ASC owner thread, and warmed dispatch uses the existing callback buffer without a per-cue observer collection allocation.
+
+`GameplayCueManager` supports static address registration, runtime handlers, persistent instance tracking, prediction commit/rollback, async loading, and bounded GameObject pooling. Concurrent requests for the same static address share one in-flight load. After every await, the manager revalidates registration, target lifetime, cue reference state, cancellation, and lease ownership; a late or invalid result is not published. Async dispatch copies immutable cue parameters instead of retaining an effect-context reference past its valid lifetime.
+
+`GameObjectPoolManager.PoolConfig` explicitly bounds asset pools, total active leases, leases per pool, retained instances per pool, `MaxTotalRetainedInstances` across all pools, minimum retention, and idle expiration. Different asset keys may prewarm concurrently, but each asset pool permits at most one in-flight `PrewarmPoolAsync`; another unsatisfied prewarm for that key throws. Every prewarm reserves from the global retained budget before awaiting, so operations across different keys cannot collectively oversubscribe it. Global `AggressiveShrink()` skips an in-flight pool, while targeted shrink or `ClearPool` for that key throws. A returned instance that exceeds either retention bound is destroyed.
+
+`GetAsync`, `PrewarmPoolAsync`, and shared handle loading enter through the Unity main thread. An external cancellation can resume an awaiting continuation on a worker, so their `finally` paths switch back to the main thread without the canceled token before changing pool accounting. `GetAsync` releases its pending lease-request count; prewarm clears its in-flight flag and returns every unused retained-instance reservation; shared-load waiters decrement their count. Canceling one waiter does not cancel a load still needed by another waiter; the shared load is canceled only when the final waiter leaves. Shutdown cancellation and load failure dispose an acquired resource handle on the main thread.
+
+Persistent cue activation has the same ownership closure. Once `CreateInstanceAsync` has successfully returned a lease, a worker-thread fault or cancellation in `OnActiveAsync` or `OnWhileActiveAsync` switches cleanup to the main thread and releases that lease unless ownership already transferred to the tracker. If `CreateInstanceAsync` itself acquires a lease and then fails before returning it, that implementation must release the lease because the workflow never received the ownership token. Persistent removal owns a release record and returns the tracked lease in `finally` after success, cancellation, or handler failure.
+
+Pooled prefabs can implement `IGameObjectPoolLifecycle`. The manager discovers and caches handlers when the instance is created, invokes `OnRentFromPool` before activation, and invokes `OnReturnToPool` in reverse order before deactivation, reparenting to the pool root, and local-scale restoration. A lifecycle callback failure quarantines and destroys that instance instead of retaining uncertain state. Lifecycle callbacks must reset all component-owned transient state and must not recursively release their lease.
+
+`GameObjectLease` is the ownership token for a rented cue object. The issuing manager records owner identity, instance ID, raw instance reference, and a monotonically increasing generation. `Release` accepts only the exact outstanding tuple and rejects foreign-manager, duplicate, and stale-generation returns. This prevents a copied lease from releasing the same instance after that instance has been returned and rented again—the GameObject pool's ABA release hazard.
+
+`GameObjectLease.IsValid` reports only that the value is structurally issued; a copied value can remain structurally valid after its lease was returned. Every `GameObjectLease.Instance` access delegates to its issuing manager and performs an average `O(1)` active-lease lookup. The manager validates Unity main-thread affinity, shutdown state, authority/owner identity, non-zero instance ID and generation, the exact active `(instance ID, generation, raw reference)` tuple, and Unity object liveness before returning the object. Access after release or shutdown fails closed.
+
+The returned `GameObject` is borrowed only while that lease remains outstanding. If a consumer stores the raw `GameObject` separately, the lease cannot revoke or intercept that cached reference. The consumer is responsible for discarding it at the lease boundary and must never mutate, deactivate, destroy, or reparent it after release.
+
+Persistent cue activation and removal are cancellation-owned workflows. `IPersistentGameplayCue.CreateInstanceAsync` creates and returns the lease; `OnActiveAsync`, `OnWhileActiveAsync`, and `OnRemovedAsync` operate on the manager-owned instance lifecycle. If an implementation acquires a lease and observes cancellation before returning it, that implementation must release it. After `CreateInstanceAsync` returns, the dispatch workflow owns the lease and either transfers it into the tracker after all activation checks succeed or releases it in `finally`. `OnRemovedAsync` receives only a borrowed raw instance; the manager releases the tracked lease after completion, cancellation, or failure.
+
+Persistent occurrences are reference-counted by target and cue tag. Only the first occurrence starts one activation workflow and creates one tracked instance; additional occurrences share it. Removal cancels and releases presentation only after the final matching occurrence is removed. Prediction commit marks matching occurrences as committed, so later rollback cleanup ignores them; rollback removes only provisional occurrences carrying that prediction key. This reference model and the shared load path prevent duplicate persistent instances during overlapping effects or concurrent first loads.
+
+The AssetManagement integration wraps each loaded `IAssetHandle<T>` in one `IResourceHandle<T>` owner. Disposal clears and disposes that one underlying handle at most once. The wrapper is not pooled, shared ownership is not implied, and the consumer that receives it must transfer or dispose it exactly once. Cue caches and asset pools dispose their owned wrappers during eviction or shutdown.
+
+Register static cue addresses during composition:
+
+```csharp
+var cueTag = GameplayTagManager.RequestTag("GameplayCue.Fire.Impact");
+cueManager.RegisterStaticCue(cueTag, "GameplayCues/GC_FireImpact");
+```
+
+A dedicated server should use `NullGameplayCueManager.Instance`. Visual clients must call `GameplayCueManager.Dispose()` during orderly shutdown.
+
+## Prediction and replication
+
+### Local prediction lifecycle
+
+Prediction records, keys, rollback snapshots, and closure ordering remain local Runtime mechanisms. They use simulation frames rather than Unity render-frame identity, have explicit capacity limits, and close owned state before publishing terminal callbacks. Predicted effect application still rejects ambiguous stacking, overlapping attribute ownership, unsupported custom execution, and exhausted prediction budgets before mutation.
+
+The authority/replica role is explicit. `LocalOnly` executes only in the current runtime. `AuthorityOnly` executes on an `Authority` context. `LocalPredicted` opens optimistic work on a replica and is executed again through the authority boundary after command validation. Prediction windows end through `CommitPredictionWindow` or `RollbackPredictionWindow`; commit preserves accepted local work while clearing prediction bookkeeping, and rollback reverts tracked effects, attributes, tasks, cues, and ability activity.
+
+### Authority activation boundary
+
+Choose the immutable role when constructing the context:
+
+```csharp
+var serverContext = new GASRuntimeContext(
+    authorityMode: GASRuntimeAuthorityMode.Authority);
+
+var replicaContext = new GASRuntimeContext(
+    authorityMode: GASRuntimeAuthorityMode.Replica);
+```
+
+For an `Activate` command, a product endpoint may invoke this public authority boundary after it has authenticated the sender, verified target ownership, enforced replay/rate/work budgets, and resolved an authority-issued grant ID to the current local `GameplayAbilitySpec`:
+
+```csharp
+GASAuthorityActivationResult result =
+    authorityASC.TryExecuteAuthorityAbility(resolvedLocalSpec);
+
+switch (result.Status)
+{
+    case GASAuthorityActivationStatus.Activated:
+        // Encode one correlated terminal response.
+        break;
+    case GASAuthorityActivationStatus.MissingOrStaleGrant:
+    case GASAuthorityActivationStatus.WrongExecutionPolicy:
+    case GASAuthorityActivationStatus.AbilityRejected:
+    case GASAuthorityActivationStatus.RuntimeUnavailable:
+        // Map to a stable protocol result without retrying reentrantly.
+        break;
+}
+```
+
+Cancellation and input-edge commands use `TryCancelAbility` and `TrySetAbilityInputPressed`. Target confirmation and cancellation pass through the product-owned `IGASNetworkTargetCommandHandler`. Each path remains explicit; none bypasses authentication, ownership, replay, rate, or world validation.
+
+`TryExecuteAuthorityAbility` requires an authoritative context and the exact live spec owned and registered by that ASC. It accepts `AuthorityOnly` and `LocalPredicted`, rejects active or otherwise unavailable abilities, respects mutation/resync guards, returns the current authoritative state version, owns no transport state, allocates no operation object, and sends no packet. Its correlation-key overload propagates a validated command sequence into effects and cues created by the authority activation.
+
+`GASRuntimeAuthorityMode.Invalid` and the default `GASAuthorityActivationResult` fail closed. The context role does not establish connection authority: authentication and permission remain endpoint responsibilities.
+
+### Optional Networking integration
+
+`CycloneGames.GameplayAbilities.Networking` version `1.0.0` is the backend-neutral network integration. It supplies:
+
+- stable entity, grant, effect, content, and tag identities;
+- a fail-closed protocol/content/tags/wire-schema handshake;
+- activation, cancellation, input, bounded TargetData, terminal-result, state, acknowledgement, resync, and GameplayCue contracts;
+- explicit little-endian `Span` codecs and structural validators;
+- bounded replay, authority identity maps, replica identity maps, state buffers, delta/chunk planning, and semantic checksums;
+- `GASNetworkEndpoint` for handler ownership, handshake gating, direction checks, dispatch, and failure reporting;
+- authority/replica ASC state adapters, exact command processing, local prediction control, and a deterministic runtime content resolver;
+- `GASNetworkContentCatalogAsset` with a validated custom Inspector.
+
+The integration uses `CycloneGames.Networking.INetworkMessageEndpoint` and does not depend on Mirror, Mirage, or Nakama. Product code still owns authentication, connection-to-account mapping, entity ownership, permission, rate policy, interest management, world-dependent target checks, timeout scheduling, reconnect policy, and owner-thread marshaling.
+
+The network state covers grants and their granting effects, active/input flags, attributes, active effects, source grants, inhibition, stack/timer state, SetByCaller values, dynamic tags, and exact loose-tag counts. Static definitions are resolved through the compatible content catalog. See [`CycloneGames.GameplayAbilities.Networking/README.md`](../CycloneGames.GameplayAbilities.Networking/README.md) for the complete composition and validation contract.
+
+### Process-local reconciliation transaction
+
+`GASAbilitySystemStateDeltaBuffer` remains a process-local reconciliation scratch structure. It contains counted arrays, local identities, and runtime object references; it is not a wire DTO, cannot cross processes safely, and must not be retained as an asynchronous message.
+
+Each ASC assigns a positive process-local reconciliation identity when an active effect is created. The identity is unique within that ASC and immutable for the effect lifetime. It exists only so capture/apply can correlate local objects; it is not a wire ID and external protocols translate it through their identity maps.
+
+`PreparePendingStateDeltaNonAlloc` and `CommitPreparedStateDelta` form a prepare/copy-or-encode/commit transaction over the authority's pending-change tracker:
+
+```csharp
+authorityASC.PreparePendingStateDeltaNonAlloc(delta);
+
+// Product code must synchronously copy or encode every counted range into
+// its own bounded, versioned DTO and map every identity to a stable wire ID.
+bool encoded = EncodeIntoProductOwnedWireBuffer(delta);
+if (encoded)
+{
+    if (!authorityASC.CommitPreparedStateDelta(delta))
     {
-        poolManager.Release(instance); // Auto-cleanup
+        // Source state changed; pending changes remain dirty for a new capture.
     }
 }
 ```
 
-### Registering & Debugging
+The convenience capture path may prepare and commit locally, but it does not send anything. A rejected encode, exception, or source-version mismatch must leave pending changes available for a later capture. State and attribute-registry versions are monotonic but not guaranteed contiguous because a reserved version can remain consumed after later work rejects the mutation.
+
+`ApplyStateDelta` and `TryApplyStateDelta` remain public process-local reconciliation APIs; their visibility does not make them transport endpoints. They validate schema, masks, sequences, baselines, count/array pairs, capacities, process-local definition/source references, reconciliation IDs, tag edges, SetByCaller slices, and checksum before application. Validation failure does not mutate state. Application or checksum failure enters resync-required mode because the multi-section apply is not a cross-system atomic transaction. Active-effect application consumes the references already carried by `GASActiveEffectStateData`; it does not allocate hidden IDs or consult a global resolver. StateDelta updates or creates effects strictly by reconciliation ID; it never promotes or confirms an unbound local effect by prediction key. Do not mix replicated-state-changing `LocalOnly` mutations into the same reconciled ASC; a resulting checksum conflict fails closed and requires an explicit baseline resync.
+
+`GASAbilitySystemStateDeltaBuffer` and `GASAbilitySystemFullStateBuffer` remain process-local bridge structures. The Networking integration maps them to stable wire records, validates and prepares complete receiver state, resolves every runtime reference, and only then invokes the ASC apply boundary on its owner thread. Never serialize either process-local buffer directly.
+
+
+## Memory, performance, and capacity
+
+### Managed runtime memory
+
+Each `GASRuntimeContext` owns lifetime accounting for seven public runtime object groups: `GameplayEffectSpec`, `ActiveGameplayEffect`, `GameplayEffectContext`, `GameplayAbilitySpec`, runtime `GameplayAbility`, `AbilityTask`, and `TargetData`. Every context acquisition constructs a fresh public object. The applicable owner terminal operation—such as caller discard or final spec consumption, active-effect removal, grant clear, per-execution ability end, task end, explicit `TargetData.Release()`, or owner disposal—invalidates that one lease and discards the object permanently. An `InstancedPerActor` ability remains valid across its normal activation ends and is released when its grant is cleared. Each type rejects an internal attempt to acquire another lease after its first lifetime. Released operations fail closed; the same public object is never issued again, which prevents a stale raw reference from aliasing a later sequential lease. Context memory statistics count only context-owned acquisitions.
+
+Only `GameplayEffectSpec` has reusable internal storage. A public spec attaches one private `GameplayEffectSpecBacking` record while active. Release clears all sensitive and mutable fields before the backing can enter the bounded per-context cache; cleanup failure discards the backing. The cache never contains a public spec, context, active effect, ability spec, ability, task, or target-data object.
+
+Configure and observe that cache through the context owner thread:
 
 ```csharp
-// At game start
-GameplayCueManager.Instance.Initialize(resourceLocator, poolManager);
-GameplayCueManager.Instance.RegisterStaticCue("GameplayCue.Impact.Fireball", cueAsset);
+var cacheProfile = new GASRuntimeCacheProfile(
+    effectSpecBackingCapacity: 128); // 0..4096; default is 64
+
+using var context = new GASRuntimeContext(
+    cacheProfile: cacheProfile);
+
+GASRuntimeCacheStatistics cache = context.GetCacheStatistics();
+// cache.Retained, Capacity, Hits, Misses, Discards
+
+context.TrimCaches(); // discards every retained backing record
 ```
 
-**Cue not playing?** Check: (1) tag in effect's `GameplayCues` container, (2) cue registered with manager, (3) `Initialize()` called, (4) valid `TargetObject`.
+`GASRuntimeLeaseStatistics` reports `Active`, `PeakActive`, `Acquisitions`, `InvalidReleases`, and `ReleaseFailures` for one object group. `context.GetMemoryStatistics()` returns `GASRuntimeMemoryStatistics` containing `EffectSpecs`, `ActiveEffects`, `EffectContexts`, `AbilitySpecs`, `Tasks`, `Abilities`, `TargetData`, and their summed `OutstandingLeases`. `context.GetCacheStatistics()` independently reports backing-cache `Retained`, `Capacity`, `Hits`, `Misses`, and `Discards`. `TrimCaches()` clears retained backing records without invalidating active specs. These APIs validate context ownership and disposal; they are diagnostics and explicit cache control, not active-lease recovery.
 
----
+Under `Throw`, cross-thread access throws immediately. Under `LogWarning`, runtime-memory access logs and still throws before mutation. `Disabled` removes only that diagnostic and adds no synchronization. Capacity should come from hardware composition profiles and measured telemetry rather than platform compiler symbols.
 
-## 13. Networking
+No package-wide zero-allocation claim is made. Cache hits can reuse cleared spec backing buffers, but every public runtime acquisition still creates its one-shot object. First use, dictionary or buffer growth, event subscriptions, project callbacks, warnings/errors, authoring conversion, and external adapters can allocate. Successful hot-path ability/effect/prediction events, including committed effect removal and ability cancellation, use the optional `GASTrace` ring rather than emitting a log for every success. `GASTraceEvent.AbilityDefinition` stores the stable ability definition, never a released runtime instance. Trace capacity defaults to `4096`; `SetCapacity` accepts only `1..65536` and resets the ring. Verify representative gameplay with the Unity Profiler and allocation call stacks.
 
-The system is **network-architected** but **transport-agnostic** — it provides prediction infrastructure without locking you into a specific networking library.
+### Stable public collection and tag views
 
-> **Integration Required:** You must bridge `ServerTryActivateAbility` and `ClientActivateAbilitySucceed/Failed` using your networking solution (Mirror, Netcode, Photon, etc.).
+ASC collection and tag queries return cached live views instead of a backing `List<T>`, `HashSet<T>`, or mutable tag container:
 
-### Execution Policies
+| ASC surface | Public type |
+| --- | --- |
+| `AttributeSets`, `ActiveEffects`, `GetActivatableAbilities()` | `GASReadOnlyListView<T>` |
+| `DirtyAttributeNames`, `PendingAddedTags`, `PendingRemovedTags` | `GASReadOnlySetView<T>` |
+| `DirtyAttributeValueSnapshots` | `GASReadOnlyListView<GameplayAttribute>` |
+| `CombinedTags`, `ImmunityTags` | `GASReadOnlyTagView` |
 
-| Policy           | Behavior                                                                      |
-| ---------------- | ----------------------------------------------------------------------------- |
-| `LocalOnly`      | Client-only; no server involvement (UI abilities, cosmetics)                  |
-| `ServerOnly`     | Client requests, server runs; secure but latent                               |
-| `LocalPredicted` | Client runs immediately (predicts), server validates; rolls back on rejection |
+These are stable object identities and live views, not copied snapshots. They expose no backing collection, implicit conversion, mutation method, tag callback registration, or raw container. Every count, index, query, and enumeration step checks ASC owner-thread affinity and disposal, including a view captured before its ASC is disposed. Do not enumerate while synchronously mutating the same owner; copy the required stable IDs or values when a snapshot is required.
 
-### Prediction Keys
+Concrete `foreach` over these view types uses value-type enumerators. The focused allocation guard observed zero current-thread bytes for the tested concrete-view enumeration path after warmup. Enumeration through `IEnumerable<T>` or another interface can box the struct enumerator and is not covered by that result.
 
-Each predicted activation generates a `PredictionKey`. Effects applied under that key are tracked. If the server rejects the activation, all effects tied to that key are automatically rolled back.
+### Consumed and borrowed managed references
 
----
+One-shot runtime lease objects are exposed as raw class references for GAS-style ergonomics. Their ownership contract, not garbage-collector reachability, determines validity:
 
-# V. Production
+| Reference | Owner while valid | Invalidating operation |
+| --- | --- | --- |
+| `GameplayEffectSpec` | Caller before submission; ASC after submission; then the target active effect for duration/infinite applications | Caller `Discard()` before submission, `ApplyGameplayEffectSpecToSelf` on transfer, or active-effect removal |
+| `GameplayEffectContext` | Independent caller before attach; then exactly one owning spec | Caller `Dispose()` before attach, or matching owning-spec discard, consumption, and active-effect removal; only the owning spec may update prediction state or release it after attach |
+| `ActiveGameplayEffect` | Target ASC; consumer access is borrowed | Owner `TryRemoveActiveEffect`, effect clear/expiry, or ASC disposal; no direct consumer release operation |
+| `GameplayAbilitySpec` | Owning ASC | `ClearAbility`, effect-grant removal, authoritative reconciliation replacement, or ASC disposal |
+| Runtime `GameplayAbility` instance | Its spec/activation | Ability end, clear, removal, or ASC disposal according to instancing policy |
+| `AbilityTask` | Active ability | `EndTask`, cancellation, ability end, clear, or ASC disposal |
+| `TargetData` | Explicit renter/receiver, or the AbilityTask while dispatching `OnValidData`; the callback consumer is borrowed only | Owner `Release()` or task callback completion |
 
-## 14. Object Pooling & Performance
+A consumed reference must not be read, compared for current identity, mutated, returned again, or stored for later use. A borrowed reference must not outlive its owner. `GameplayEffectApplicationResult.ActiveEffect`, debugger collections, and ASC read-only lists expose borrowed objects, not ownership transfer.
 
-### Zero-GC Design
+Context-owned `GameplayEffectSpec`, `GameplayEffectContext`, `ActiveGameplayEffect`, `GameplayAbilitySpec`, runtime `GameplayAbility` instances, `AbilityTask`, and `TargetData` receive one lease per object. The release path invalidates and discards each object instead of reissuing it, so sequential raw-reference ABA is closed for these public types. Released-object guards, ownership checks, and invalid-release counters fail closed when stale code calls back into the API. They do not make a stale reference useful or extend a borrowed lifetime: copy stable IDs or immutable values when data must survive `Discard`, `Clear`, `Remove`, ability end, task end, target-data release, or owner disposal.
 
-Every major runtime object is pooled:
+Internal lease generations still protect framework cleanup against reentrant or out-of-order work within the current lifetime. They are not consumer identity and do not change the rule that a released raw reference must be discarded.
 
-| Type                    | Pool                                                  |
-| ----------------------- | ----------------------------------------------------- |
-| `GameplayAbilitySpec`   | Automatic                                             |
-| `GameplayEffectSpec`    | `GameplayEffectSpec.Create()` / auto-return           |
-| `ActiveGameplayEffect`  | `ActiveGameplayEffect.Create()` / auto-return         |
-| `AbilityTask`           | `NewAbilityTask<T>()` / auto-return                   |
-| `GameplayEffectContext` | `GameplayEffectContextFactory.Create()` / auto-return |
+### Hard limits
 
-**Critical rule:** Never use `new` to create these objects — always use the factory/pool APIs.
+`GASRuntimeLimits` bounds attribute sets, attributes, granted abilities, active effects, prediction windows, targets, SetByCaller entries, modifiers per effect, Core modifiers, outstanding predicted attribute snapshots, tag changes per delta, and per-tick catch-up work. `GASAbilitySystemLimits` applies corresponding state limits to the Unity-free state.
 
-### Pool Configuration
+`MaxPeriodicEffectExecutionsPerTick` and `MaxAbilityTaskRepeatExecutionsPerTick` both default to `8` and must be positive. Each active periodic effect and repeat task executes no more than its configured budget in one tick. Excess elapsed intervals remain in the timer as deterministic backlog and are processed on later ticks; the runtime does not silently drop or merge repetitions. This bounds each catch-up loop without changing elapsed-time ordering. Projects must still budget the aggregate cost of all active effects and tasks.
+
+There is no retained public AbilityTask pool and no task-cache capacity that limits concurrent tasks. Each ability must bound the tasks it can own through its workflow and project limits, and product stress tests must cover the maximum authored concurrency.
+
+Limit failures are operational signals. Record them with entity, ability/effect definition ID, current count, configured limit, and authority role without logging sensitive payload content.
+
+### Complexity guidance
+
+- Attribute lookup and spec/effect handle lookup use indexed maps after registration.
+- Tag operations depend on tag-container implementation and query size.
+- Stacking lookups use maintained indexes by target/source.
+- ASC ability ticking copies the current ticking-spec set into a reusable snapshot, then checks live membership before each dispatch. A spec removed before its turn is skipped, a spec activated during the pass starts on the next simulation frame, and each initially live spec is dispatched at most once. Nested ASC Tick and ASC disposal from a tick callback are rejected. With `T` ticking specs, the snapshot pass is `O(T)` with average `O(1)` membership checks and `O(T)` retained snapshot capacity. `ReserveRuntimeCapacity(tickingAbilityCapacity: ...)` moves expected growth to composition; cold growth can still allocate.
+- Inside one ability, task removal during iteration writes a tombstone and immediately removes the task from the membership index. A `finally` pass compacts tombstones in place. A task created during the pass is deferred to the next task tick, a removed sibling is skipped, ability end stops traversal through the activation-generation guard, and nested task ticking is rejected. Traversal is `O(K)` for `K` initially tickable tasks; a pass with removals adds an `O(K)` in-place compaction and no scratch collection. Task-list capacity is retained by the ability instance and can grow on cold use.
+- Active-effect Tick cost grows with active effects and periodic work. The preallocated ASC snapshot and task tombstone paths observed zero current-thread allocation in their focused steady-state tests; this is not a package-wide Tick or zero-GC guarantee.
+- Broad callbacks, custom requirements, calculations, and cue handlers remain project-controlled cost.
+
+For 10,000+ simple simulation entities, use the Unity-free Core data model or a project DOD/batch simulation and bridge only presentation-relevant entities to Runtime ASCs. Do not create one Unity-facing ASC with per-frame tasks for every data-only entity without profiling.
+
+## Threading and safety
+
+`GASRuntimeContext` captures its owner managed-thread ID. ASC public surfaces, stable views, tag/event registration and dispatch, capacity reservation, and runtime-list-pool controls check disposal and thread ownership before access. The ASC thread policy is:
+
+- `Throw`: fail fast on cross-thread access;
+- `LogWarning`: write a diagnostic and then reject the access before mutation;
+- `Disabled`: skip only the ASC-specific thread-ID check, without making state thread-safe or disabling the owning `GASRuntimeContext` check.
+
+Mutable context, ASC, StateDelta application, and runtime memory use owner-thread confinement instead of broad locking. Definition and attribute registries protect only their own maps; that does not make ASC or Runtime APIs safe for cross-thread use. `Disabled` is suitable only when the caller already proves confinement and understands that disabling checks does not add synchronization.
+
+ASC effect-removal, execution-output, rollback, and prediction-task scratch belong to the owning ASC or runtime ability instance. They are not process-global pools, so separate contexts on different owner threads do not share those mutable lists. `GameplayCueManager` owns private scratch-list pools inside its asserted Unity-main-thread boundary. Each closed element type retains at most four inactive lists; outstanding leases and retained element capacity are bounded by the relevant `PoolConfig` limits. Return clears references, generation checks reject foreign, stale, or duplicate returns, oversized or excess inactive entries are discarded, and shutdown rejects new leases while allowing already-issued leases to return only for clearing and discard. Internal counters retain outstanding, peak, discard, and invalid-return diagnostics; shutdown reports any lease still outstanding. This is a local scratch policy, not a thread-safety guarantee and not a dependency on a general-purpose factory module.
+
+Unity Runtime objects, `GameObject` targeting, ScriptableObject authoring, cue loading, cue handlers, and GameObject pools have Unity main-thread affinity. Network and file callbacks must marshal validated data before invoking Runtime APIs. Separate contexts may be owned by separate simulation threads only when their consumers do not touch Unity-affine objects and no mutable service is shared across contexts. Proving that boundary is a project validation responsibility, not a package-wide thread-safety guarantee.
+
+ASC disposal fails fast while a runtime mutation, state transmission, Tick, or typed-observer dispatch is active. During an accepted shutdown it continues across individual cleanup failures: active abilities attempt complete task cancellation before their specs are released; active effects independently remove Core/index/modifier ownership and both definition-granted and dynamic-granted tags before their leases are released; callback stores and retained internal list pools are then cleared. Cleanup failures are aggregated for diagnostics instead of stopping the remaining ownership closure.
+
+Dispose closes ownership, cancellation, and lease accounting; it does not keep any consumed or borrowed reference valid:
+
+1. stop input and inbound transport delivery;
+2. cancel or finish abilities and tasks;
+3. release explicitly owned target data and call `Discard()` on every unsubmitted caller-owned spec;
+4. dispose every ASC;
+5. verify memory statistics do not show unexpected outstanding leases;
+6. dispose the context;
+7. dispose cue and transport services owned by composition.
+
+APIs throw or reject use after disposal. Do not swallow these signals during development.
+
+## ScriptableObject authoring
+
+`GameplayAbilitySO`, `GameplayEffectSO`, execution-calculation assets, cue assets, and `GASOverlayConfig` are Unity authoring bridges. Runtime rules still live in C# objects.
+
+Create an effect through:
+
+`Assets > Create > CycloneGames > GameplayAbilities > Definitions > Gameplay Effect`
+
+The effect inspector groups duration, modifiers, stacking, tags, granted abilities, cues, and advanced policies. A `GameplayEffectSO` lazily creates a reusable runtime definition on the Unity main thread. Validation and deserialization clear the cache; `ClearCache()` is available to explicit authoring tools. Do not mutate the cached definition during gameplay.
+
+The stacking rows follow the configuration: `Stack Limit Mode = Unlimited` stops asking for a limit, the magnitude policy row only appears when the effect owns a `Multiply` or `Division` modifier, and a row that became irrelevant while still holding a non-default value is shown locked instead of hidden so a dormant value never reapplies unnoticed.
+
+`GameplayAbilitySO.GetGameplayAbility()` lazily creates and returns one reusable immutable definition per loaded asset revision. Custom assets implement `CreateGameplayAbility()`, construct the derived ability with only its derived immutable inputs, then call `InitializeAbility(ability)` exactly once so every base tag, trigger, cost, cooldown, and policy is validated and transferred consistently. Validation and deserialization clear the definition cache. `CreateRuntimeInstance()` reconstructs only activation-state inputs; Runtime copies the sealed base configuration from the cached definition and must not invoke `InitializeAbility` again.
+
+Asset configuration should use stable tag and attribute names. Renaming a serialized type, field, tag, or definition identity requires a project migration plan and fixture coverage.
+
+## Editor tools
+
+The Editor assembly is isolated to the Editor platform.
+
+| Menu | Use |
+| --- | --- |
+| `Tools/CycloneGames/GameplayAbilities/Debugger` | Inspect one selected ASC: attributes, abilities, effects, tags, prediction, one-shot lease accounting, and EffectSpec backing-cache statistics; trim retained backing records explicitly on the owner thread |
+| `Tools/CycloneGames/GameplayAbilities/Debugger (Multi-Target)` | Compare explicitly selected ASCs |
+| `Tools/CycloneGames/GameplayAbilities/Trace` | Inspect bounded GAS trace events |
+| `Tools/CycloneGames/GameplayAbilities/Overlay/Select Or Create Config` | Select or create overlay configuration |
+| `Tools/CycloneGames/GameplayAbilities/Overlay/Toggle In Play Mode` | Toggle the runtime diagnostics overlay for the live ASCs exposed by the selected GameObjects; multi-selection is supported |
+
+The debugger uses selection or explicit refresh rather than periodic whole-scene scanning. Trace selection is sequence-based so ring-buffer movement does not silently change the selected event.
+
+Custom inspectors edit serialized fields through `SerializedObject`/`SerializedProperty` and support Unity Undo, Prefab overrides, and multi-object editing where applicable. Diagnostics are observability tools, not proof of Player, IL2CPP, platform, or allocation behavior.
+
+`AbilitySystemComponent` is a pure C# runtime object rather than a `UnityEngine.Object`, so Unity does not draw an Inspector for it directly. The sample's `AbilitySystemComponentHolder` Inspector exposes Play Mode-only controls for its hosted ASC. Select one or more holders, then use **Add / Update Selected & Show**, **Remove Selected**, **Show Overlay**, or **Hide Overlay**. These commands change transient runtime diagnostics state only: they do not serialize a debug flag, create a Prefab override, own or dispose an ASC, call `ClearTargets`, remove unselected ASCs, or destroy the overlay singleton. The registry contains one shared entry per ASC, so adding, updating, or removing a selected ASC changes that entry regardless of which caller registered it.
+
+Projects that provide a different ASC host can expose the same workflow from their own Custom Inspector by calling `TryAddTarget`, `IsTargetRegistered`, `RemoveTarget`, and `SetEnabled`. Keep registration at an explicit host or composition boundary; do not discover ASCs by scanning the scene on every Inspector repaint.
+
+The optional runtime overlay accepts a bounded, explicitly registered set of live ASCs. It performs no whole-scene discovery and no reflection in the Runtime assembly. It is not created automatically during Runtime startup:
 
 ```csharp
-// Choose a preset matching your game scale
-GASPoolUtility.ConfigureUltra();     // Bullet hell (2000+ entities)
-GASPoolUtility.ConfigureHigh();      // Vampire Survivors / RTS
-GASPoolUtility.ConfigureMedium();    // Action RPG (default)
-GASPoolUtility.ConfigureLow();       // Adventure / casual
-GASPoolUtility.ConfigureMinimal();   // Minimal footprint
-GASPoolUtility.ConfigureMobile();    // Mobile-optimized
+GASDebugOverlay.Initialize(enableAtStart: false, dontDestroyOnLoad: false);
 
-// Pre-warm during loading screens
-GASPoolUtility.WarmAllPools();
+GASDebugOverlay.TryAddTarget(
+    playerASC,
+    owner: playerGameObject,
+    trackTarget: playerGameObject.transform,
+    displayName: "Player");
+GASDebugOverlay.TryAddTarget(
+    enemyASC,
+    owner: enemyGameObject,
+    trackTarget: enemyGameObject.transform,
+    displayName: "Enemy");
 
-// Scene transitions
-GASPoolUtility.AggressiveShrinkAll();
+GASDebugOverlay.SetEnabled(true);
+
+// Each registration owner removes only its own targets.
+GASDebugOverlay.RemoveTarget(enemyASC);
+
+// Only the composition owner destroys the singleton at diagnostics shutdown.
+GASDebugOverlay.Cleanup();
 ```
 
-### GameObject Pool Integration (W-TinyLFU)
+`TryAddTarget` uses ASC reference identity. Registering the same ASC again updates its owner, tracking target, and display name without consuming another slot. The overlay does not own or dispose ASCs, owners, or transforms; callers must remove their registrations before those owners shut down. Disposed ASCs are pruned defensively. `ClearTargets` is reserved for a composition owner that intentionally replaces the complete set.
 
-The `GameObjectPoolManager` integrates with asset management caching:
+Target registration and visibility are independent. `TryAddTarget`, `RemoveTarget`, and `ClearTargets` do not toggle the overlay; `SetEnabled` does not change registrations. `IsTargetRegistered` reports whether one live ASC is currently registered. `BoundTargetCount` reports live registrations. `TargetCapacity` reports the current instance's fixed registration budget. The budget is read from `GASOverlayConfig.MaxPanels` when the overlay initializes, defaults to 8, and is clamped to 1 through 32. `TryAddTarget` returns `false` for a null or disposed ASC, or when the bounded set is full; it never evicts another target. Recreate the overlay to apply a changed `MaxPanels` value.
 
-- **`IdleExpirationTime > 0`** — pool auto-destructs after N seconds of complete inactivity, releasing asset handles back to the W-TinyLFU cache for eviction
-- **`IdleExpirationTime <= 0`** — immortal pool, never auto-decays (use for core abilities like main weapon VFX)
+The overlay resolves its configuration in this order: the `configuration` argument of `GASDebugOverlay.Initialize`, `GASDebugOverlay.ActiveConfiguration`, then an in-memory `GASOverlayConfig.CreateDefault()` instance. A supplied asset is cloned at initialization, so the in-overlay settings panel edits only the runtime clone and never modifies a project asset. `ApplyConfiguration` replaces the clone for a live overlay; target capacity is captured once and is not affected by a later replacement.
 
-### Performance Tips
+`Toggle` remains a single-target convenience API: it replaces the complete target set with the supplied live ASC and toggles visibility. The Editor menu collects live ASCs only from the exact selected GameObjects before replacing its target set; it does not scan the scene. The sample registers Player and Enemy explicitly.
 
-```csharp
-// ✅ Cache tag containers
-private static readonly GameplayTagContainer PoisonTag =
-    GameplayTagContainer.FromTag("Debuff.Poison");
+All overlay APIs are Unity-main-thread diagnostics APIs. Registration is a bounded cold path with a maximum linear scan of 32 targets. The enabled IMGUI presentation formats diagnostic text and is not a zero-allocation gameplay path. Keep it absent or disabled in release and headless compositions unless runtime diagnostics are an explicit product requirement.
 
-// ❌ Creates new container every call (allocation!)
-target.RemoveActiveEffectsWithGrantedTags(GameplayTagContainer.FromTag("Debuff.Poison"));
-```
+## Platform guidance
 
-- Attributes only recalculate when marked dirty (batched once per frame)
-- Tag lookups are O(1) hash-based
-- Pool health monitoring: `GASPoolUtility.CheckPoolHealth(out string report)` — aim for >80% hit rate
+The table describes static design compatibility. A platform is verified only after the project runs its target Player build and tests on representative hardware.
 
----
+| Platform | Static design guidance | Required project verification |
+| --- | --- | --- |
+| Windows, Linux, macOS | Core has no Unity dependency; Runtime uses managed Unity APIs and UniTask | Mono/IL2CPP choice, dedicated/client build, profiler captures, long-session soak |
+| iOS | Explicit IDs and registration avoid runtime code generation requirements | IL2CPP, stripping, memory warning behavior, suspend/resume, thermal/device tiers |
+| Android | EffectSpec backing-cache and cue-retention profiles are composition inputs rather than platform constants | IL2CPP, low-memory tiers, lifecycle pause/resume, thermal throttling, vendor devices |
+| WebGL | Runtime does not require background worker threads; owner-thread confinement fits the single-thread profile | WebSocket/HTTP transport adapter, async asset behavior, browser memory ceiling, tab suspend |
+| Dedicated Server | Core is Unity-free; Runtime can use `NullGameplayCueManager` | Headless build, transport adapter, tick scheduling, state checksum/recovery, soak |
+| Future consoles | Core/Runtime asmdefs disable unsafe code; attribute registration is explicit and the runtime path does not require reflection or a native plugin | SDK/compiler restrictions, AOT/stripping, suspend/resume, memory budgets, certification requirements |
 
-## 15. Editor Tools & Debugging
+Use hardware quality profiles to supply `GASRuntimeCacheProfile` backing capacity and GameplayCue pool retention. A low-memory device may retain fewer internal EffectSpec backing records and fewer cue instances while preserving the same public one-shot lease and gameplay-limit contracts. Platform-specific optimizations belong in adapters or composition profiles, not in common gameplay contracts.
 
-The framework ships with a suite of editor extensions and a runtime debug overlay to streamline development and debugging.
+The Core/Runtime source and asmdefs contain no `UnityEditor` dependency in Runtime, unsafe code, reflection-based registration, native plugin, platform-name-based tuning, background-worker requirement, or runtime code-generation path. Core has `noEngineReferences: true`; Runtime contains the Unity-facing adapters. These are static portability facts, not execution evidence. Windows, Linux, macOS, iOS, Android, WebGL, dedicated-server, and console profiles still require their own Player build, IL2CPP/AOT and stripping checks where applicable, representative-device profiling, lifecycle tests, memory-pressure tests, and long-session soak results.
 
-### Tool Overview
+## Integration assemblies
 
-| Tool | Type | Access | Purpose |
-|---|---|---|---|
-| **GAS Debugger** | Editor Window | `Tools > CycloneGames > GameplayAbilities > GAS Debugger` | Deep inspection of a selected ASC — effects, attributes, abilities, tags, immunity, pool stats, event log |
-| **GAS Debug Overlay** | Runtime IMGUI | `Tools > CycloneGames > GameplayAbilities > GAS Overlay (Play Mode)` or `GASDebugOverlay.Toggle()` | Live heads-up overlay — auto-discovers all ASCs in scene, world-position tracking, collapsible panels |
-| **GAS Overlay Config** | ScriptableObject | `Tools > CycloneGames > GameplayAbilities > GAS Overlay Config` | Configure overlay appearance — tag colors, effect colors, panel settings, primary attribute priority |
-| **GameplayEffectSO Inspector** | Custom Editor | Automatic (select any `GameplayEffectSO` asset) | Organized layout with validation, summaries, conditional field visibility, and derived-type support |
-| **GameplayAbilitySO Inspector** | Custom Editor | Automatic (select any `GameplayAbilitySO` asset) | Structured tag overview, activation rules summary, cost/cooldown validation |
-| **Stacking Drawer** | Property Drawer | Automatic (in `GameplayEffectSO` Inspector) | Shows Limit / DurationPolicy / ExpirationPolicy fields only when stacking type is not `None` |
-| **AttributeNameSelector** | Property Drawer | Add `[AttributeNameSelector]` to a `string` field | Dropdown populated from a constants class — replaces manual tag string entry |
+### AssetManagement
 
-### GAS Debugger (Editor Window)
+`CycloneGames.GameplayAbilities.Runtime.Integrations.AssetManagement` is connected through direct asmdef references. It depends on `CycloneGames.AssetManagement.Runtime`, `CycloneGames.Logging.Core`, and the main GameplayAbilities Runtime assembly, and contains `AssetManagementResourceLocator`.
 
-A comprehensive editor window for inspecting any `AbilitySystemComponent` in real-time during Play Mode.
+The main Runtime assembly owns only `IResourceLocator` and `IResourceHandle<T>`; it has no AssetManagement asmdef reference. The Sample assembly references the integration explicitly and constructs the adapter from its `IAssetPackage`. At assembly level, a project that excludes AssetManagement can keep Core and Runtime and provide another `IResourceLocator`; it must also exclude the AssetManagement integration and any sample composition that references it. `package.json` declares AssetManagement as a direct requirement, so a UPM packaging profile that omits it must update that metadata coherently.
 
-**Open:** `Tools > CycloneGames > GameplayAbilities > GAS Debugger`
+### DataTable
 
-**Features:**
+DataTable adapter source is present under `Runtime/Integrations/DataTable`. Its integration asmdef directly references `CycloneGames.DataTable.Core`, `CycloneGames.GameplayAbilities.Core`, and `CycloneGames.GameplayAbilities.Runtime`.
 
-- **ASC Picker** — dropdown listing all scene ASCs, auto-refreshes
-- **Toolbar** — pause/resume, configurable refresh rate, [Select GameObject] button
-- **Active Effects** — expandable rows showing duration bars, stack counts, modifiers, granted tags, inhibition status
-- **Attributes** — mini health-bar visualization with base / current values
-- **Abilities** — active, on-cooldown, or ready status with cooldown progress bars
-- **Tags** — all combined tags with color coding and reference counts
-- **Immunity Tags** — tags that block incoming effects
-- **Pool Stats** — pool size / active / hit rate for specs, effects, tasks, and contexts
-- **Event Log** — rolling log of ability activations, commits, and endings (capped at 64 entries)
+`CycloneGames.GameplayAbilities.Runtime.Integrations.DataTable` is enabled only when Unity Package Manager resolves `com.cyclone-games.data-table` in the supported `[1.0.0,2.0.0)` range. Its asmdef maps that package version to the assembly-local `CYCLONEGAMES_HAS_DATA_TABLE` capability through `versionDefines`, then requires the same capability through `defineConstraints`. The focused Editor test asmdef repeats the condition because version-defined symbols do not propagate between assemblies. Missing or unsupported DataTable packages exclude both integration assemblies from compilation while Core and the main Runtime assembly continue to compile.
 
-### GAS Debug Overlay (Runtime)
+The integration uses `autoReferenced: false`. Add explicit references to `CycloneGames.GameplayAbilities.Runtime.Integrations.DataTable` and the DataTable assemblies used by the application from a dedicated composition asmdef. If that consumer assembly must also disappear when DataTable is absent, repeat the same package version define and constraint in the consumer asmdef. Do not add `CYCLONEGAMES_HAS_DATA_TABLE` manually to PlayerSettings.
 
-A zero-dependency runtime IMGUI overlay that renders floating debug panels for all discovered ASCs directly in the Game view.
+A `package.json` inside an `Assets/ThirdParty` sibling folder is not an installed UPM package and does not activate `versionDefines`. The integration remains inactive unless Unity Package Manager resolves both packages under the supported conditions. Validate the active path in a project that installs both packages through UPM.
 
-**Toggle in Play Mode:**
+The integration provides attribute initialization, level value providers, modifier factories, and magnitude calculations. Core and Runtime do not depend on it.
 
-```csharp
-// Via code
-GASDebugOverlay.Toggle();
+### VContainer sample
 
-// Via menu
-// Tools > CycloneGames > GameplayAbilities > GAS Overlay (Play Mode)
-```
+The VContainer composition sample is isolated in `CycloneGames.GameplayAbilities.Sample.Integrations.VContainer`. Its assembly compiles only when the `VCONTAINER_PRESENT` condition is active.
 
-**Features:**
-
-- **Auto-Discovery** — reflects on all `MonoBehaviour` instances to find `AbilitySystemComponent` properties/fields; reflection results are cached per type for zero-GC on subsequent scans
-- **World Tracking** — panels follow their owner's screen-projected position with connecting lines
-- **Collapsible Panels** — click panel header to toggle between expanded (attributes, effects, abilities, tags) and collapsed (single-line summary) views
-- **Runtime Controls** — in-overlay config panel for alpha, scale, section visibility, min priority filter, and collapse/expand all
-- **DPI-Adaptive** — dual-scale architecture: `baseScale` (DPI/resolution) for config UI, `scale` (baseScale × runtimeScale) for data panels
-- **Zero-GC Design** — `StringBuilder` reuse, `AppendInt` / `AppendFloat1` char-arithmetic formatting, dictionary-cached hex colors and short names, cached reflection metadata
-
-**Priority System:**
-
-```csharp
-// Prioritize important ASCs (higher priority = shown first)
-GASDebugOverlay.SetPriority(playerASC, 100);
-GASDebugOverlay.SetPriority(bossASC, 50);
-
-// Filter out low-priority ASCs at runtime via the overlay's MinPriority slider
-```
-
-### GAS Overlay Config
-
-A `ScriptableObject` that controls the overlay's visual appearance and behavior.
-
-**Setup:** Create via `Assets > Create > CycloneGames > GAS Overlay Config`, name it `GASOverlayConfig`, and place it in a `Resources` folder.
-
-| Setting | Default | Description |
-|---|---|---|
-| **SemanticTagClassifications** | 4 categories (Buff, Debuff, CC, Status) | Semantic categories for tag coloring. Define keywords and assign colors per category. Tags are matched against keywords to determine semantic meaning and display color. |
-| **DebuffTagSubstrings** | (empty) | Substrings to identify debuff effects (e.g., `"Debuff"`) |
-| **PrimaryAttributeSubstrings** | Health, HP, Shield, Mana, MP, Stamina, SP, Energy | Priority list for selecting which attribute to show in collapsed panel summary |
-| **PanelAlpha** | 0.8 | Background transparency (adjustable at runtime) |
-| **MaxPanels** | 8 | Maximum simultaneous panels |
-| **PanelWidthRatio** | 0.20 | Panel width as fraction of screen width |
-| **TrackWorldPosition** | true | Panels follow owner's world position |
-
-### Custom Inspectors
-
-**GameplayEffectSO** — the custom inspector organizes the effect's properties into collapsible sections:
-
-- **Core** — name, duration policy, duration/period (auto-hidden when irrelevant)
-- **Modifiers** — modifier list with validation warnings
-- **Tags** — all tag containers in a dedicated section
-- **Cosmetics** — GameplayCue references
-- **Advanced** — overflow effects, periodic-on-application toggle
-- **Summary** — auto-generated text summary of the complete effect definition
-- **Derived Fields** — properties added by subclasses are automatically grouped separately
-
-**GameplayAbilitySO** — structured view of ability configuration:
-
-- **Basic** — name, instancing policy, network execution, cost/cooldown effect references
-- **Activation** — activate-on-granted toggle, trigger data
-- **Tags** — identity tags, activation requirements, interaction rules, source/target filters
-- **Summary** — tag overview showing all configured tag containers at a glance
-
----
-
-## 16. Samples Walkthrough
-
-The `Samples` folder provides a complete combat scenario with a **Player** and an **Enemy**.
-
-**Controls:**
-
-- **[1]** — Fireball (damage + burn DoT)
-- **[2]** — Purify (AoE dispel)
-- **[Space]** — Grant 50 XP
-- **[E]** — Enemy PoisonBlade attack
-
-### Fireball
-
-Demonstrates: data-driven design, complex attribute interaction via `PreProcessInstantEffect`, stat snapshotting via `SetByCallerMagnitude`.
-
-### PoisonBlade
-
-Demonstrates: applying multiple effects in sequence (weapon hit + persistent poison debuff).
-
-### Purify
-
-Demonstrates: async ability with `AbilityTask_WaitTargetData`, `SphereOverlap` targeting with faction filtering, removing effects by tag (`RemoveActiveEffectsWithGrantedTags`).
-
-### Leveling System
-
-Demonstrates: attribute-driven events, dynamic effect creation in code, multi-modifier instant effects.
-
-### Sample Abilities Reference
-
-| Ability        | Type      | Key Features                              |
-| -------------- | --------- | ----------------------------------------- |
-| Fireball       | Offensive | DoT, snapshotting, execution calculations |
-| PoisonBlade    | Offensive | Multi-effect, periodic damage             |
-| Purify         | Defensive | AoE targeting, tag-based dispel           |
-| Meteor         | Offensive | Area effect, ActivationOwnedTags          |
-| ChainLightning | Offensive | Multi-target chaining                     |
-| ShieldOfLight  | Defensive | Duration buff                             |
-| Berserk        | Buff      | Self-buff with trade-offs                 |
-| ArmorStack     | Defensive | Stackable effect                          |
-| SlamAttack     | Offensive | Melee AoE                                 |
-| Execute        | Offensive | Conditional execution                     |
-| Shockwave      | Offensive | Knockback AoE                             |
-
-- Demo: [https://github.com/MaiKuraki/UnityGameplayAbilitySystemSample](https://github.com/MaiKuraki/UnityGameplayAbilitySystemSample)
-- <img src="./Documents~/DemoPreview_2.gif" alt="Demo Preview" style="width: 100%; max-width: 800px;" />
-- <img src="./Documents~/DemoPreview_1.gif" alt="Demo Preview" style="width: 100%; max-width: 800px;" />
-
----
-
-## 17. FAQ & Troubleshooting
-
-### Frequently Asked Questions
-
-**Q: Instant vs Duration vs Infinite — when to use which?**
-
-| Type        | Use When                                                  |
-| ----------- | --------------------------------------------------------- |
-| Instant     | One-time: damage, heal, cost, instant stat set            |
-| HasDuration | Temporary: speed buff (10s), stun (2s), cooldown (5s)     |
-| Infinite    | Permanent until removed: equipment stats, auras, passives |
-
-**Q: What's the difference between AbilityTags, AssetTags, and GrantedTags?**
-
-- **AbilityTags** — identity of the ability (`Ability.Skill.Fireball`)
-- **AssetTags** — metadata on a GameplayEffect (`Damage.Type.Fire`)
-- **GrantedTags** — tags applied to target while effect is active (`Status.Burning`)
-
-**Q: How do cooldowns work?**
-A cooldown is simply a `HasDuration` GameplayEffect that grants a cooldown tag (e.g., `Cooldown.Skill.Fireball`). The ability's `CheckCooldown()` checks if the owner has that tag.
-
-**Q: Why tags instead of direct references?**
-Tags provide loose coupling — abilities don't need to know concrete types. New content can be added without modifying existing code. Designers configure interactions in the Inspector.
-
-**Q: How to create a DoT?**
-Create a `HasDuration` effect with a `Period` and a negative `Add` modifier on Health.
-
-### Troubleshooting Checklist
-
-**Ability won't activate:**
-
-- [ ] `InitAbilityActorInfo()` called?
-- [ ] Ability granted via `GrantAbility()`?
-- [ ] Tag requirements satisfied? (log `CanActivate()` checks)
-- [ ] Sufficient resources for cost?
-- [ ] Not on cooldown?
-- [ ] `CommitAbility()` called in `ActivateAbility()`?
-
-**Effect not applying:**
-
-- [ ] `ApplicationTagRequirements` met?
-- [ ] Target ASC initialized?
-- [ ] `RemoveGameplayEffectsWithTags` not removing it immediately?
-- [ ] `ICustomApplicationRequirement` returning `true`?
-
-**Tags not working:**
-
-- [ ] Tags defined in project settings or code?
-- [ ] Checking `ASC.CombinedTags` (not individual effect tags)?
-- [ ] Effect actually active? Check active effects list
-
-**Cue not playing:**
-
-- [ ] Tag in effect's `GameplayCues` container (not `AssetTags`)?
-- [ ] Cue registered with `GameplayCueManager`?
-- [ ] `GameplayCueManager.Initialize()` called?
-- [ ] `parameters.TargetObject` valid?
-
----
-
-## 18. Dependencies
-
-| Package                             | Purpose                     |
-| ----------------------------------- | --------------------------- |
-| `com.cysharp.unitask`               | Async operations            |
-| `com.cyclone-games.gameplay-tags`   | GameplayTag system          |
-| `com.cyclone-games.asset-management` | Asset loading               |
-| `com.cyclone-games.logger`          | Debug logging               |
-| `com.cyclone-games.factory`         | Object creation and pooling |
+Projects using another container should reproduce the explicit lifetime graph, not add container references to Core or Runtime.

@@ -31,7 +31,7 @@ namespace GASSample.Scene
 
         public UniTask OnFinalize(ISceneDataWriter writer, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
         {
-            uiService.CloseUI(UIWindowName.GameplayHUD);
+            uiService.CloseAsync(UIWindowName.GameplayHUD).Forget();
             return UniTask.CompletedTask;
         }
 

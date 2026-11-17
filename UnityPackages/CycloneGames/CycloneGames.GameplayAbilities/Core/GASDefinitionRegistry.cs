@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CycloneGames.Hash.Core;
 
 namespace CycloneGames.GameplayAbilities.Core
 {
@@ -16,8 +17,6 @@ namespace CycloneGames.GameplayAbilities.Core
 
     public sealed class GASDefaultDefinitionRegistry : IGASDefinitionRegistry
     {
-        public static readonly GASDefaultDefinitionRegistry Instance = new GASDefaultDefinitionRegistry();
-
         private readonly object syncRoot = new object();
         private readonly Dictionary<object, GASDefinitionVersion> byObject = new Dictionary<object, GASDefinitionVersion>(ReferenceEqualityComparer.Instance);
         private readonly Dictionary<int, object> abilityById = new Dictionary<int, object>();
@@ -25,7 +24,7 @@ namespace CycloneGames.GameplayAbilities.Core
         private readonly Dictionary<int, GASDefinitionVersion> versionById = new Dictionary<int, GASDefinitionVersion>();
         private int nextId = 1;
 
-        private GASDefaultDefinitionRegistry()
+        public GASDefaultDefinitionRegistry()
         {
         }
 
@@ -82,11 +81,21 @@ namespace CycloneGames.GameplayAbilities.Core
                 return default;
             }
 
+            if (string.IsNullOrWhiteSpace(stableName))
+            {
+                throw new ArgumentException("Definition names must be non-empty.", nameof(stableName));
+            }
+
             lock (syncRoot)
             {
                 if (byObject.TryGetValue(definition, out var existing))
                 {
                     return existing.Id;
+                }
+
+                if (nextId == int.MaxValue)
+                {
+                    throw new InvalidOperationException("The GAS definition registry exhausted its ID space.");
                 }
 
                 uint hash = contentHash != 0 ? contentHash : ComputeStableHash(stableName);
@@ -116,19 +125,7 @@ namespace CycloneGames.GameplayAbilities.Core
 
         private static uint ComputeStableHash(string stableName)
         {
-            unchecked
-            {
-                uint hash = 2166136261u;
-                if (!string.IsNullOrEmpty(stableName))
-                {
-                    for (int i = 0; i < stableName.Length; i++)
-                    {
-                        hash = (hash ^ stableName[i]) * 16777619u;
-                    }
-                }
-
-                return hash != 0 ? hash : 2166136261u;
-            }
+            return StableHash32.ComputeUtf16Ordinal(stableName.AsSpan());
         }
 
         private sealed class ReferenceEqualityComparer : IEqualityComparer<object>

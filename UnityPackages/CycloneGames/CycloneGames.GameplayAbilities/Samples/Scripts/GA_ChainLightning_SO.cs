@@ -1,12 +1,14 @@
 using System.Collections.Generic;
 using CycloneGames.GameplayAbilities.Runtime;
-using CycloneGames.Logger;
+using CycloneGames.Logging;
 using UnityEngine;
 
 namespace CycloneGames.GameplayAbilities.Sample
 {
     public class GA_ChainLightning : GameplayAbility
     {
+        private static readonly LogChannel Log = GameplayAbilitiesSampleLog.Channel;
+
         private readonly GameplayEffect lightningDamageEffect;
         private readonly int maxBounces;
         private readonly float damageFalloffPerBounce;
@@ -20,7 +22,11 @@ namespace CycloneGames.GameplayAbilities.Sample
 
         public override void ActivateAbility(GameplayAbilityActorInfo actorInfo, GameplayAbilitySpec spec, GameplayAbilityActivationInfo activationInfo)
         {
-            CommitAbility(actorInfo, spec);
+            if (!CommitAbility(actorInfo, spec).Succeeded)
+            {
+                EndAbility();
+                return;
+            }
             
             var caster = actorInfo.AvatarGameObject;
 
@@ -31,7 +37,7 @@ namespace CycloneGames.GameplayAbilities.Sample
             GameObject currentTarget = FindInitialTarget(caster, hitTargets);
             if (currentTarget == null)
             {
-                CLogger.LogWarning("Chain Lightning fizzles, no initial target found.");
+                Log.Warning("Chain Lightning fizzles, no initial target found.");
                 EndAbility();
                 return;
             }
@@ -57,7 +63,7 @@ namespace CycloneGames.GameplayAbilities.Sample
 
                 // Calculate damage for this bounce
                 float damageMultiplier = Mathf.Pow(1 - damageFalloffPerBounce, i);
-                CLogger.LogInfo($"Chain Lightning hits {currentTarget.name} for {damageMultiplier:P0} damage.");
+                Log.Info($"Chain Lightning hits {currentTarget.name} for {damageMultiplier:P0} damage.");
 
                 // A better system would allow GameplayEffectSpec modification (e.g., SetByCaller).
                 // For simplicity here, we create a temporary GE with the modified magnitude.
@@ -116,11 +122,20 @@ namespace CycloneGames.GameplayAbilities.Sample
             return closest;
         }
 
-        public override GameplayAbility CreatePoolableInstance() => new GA_ChainLightning(lightningDamageEffect, maxBounces, damageFalloffPerBounce);
+        public override GameplayAbility CreateRuntimeInstance() => new GA_ChainLightning(lightningDamageEffect, maxBounces, damageFalloffPerBounce);
     }
 
 
-    [CreateAssetMenu(fileName = "GA_ChainLightning", menuName = "CycloneGames/GameplayAbilitySystem/Samples/Ability/ChainLightning")]
+    /// <summary>
+    /// [INTERMEDIATE] Lightning that bounces between enemies with per-bounce damage falloff.
+    /// Introduces iterative multi-target application and SetByCaller scaling per bounce.
+    ///
+    /// Key Concepts:
+    /// - Chained target resolution with bounce limits
+    /// - Per-target GameplayEffectSpec creation with different magnitudes
+    /// - Damage falloff via SetByCaller
+    /// </summary>
+    [CreateAssetMenu(fileName = "GA_ChainLightning", menuName = "CycloneGames/GameplayAbilities/Samples/Ability/ChainLightning")]
     public class GA_ChainLightning_SO : GameplayAbilitySO
     {
         public GameplayEffectSO LightningDamageEffect;
@@ -129,22 +144,11 @@ namespace CycloneGames.GameplayAbilities.Sample
         [Range(0f, 1f)]
         public float DamageFalloffPerBounce = 0.25f;
 
-        public override GameplayAbility CreateAbility()
+        protected override GameplayAbility CreateGameplayAbility()
         {
             var effect = LightningDamageEffect ? LightningDamageEffect.GetGameplayEffect() : null;
             var ability = new GA_ChainLightning(effect, MaxBounces, DamageFalloffPerBounce);
-            ability.Initialize(
-                AbilityName,
-                InstancingPolicy,
-                NetExecutionPolicy,
-                CostEffect?.GetGameplayEffect(),
-                CooldownEffect?.GetGameplayEffect(),
-                AbilityTags,
-                ActivationBlockedTags,
-                ActivationRequiredTags,
-                CancelAbilitiesWithTag,
-                BlockAbilitiesWithTag
-            );
+            InitializeAbility(ability);
             return ability;
         }
     }
