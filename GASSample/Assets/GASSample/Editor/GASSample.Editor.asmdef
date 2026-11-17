@@ -1,8 +1,10 @@
 {
-    "name": "GASSample.HotUpdate.Editor",
+    "name": "GASSample.Editor",
     "rootNamespace": "",
     "references": [
-        "GASSample.HotUpdate"
+        "GASSample.HotUpdate",
+        "CycloneGames.GameplayAbilities.Editor",
+        "CycloneGames.GameplayAbilities.Runtime"
     ],
     "includePlatforms": [
         "Editor"
