@@ -3,7 +3,6 @@ using System.Threading;
 using CycloneGames.AssetManagement.Runtime;
 using CycloneGames.AssetManagement.Runtime.Integrations.Navigathena;
 using Cysharp.Threading.Tasks;
-using GASSample.APIGateway;
 using GASSample.AssetManagement;
 using MackySoft.Navigathena;
 using MackySoft.Navigathena.SceneManagement;
@@ -16,7 +15,6 @@ namespace GASSample.Scene
     public class LifecycleSceneSplash : ISceneLifecycle
     {
         [Inject] IAssetModule assetModule;
-        [Inject] ISceneManagementAPIGateway sceneManagementAPIGateway;
         public UniTask OnEditorFirstPreInitialize(ISceneDataWriter writer, CancellationToken cancellationToken)
         {
             return UniTask.CompletedTask;

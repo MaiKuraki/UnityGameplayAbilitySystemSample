@@ -5,9 +5,6 @@ using CycloneGames.GameplayFramework.Runtime;
 using CycloneGames.GameplayTags.Core;
 using CycloneGames.InputSystem.Runtime;
 using GASSample.Input.Generated;
-using GASSample.Message;
-using GASSample.UI;
-using RPGSample.Message;
 using UnityEngine;
 
 namespace GASSample.Gameplay
@@ -18,6 +15,18 @@ namespace GASSample.Gameplay
         [SerializeField] private string comboEntryAbilityTagName = GASSampleTags.Skill_Definition_Attack_1;
         [Header("Debug")]
         [SerializeField] private bool enableGasDebugLogs = false;
+
+        /// <summary>(current, max)</summary>
+        public event Action<float, float> HealthChanged;
+        public event Action<float, float> StaminaChanged;
+        public event Action<float, float> ExperienceChanged;
+
+        public float Health => AttributeSet.GetCurrentValue(AttributeSet.Health);
+        public float MaxHealth => AttributeSet.GetCurrentValue(AttributeSet.MaxHealth);
+        public float Stamina => AttributeSet.GetCurrentValue(AttributeSet.Stamina);
+        public float MaxStamina => AttributeSet.GetCurrentValue(AttributeSet.MaxStamina);
+        public float Experience => AttributeSet.GetCurrentValue(AttributeSet.Experience);
+        public float ExperienceToNextLevel => GetNextLevelExp();
 
         private IInputPlayer inputPlayer;
         private InputContext gameplayContext;
@@ -291,45 +300,23 @@ namespace GASSample.Gameplay
 
         private void OnHealthChanged(float oldValue, float newValue)
         {
-            StatusData data = new StatusData(
-                AttributeSet.GetBaseValue(AttributeSet.Health),
-                AttributeSet.GetCurrentValue(AttributeSet.Health),
-                AttributeSet.GetBaseValue(AttributeSet.MaxHealth),
-                AttributeSet.GetCurrentValue(AttributeSet.MaxHealth)
-            );
-            UIMessage<StatusData> msg = new UIMessage<StatusData>(MessageConstant.UpdateHealth, data);
-            MessageContext.UIRouter.PublishAsync(msg);
+            HealthChanged?.Invoke(Health, MaxHealth);
         }
 
         private void OnStaminaChanged(float oldValue, float newValue)
         {
-            StatusData data = new StatusData(
-                AttributeSet.GetBaseValue(AttributeSet.Stamina),
-                AttributeSet.GetCurrentValue(AttributeSet.Stamina),
-                AttributeSet.GetBaseValue(AttributeSet.MaxStamina),
-                AttributeSet.GetCurrentValue(AttributeSet.MaxStamina)
-            );
-            UIMessage<StatusData> msg = new UIMessage<StatusData>(MessageConstant.UpdateStamina, data);
-            MessageContext.UIRouter.PublishAsync(msg);
+            StaminaChanged?.Invoke(Stamina, MaxStamina);
         }
 
         private void OnExperienceChanged(float oldValue, float newValue)
         {
-            StatusData data = new StatusData(
-                AttributeSet.GetBaseValue(AttributeSet.Experience),
-                AttributeSet.GetCurrentValue(AttributeSet.Experience),
-                GetNextLevelExp(),
-                GetNextLevelExp()
-            );
-            UIMessage<StatusData> msg = new UIMessage<StatusData>(MessageConstant.UpdateExperience, data);
+            ExperienceChanged?.Invoke(Experience, ExperienceToNextLevel);
         }
 
         private float GetNextLevelExp()
         {
-            if (AttributeSet == null) return 0;
             int currentLevel = (int)AttributeSet.GetCurrentValue(AttributeSet.Level);
-            int nextLevel = currentLevel + 1;
-            return LevelUpData.Levels[nextLevel].XpToNextLevel;
+            return LevelUpData.Levels[currentLevel + 1].XpToNextLevel;
         }
     }
 }

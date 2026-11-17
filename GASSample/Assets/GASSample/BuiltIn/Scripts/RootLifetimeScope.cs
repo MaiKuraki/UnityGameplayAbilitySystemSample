@@ -4,21 +4,27 @@ using VContainer.Unity;
 
 namespace GASSample.AOT
 {
+    /// <summary>
+    /// Outermost scope, created with the built-in launch scene. It owns the asset module for the
+    /// whole application lifetime.
+    /// </summary>
     public class RootLifetimeScope : LifetimeScope
     {
-        public static RootLifetimeScope Instance { get; private set; }
+        // Kept local on purpose: AOT cannot reference the HotUpdate assembly that owns
+        // GASSample.AssetManagement.AssetPackageName.
         private const string DefaultPackage = "DefaultPackage";
+
+        private static RootLifetimeScope instance;
 
         protected override void Awake()
         {
-            // Singleton check
-            if (Instance != null && Instance != this)
+            if (instance != null && instance != this)
             {
                 Destroy(gameObject);
                 return;
             }
 
-            Instance = this;
+            instance = this;
             DontDestroyOnLoad(gameObject);
 
             base.Awake();
@@ -26,16 +32,12 @@ namespace GASSample.AOT
 
         protected override void Configure(IContainerBuilder builder)
         {
-            // Safety check
-            if (Instance != null && Instance != this) return;
-
             builder.Register<IAssetModule, AddressablesModule>(Lifetime.Singleton);
 
             builder.RegisterBuildCallback(async resolver =>
             {
-                var assetModule = resolver.Resolve<IAssetModule>();
                 await AssetManager.InitializeDefaultPackageAsync(
-                    assetModule,
+                    resolver.Resolve<IAssetModule>(),
                     DefaultPackage,
                     new AssetManagementOptions(),
                     new AssetPackageInitOptions());

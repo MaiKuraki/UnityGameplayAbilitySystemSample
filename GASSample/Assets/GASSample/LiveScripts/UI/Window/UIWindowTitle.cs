@@ -1,13 +1,10 @@
 using CycloneGames.AssetManagement.Runtime;
 using CycloneGames.AssetManagement.Runtime.Integrations.Navigathena;
 using CycloneGames.UIFramework.Runtime;
-using Cysharp.Threading.Tasks;
-using GASSample.APIGateway;
 using GASSample.AssetManagement;
 using GASSample.Scene;
 using MackySoft.Navigathena.SceneManagement;
 using R3;
-using TMPro;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
@@ -18,11 +15,7 @@ namespace GASSample.UI
     public class UIWindowTitle : UIWindow
     {
         [Inject] private readonly IAssetModule assetModule;
-        [Inject] private readonly ISceneManagementAPIGateway sceneManagementAPIGateway;
         [SerializeField] private Button buttonStart;
-        [SerializeField] private AppVersionInfo appVersionInfo;
-        private const string EDITOR_VERSION_TEXT = "EDITOR_MODE";
-        private const string INVALID_VERSION_TEXT = "INVALID";
 
         protected override void Awake()
         {
@@ -31,19 +24,11 @@ namespace GASSample.UI
             buttonStart.OnClickAsObservable().Subscribe(_ => ClickStart());
         }
 
-        void Start()
+        private void ClickStart()
         {
-            appVersionInfo?.UpdateVersionDisplayEvent?.Invoke(assetModule)
-                .AttachExternalCancellation(this.GetCancellationTokenOnDestroy())
-                .Forget();
-        }
-
-        void ClickStart()
-        {
-            // LogChannel.Create("GASSample").Info("[UIWindowTitle] ClickStart");            
             var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
             var sceneLoader = (IAssetSceneLoader)pkg;
-            AssetManagementSceneIdentifier sceneGameplay = new AssetManagementSceneIdentifier(sceneLoader, ScenePath.Gameplay, LoadSceneMode.Additive, true);
+            var sceneGameplay = new AssetManagementSceneIdentifier(sceneLoader, ScenePath.Gameplay, LoadSceneMode.Additive, true);
             GlobalSceneNavigator.Instance.Push(sceneGameplay);
         }
     }

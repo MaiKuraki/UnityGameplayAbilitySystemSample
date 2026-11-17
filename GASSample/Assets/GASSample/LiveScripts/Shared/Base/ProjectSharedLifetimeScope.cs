@@ -1,68 +1,42 @@
+using GASSample.AssetManagement;
+using UnityEngine;
 using VContainer;
 using VContainer.Unity;
-using UnityEngine;
-using CycloneGames.AssetManagement.Runtime;
-using CycloneGames.Factory.Runtime;
-using CycloneGames.UIFramework.Runtime;
-using GASSample.APIGateway;
-using GASSample.AssetManagement;
-using GASSample.UI;
 
 namespace GASSample
 {
+    /// <summary>
+    /// Persistent scope created with Scene_Initial. It keeps the objects that must outlive a scene
+    /// change alive: debug tools, event system, main camera and the UIFramework prefab, all spawned
+    /// by <see cref="AssetResolverForDontDestroy"/>.
+    /// </summary>
     public class ProjectSharedLifetimeScope : LifetimeScope
     {
-        public static ProjectSharedLifetimeScope Instance { get; private set; }
         [SerializeField] private AssetResolverForDontDestroy assetResolver;
+
+        private static ProjectSharedLifetimeScope instance;
 
         protected override void Awake()
         {
-            // Singleton check must happen before base.Awake() or initialization logic
-            if (Instance != null && Instance != this)
+            // Scene_Initial only contains one scope; guard against a duplicate copy anyway.
+            if (instance != null && instance != this)
             {
                 Destroy(gameObject);
                 return;
             }
 
-            Instance = this;
+            instance = this;
             DontDestroyOnLoad(gameObject);
 
             base.Awake();
         }
+
         protected override void Configure(IContainerBuilder builder)
         {
-            // Safety: If this instance is a duplicate scheduled for destruction, skip registration.
-            if (Instance != null && Instance != this)
-            {
-                UnityEngine.Debug.LogWarning($"[ProjectSharedLifetimeScope] Skipping registration for duplicate instance: {name}. Existing Instance: {Instance.name}");
-                return;
-            }
-
             base.Configure(builder);
 
-            builder.Register<ISceneManagementAPIGateway, SceneManagementAPIGateway>(Lifetime.Singleton);
-
             builder.RegisterComponentInNewPrefab(assetResolver, Lifetime.Singleton).UnderTransform(transform);
-            builder.RegisterBuildCallback(resolver =>
-            {
-                resolver.Resolve<AssetResolverForDontDestroy>();
-            });
-            
-            builder.RegisterEntryPoint<ProjectGlobalInitializer>();
-        }
-
-        public class ProjectGlobalInitializer : IStartable
-        {
-            public ProjectGlobalInitializer()
-            {
-
-            }
-
-            public void Start()
-            {
-
-                // LogChannel.Create("GASSample").Info("[ProjectSharedLifetimeScope] Initiated");
-            }
+            builder.RegisterBuildCallback(resolver => resolver.Resolve<AssetResolverForDontDestroy>());
         }
     }
 }

@@ -2,7 +2,6 @@ using System;
 using System.Threading;
 using CycloneGames.UIFramework.Runtime;
 using Cysharp.Threading.Tasks;
-using GASSample.APIGateway;
 using GASSample.UI;
 using MackySoft.Navigathena;
 using MackySoft.Navigathena.SceneManagement;

@@ -2,24 +2,16 @@ using UnityEngine;
 
 namespace GASSample.UI
 {
+    /// <summary>
+    /// Marks the UIFramework prefab root as persistent. The prefab is loaded by
+    /// <see cref="GASSample.AssetManagement.AssetResolverForDontDestroy"/> and must survive the
+    /// scene changes that follow.
+    /// </summary>
     public class UIFramework : MonoBehaviour
     {
-        public static UIFramework Instance { get; private set; }
-        [SerializeField] private bool _singleton = true;
-
-        void Awake()
+        private void Awake()
         {
-            if (_singleton)
-            {
-                if (Instance != null && Instance != this)
-                {
-                    Destroy(gameObject);
-                    return;
-                }
-
-                Instance = this;
-                DontDestroyOnLoad(gameObject);
-            }
+            DontDestroyOnLoad(gameObject);
         }
     }
 }
