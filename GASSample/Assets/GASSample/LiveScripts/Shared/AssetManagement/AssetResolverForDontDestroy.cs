@@ -8,9 +8,8 @@ using UnityEngine.EventSystems;
 namespace GASSample.AssetManagement
 {
     /// <summary>
-    /// Spawns the prefabs that must outlive a scene change (debug tools, event system, main camera,
-    /// UIFramework). The addressable handles stay alive for the application lifetime, which is what
-    /// keeps those objects valid after the scene that loaded them is unloaded.
+    /// Spawns the prefabs that must outlive a scene change and keeps them alive with the package
+    /// handles.
     /// </summary>
     public class AssetResolverForDontDestroy : MonoBehaviour
     {
@@ -28,14 +27,10 @@ namespace GASSample.AssetManagement
 
                 GameObject instance = Instantiate(prefab.AssetObject) as GameObject;
 
-                // The whole point of this component: these objects must survive the scene that spawned
-                // them, so the first transition does not take the camera or the UI with it.
                 DontDestroyOnLoad(instance);
 
-                // The debug console prefab ships its own EventSystem and Unity only allows one in the
-                // project. Deactivate it - destroying it would leave the console's scripts with dead
-                // references - and do it before the project's own EventSystem is spawned, otherwise
-                // both are active for a frame and Unity logs a duplicate warning.
+                // The debug console ships its own EventSystem and Unity allows one. Deactivate it
+                // before the project's EventSystem spawns, or both are active for a frame.
                 if (instance.GetComponent<GASSampleEventSystem>() == null)
                 {
                     foreach (EventSystem eventSystem in instance.GetComponentsInChildren<EventSystem>(true))

@@ -16,8 +16,7 @@ namespace GASSample.Cheat
 
         void Awake()
         {
-            // The whole DebugSystem prefab is spawned by AssetResolverForDontDestroy, which already
-            // keeps it alive across scenes - no singleton or DontDestroyOnLoad needed here.
+            // Spawned and kept alive by AssetResolverForDontDestroy.
             Instance = this;
         }
 

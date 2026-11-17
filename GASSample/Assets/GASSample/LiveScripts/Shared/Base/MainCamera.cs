@@ -6,11 +6,8 @@ using UnityEngine.SceneManagement;
 namespace GASSample
 {
     /// <summary>
-    /// The single persistent main camera.
-    /// <para>
-    /// The UIFramework camera is authored as a URP overlay, so it renders nothing until it is pushed
-    /// into this camera's stack - that is what <see cref="StackUICameraIfAvailable"/> does.
-    /// </para>
+    /// Persistent main camera. The UIFramework camera is a URP overlay and only renders once it is
+    /// pushed into this camera's stack.
     /// </summary>
     [DisallowMultipleComponent]
     [RequireComponent(typeof(Camera))]
@@ -47,8 +44,7 @@ namespace GASSample
 
         private void OnSceneLoaded(UnityEngine.SceneManagement.Scene scene, LoadSceneMode mode)
         {
-            // The UIFramework prefab is created after this camera and scenes come and go, so the
-            // stack is re-checked on every load instead of relying on creation order.
+            // The UIFramework prefab can be created after this camera, so re-check on every load.
             StackUICameraIfAvailable();
         }
 

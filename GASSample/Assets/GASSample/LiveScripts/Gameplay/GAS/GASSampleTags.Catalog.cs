@@ -6,9 +6,8 @@ namespace GASSample.Gameplay
     public static partial class GASSampleTags
     {
         /// <summary>
-        /// Reflection-free declaration of every tag this sample owns. The previous versions of the
-        /// package scanned assemblies for a registration attribute; catalogs are registered explicitly
-        /// now so the tags survive IL2CPP stripping and HybridCLR hot updates.
+        /// Explicit tag registration. Assembly scanning does not survive IL2CPP stripping or
+        /// HybridCLR hot updates.
         /// </summary>
         public sealed class Catalog : IGameplayTagCatalog
         {

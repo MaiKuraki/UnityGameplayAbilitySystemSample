@@ -138,5 +138,3 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b43e75d39918e9749a186c2efcebf5b1, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  cameraInst: {fileID: 1994838677665118371}
-  singleton: 1

@@ -3,9 +3,8 @@ using UnityEngine;
 namespace GASSample.UI
 {
     /// <summary>
-    /// Marks the UIFramework prefab root as persistent. The prefab is loaded by
-    /// <see cref="GASSample.AssetManagement.AssetResolverForDontDestroy"/> and must survive the
-    /// scene changes that follow.
+    /// Marks the UIFramework prefab root as persistent. Spawned by
+    /// <see cref="GASSample.AssetManagement.AssetResolverForDontDestroy"/>.
     /// </summary>
     public class UIFramework : MonoBehaviour
     {

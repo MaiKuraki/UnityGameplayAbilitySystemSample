@@ -6,9 +6,7 @@ using VContainer.Unity;
 
 namespace GASSample.Scene
 {
-    /// <summary>
-    /// Opens the title window. The Start button drives the rest of the flow.
-    /// </summary>
+    /// <summary>Opens the title window.</summary>
     public class TitleEntryPoint : IAsyncStartable
     {
         private readonly IUIService uiService;

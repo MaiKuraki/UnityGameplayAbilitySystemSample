@@ -12,8 +12,8 @@ using VContainer.Unity;
 namespace GASSample.Scene
 {
     /// <summary>
-    /// Runs once from the launch scene. It configures the screen, creates the objects that must outlive
-    /// every scene change (camera, UI, debug tools), initializes input, and then enters the scene flow.
+    /// Runs once after the LiveContent root is spawned: screen setup, persistent prefabs, input, then
+    /// the first scene load.
     /// </summary>
     public class BootEntryPoint : IAsyncStartable
     {
@@ -28,18 +28,13 @@ namespace GASSample.Scene
 
         public async UniTask StartAsync(CancellationToken cancellation)
         {
-            // The launch scene is empty, so hide it before the first frame is drawn.
+            // Keep the screen black until the first scene is ready.
             ScreenFade.CoverNow();
 
             Screen.SetResolution(1920, 1080, Screen.fullScreen);
             Application.targetFrameRate = 60;
 
-            await AssetManager.InitializeDefaultPackageAsync(
-                assetModule,
-                AssetPackageName.DefaultPackage,
-                new AssetManagementOptions(),
-                new AssetPackageInitOptions());
-
+            // The AOT bootstrapper already initialized the package to load this prefab.
             await assetResolver.InitializeAsync(assetModule);
 
             await InitializeInputAsync();
@@ -76,8 +71,7 @@ namespace GASSample.Scene
                 throw new InvalidOperationException("Local player 0 could not join with any device.");
             }
 
-            // A player only answers to devices paired to its InputUser; keep that list complete for
-            // reconnected controllers and for gamepads plugged in after the join.
+            // InputUser is a device whitelist: complete it for reconnected and late-connected gamepads.
             InputDeviceSync.Install(inputPlayer);
         }
     }

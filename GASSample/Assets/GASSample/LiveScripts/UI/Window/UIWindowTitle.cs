@@ -24,8 +24,7 @@ namespace GASSample.UI
 
         private async UniTask ClickStart()
         {
-            // Cover the screen before the window disappears: the title scene itself is empty, so
-            // closing the window first would reveal its skybox for a frame.
+            // Cover first: the title scene has no geometry, so closing the window early shows skybox.
             await ScreenFade.FadeOutAsync();
             await uiService.CloseAsync(WindowId);
             await SceneFlow.LoadAsync(assetModule, SceneFlow.Gameplay);

@@ -6,12 +6,10 @@ using UnityEngine.SceneManagement;
 namespace GASSample
 {
     /// <summary>
-    /// Switches scenes without ever showing the gap in between.
+    /// Loads the next scene while the screen is covered.
     /// <para>
-    /// The caller covers the screen with <see cref="ScreenFade.FadeOutAsync"/> first, hides whatever
-    /// belonged to the outgoing scene, and only then calls <see cref="LoadAsync"/>. The incoming scene
-    /// fades back in itself once it is actually ready - the title window is open, or the world and its
-    /// player exist - because fading in right after the load would show a few frames of empty sky.
+    /// The caller fades out and closes its own UI first. The loaded scene fades back in when it is
+    /// ready, so the swap never shows an empty frame.
     /// </para>
     /// </summary>
     public static class SceneFlow
@@ -21,7 +19,6 @@ namespace GASSample
 
         private static ISceneHandle currentScene;
 
-        /// <summary>Loads the scene while the screen is already covered.</summary>
         public static async UniTask LoadAsync(IAssetModule assetModule, string sceneLocation)
         {
             var sceneLoader = (IAssetSceneLoader)assetModule.GetPackage(AssetPackageName.DefaultPackage);
@@ -29,9 +26,8 @@ namespace GASSample
             ISceneHandle nextScene = sceneLoader.LoadSceneAsync(sceneLocation, LoadSceneMode.Single, activateOnLoad: true);
             await nextScene.Task;
 
-            // Single mode already dropped the previous scene when this one activated; unloading through
-            // the loader only retires the old handle. Disposing it directly would log a "caller
-            // ownership only" warning and leave the scene for someone else to unload.
+            // Single mode already unloaded the previous scene; this call only retires its handle.
+            // Disposing the handle directly logs an ownership warning.
             if (currentScene != null)
             {
                 await sceneLoader.UnloadSceneAsync(currentScene);

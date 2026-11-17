@@ -5,13 +5,10 @@ using UnityEngine.InputSystem.Users;
 namespace GASSample.Input
 {
     /// <summary>
-    /// Keeps local player 0's device whitelist complete.
+    /// Keeps player 0's InputUser device list complete.
     /// <para>
-    /// <see cref="InputUser"/> owns the device whitelist of the player's action asset, so a device that
-    /// is not paired is silently ignored. Two cases need patching after the initial join:
-    /// XInput leaves a stale clone behind when a controller reconnects (same display name, never
-    /// receives another update), and the join only pairs what was present at that moment - a controller
-    /// plugged in later never reaches the player.
+    /// The action asset only listens to paired devices, and XInput leaves a dead clone behind when a
+    /// controller reconnects, so the paired list does not always match the hardware.
     /// </para>
     /// </summary>
     public static class InputDeviceSync

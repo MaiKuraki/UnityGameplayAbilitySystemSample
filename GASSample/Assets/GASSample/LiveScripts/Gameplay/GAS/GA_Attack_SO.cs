@@ -143,8 +143,7 @@ namespace GASSample.Gameplay
 
         public override GameplayAbility CreateRuntimeInstance()
         {
-            // Configuration is copied from the definition by the runtime; only the ability's own
-            // constructor arguments belong here.
+            // Configuration is copied by the runtime; only constructor arguments go here.
             return new GA_Attack(
                 animCharacter,
                 useRootMotion,

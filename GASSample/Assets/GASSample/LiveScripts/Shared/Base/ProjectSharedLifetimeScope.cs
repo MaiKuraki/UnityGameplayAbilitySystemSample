@@ -10,9 +10,8 @@ using VContainer.Unity;
 namespace GASSample
 {
     /// <summary>
-    /// The persistent scope: created by VContainerSettings as a child of the root scope, it survives
-    /// every scene change and owns the services shared by all scenes - the asset path resolver, the
-    /// UI service, and the prefabs that must not be destroyed with a scene (camera, UI, debug tools).
+    /// Child of the root scope that survives scene changes. Owns the services shared by every scene
+    /// and the prefabs that must outlive it (camera, UI, debug tools).
     /// </summary>
     public class ProjectSharedLifetimeScope : LifetimeScope
     {
@@ -44,14 +43,12 @@ namespace GASSample
             builder.RegisterComponentInNewPrefab(assetResolver, Lifetime.Singleton).UnderTransform(transform);
             builder.RegisterBuildCallback(resolver => resolver.Resolve<AssetResolverForDontDestroy>());
 
-            // Runs once, from the launch scene: creates the persistent objects, initializes input and
-            // starts the scene flow.
             builder.RegisterEntryPoint<BootEntryPoint>();
         }
 
         /// <summary>
-        /// Built lazily because it needs the UIRoot from the UIFramework prefab, which is spawned by
-        /// <see cref="AssetResolverForDontDestroy"/> after the scope has been configured.
+        /// Lazy: the UIRoot it needs is spawned by <see cref="AssetResolverForDontDestroy"/> after this
+        /// scope is configured.
         /// </summary>
         private static IUIService CreateUIService(IObjectResolver resolver)
         {
@@ -62,8 +59,7 @@ namespace GASSample
                 package,
                 assetPathFactory.Create("UI"));
 
-            // Windows are instantiated by UIService, not by the container, so the binder is what
-            // fills their [Inject] fields.
+            // Windows are created by UIService, so injection goes through the binder.
             var binders = new IUIWindowBinder[] { new VContainerWindowBinder(resolver) };
 
             return new UIService(Object.FindFirstObjectByType<UIRoot>(), assetProvider, binders: binders);

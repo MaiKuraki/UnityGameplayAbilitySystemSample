@@ -10,10 +10,7 @@ using VContainer.Unity;
 namespace GASSample.Gameplay
 {
     /// <summary>
-    /// Starts the world for the gameplay scene and opens the HUD.
-    /// The previous framework let the application assign a World and a GameMode by hand; the
-    /// current one owns both: <see cref="GameInstance"/> creates the sealed World from a
-    /// <see cref="WorldSettings"/> asset, and the World instantiates the GameMode prefab.
+    /// Starts the world from <see cref="WorldSettings"/> and opens the HUD.
     /// </summary>
     public class GASSampleGameplayEntryPoint : IAsyncStartable, IDisposable
     {
@@ -40,8 +37,7 @@ namespace GASSample.Gameplay
 
             await uiService.OpenAsync(UIWindowName.GameplayHUD, cancellationToken: cancellation);
 
-            // Let the camera settle on the freshly spawned pawn before the black curtain lifts,
-            // otherwise the first visible frames are empty sky.
+            // Give the camera one frame to follow the new pawn, or the fade-in shows empty sky.
             await UniTask.Yield();
             await ScreenFade.FadeInAsync();
         }
@@ -52,11 +48,7 @@ namespace GASSample.Gameplay
         }
     }
 
-    /// <summary>
-    /// Unity PlayerLoop bridge for the manually composed <see cref="GameInstance"/>.
-    /// A <see cref="GameplayWorldHost"/> would own these drivers; the sample composes the instance
-    /// through VContainer instead, so the phases are forwarded here.
-    /// </summary>
+    /// <summary>Forwards Unity player loop phases to the manually composed <see cref="GameInstance"/>.</summary>
     public class GameInstanceTickDriver : ITickable, IFixedTickable, ILateTickable
     {
         private readonly GameInstance gameInstance;

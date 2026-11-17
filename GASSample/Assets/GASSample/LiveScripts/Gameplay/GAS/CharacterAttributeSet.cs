@@ -86,40 +86,16 @@ namespace GASSample.Gameplay
                 SetBaseValue(Health, newHealth);
                 SetCurrentValue(Health, newHealth);
 
-                // --- Death and Bounty Logic ---
                 if (newHealth <= 0 && currentHealth > 0)
                 {
                     var targetASC = data.Target;
                     targetASC.AddLooseGameplayTag(GameplayTagManager.Request(GASSampleTags.State_Dead));
                     Log.Warning($"{targetASC.OwnerActor} has died!");
-
-                    var killerASC = data.EffectSpec.Source;
-                    if (killerASC != null && killerASC != targetASC)
-                    {
-                        if (targetASC.OwnerActor is GASSampleCharacter deadCharacter)
-                        {
-                            // deadCharacter.GrantBountyTo(killerASC);
-                        }
-                    }
                 }
 
-                return true; // Handled, no further processing needed.
+                return true;
             }
-            return false; // For any other attribute, return false to allow the default logic to run.
-        }
-
-        protected override void PostProcessInstantEffect(GameplayEffectModCallbackData data)
-        {
-            base.PostProcessInstantEffect(data);
-
-            var attribute = GetAttribute(data.Modifier.AttributeName);
-            if (attribute == Experience)
-            {
-                if (data.Target.OwnerActor is GASSampleCharacter character)
-                {
-                    // character.CheckForLevelUp();
-                }
-            }
+            return false;
         }
 
         public override void PostGameplayEffectExecute(GameplayEffectModCallbackData data)

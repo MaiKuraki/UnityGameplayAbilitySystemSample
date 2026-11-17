@@ -15,8 +15,7 @@ namespace GASSample.Scene
         {
             base.Configure(builder);
 
-            // The framework owns World creation: register the WorldSettings asset and let the
-            // GameInstance build the sealed World plus its GameMode/PlayerController/Pawn prefabs.
+            // The framework creates the World from WorldSettings; register the asset and its instance.
             builder.RegisterInstance(worldSettings);
             builder.Register<IActorLifetime, UnityActorLifetime>(Lifetime.Singleton);
             builder.Register<GameInstance>(
@@ -25,9 +24,7 @@ namespace GASSample.Scene
 
             builder.UseEntryPoints(Lifetime.Singleton, entryPoints =>
             {
-                // Drives the Unity PlayerLoop phases into the manually composed GameInstance.
                 entryPoints.Add<GameInstanceTickDriver>();
-                // Starts the world and opens the HUD.
                 entryPoints.Add<GASSampleGameplayEntryPoint>();
             });
         }

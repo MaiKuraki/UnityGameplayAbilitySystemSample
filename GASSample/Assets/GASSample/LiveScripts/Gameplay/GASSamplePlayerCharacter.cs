@@ -16,7 +16,7 @@ namespace GASSample.Gameplay
         [Header("Debug")]
         [SerializeField] private bool enableGasDebugLogs = false;
 
-        /// <summary>(current, max)</summary>
+        /// <summary>Raised as (current, max).</summary>
         public event Action<float, float> HealthChanged;
         public event Action<float, float> StaminaChanged;
         public event Action<float, float> ExperienceChanged;
@@ -64,8 +64,7 @@ namespace GASSample.Gameplay
         }
 
         /// <summary>
-        /// Binds the "Gameplay" context: Attack (mouse left button / gamepad south button) and
-        /// Move (WASD / left stick). The bindings live in StreamingAssets/input_config.yaml.
+        /// Binds the "Gameplay" context: Attack and Move, as declared in StreamingAssets/input_config.yaml.
         /// </summary>
         private void TryBindInput()
         {
