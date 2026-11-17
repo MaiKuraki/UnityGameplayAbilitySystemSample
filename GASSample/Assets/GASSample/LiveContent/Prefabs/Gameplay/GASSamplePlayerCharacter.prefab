@@ -25,7 +25,7 @@ Transform:
   m_GameObject: {fileID: 1099188086624692881}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 1.283, z: 0}
+  m_LocalPosition: {x: 0, y: 0.65, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -80,16 +80,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5dc7e420a3ac9104c8a12ba2ca2bd17d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  initialLifeSpanSec: 0
-  bCanBeDamaged: 1
-  bHidden: 0
-  tags: []
-  bUseControllerRotationPitch: 0
-  bUseControllerRotationYaw: 0
-  bUseControllerRotationRoll: 0
-  baseEyeHeight: 0.8
-  pawnConfig: {fileID: 0}
   <Animator>k__BackingField: {fileID: 8674566816488383285}
+  cameraFocus: {fileID: 4159062362017834748}
   InitialAttributes: {fileID: 11400000, guid: 4859eb649f451e145b39509482c05076, type: 2}
   InitialAbilities:
   - {fileID: 11400000, guid: ead067e9fc8b9bb4e9678aa1583963b8, type: 2}
@@ -98,9 +90,9 @@ MonoBehaviour:
   InitialPassiveEffects:
   - {fileID: 11400000, guid: 1e996b879c2d77d4daf188b5615bc75d, type: 2}
   LevelUpData: {fileID: 11400000, guid: f3fc0c4f14604eb4892179fe0ead72c8, type: 2}
-  CameraFocusTF: {fileID: 4159062362017834748}
-  comboEntryAbilityTag:
-    m_Name: Skill.Definition.Attack_1
+  comboEntryAbilityTagName: Skill.Definition.Attack_1
+  turnSpeed: 180
+  enableGasDebugLogs: 0
 --- !u!95 &8674566816488383285
 Animator:
   serializedVersion: 5
@@ -162,7 +154,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   characterAC: {fileID: 8674566816488383285}
   _moveSpeed: 5
-  rotationSpeed: 20
+  rotationSpeed: 2
+  bOrientRotationToMovement: 0
   gravity: -25
   useRootMotion: 0
   ignoreTimeScale: 0

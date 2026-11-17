@@ -13,6 +13,8 @@ namespace CycloneGames.RPGFoundation
         [SerializeField] private float _moveSpeed = 5f;
         public float moveSpeed => _moveSpeed;
         [SerializeField] private float rotationSpeed = 20f;
+        [Tooltip("Rotate the transform towards the movement direction. Turn off when an external script drives rotation.")]
+        [SerializeField] private bool bOrientRotationToMovement = true;
         [SerializeField] private float gravity = -25f;
         [SerializeField] private bool useRootMotion = false;
         [Tooltip("If true, all movement and rotation calculations will use unscaled time, ignoring Time.timeScale. Useful for characters that should not be affected by slow-motion effects.")]
@@ -139,6 +141,11 @@ namespace CycloneGames.RPGFoundation
 
         void TickRotation()
         {
+            if (!bOrientRotationToMovement)
+            {
+                return;
+            }
+
             // The target rotation should align the character's up vector with the current WorldUp,
             // and its forward vector with the look direction.
             Quaternion targetRotation;

@@ -26,8 +26,6 @@
         "CycloneGames.GameplayTags.Unity.Runtime",
         "CycloneGames.GameplayAbilities.Core",
         "CycloneGames.GameplayAbilities.Runtime",
-        "CycloneGames.GameplayFramework.Core",
-        "CycloneGames.GameplayFramework.Runtime",
         "CycloneGames.RPGFoundation",
         "GASSample.AOT"
     ],

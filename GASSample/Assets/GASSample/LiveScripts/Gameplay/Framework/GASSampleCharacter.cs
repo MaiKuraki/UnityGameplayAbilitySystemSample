@@ -1,24 +1,25 @@
 using System.Collections.Generic;
 using CycloneGames.GameplayAbilities.Runtime;
-using CycloneGames.GameplayFramework.Runtime;
 using CycloneGames.GameplayTags.Core;
+using CycloneGames.Logging;
 using CycloneGames.RPGFoundation;
 using CycloneGames.Utility.Runtime;
 using UnityEngine;
-using CycloneGames.Logging;
 
 namespace GASSample.Gameplay
 {
+    /// <summary>
+    /// Anything that owns an ability system: builds the component, wires it to this GameObject as the
+    /// avatar, and applies the effects and abilities authored on the prefab.
+    /// </summary>
     [RequireComponent(typeof(MovementComponent))]
-    public class GASSampleCharacter : Pawn
+    public class GASSampleCharacter : MonoBehaviour
     {
         private static readonly LogChannel Log = LogChannel.Create("GASSample");
-        protected MovementComponent movementComponent;
-        protected MovementComponent GetMovementComponent => movementComponent;
-        public AbilitySystemComponent AbilitySystemComponent { get; protected set; }
-        public CharacterAttributeSet AttributeSet { get; protected set; }
 
         [field: SerializeField] public Animator Animator { get; protected set; }
+
+        [SerializeField] private Transform cameraFocus;
 
         [PropertyGroup("GAS Setup", true, GroupColorIndex = 3)]
         [SerializeField] protected GameplayEffectSO InitialAttributes;
@@ -27,21 +28,92 @@ namespace GASSample.Gameplay
         [SerializeField] protected LevelUpDataSO LevelUpData;
         [EndPropertyGroup]
 
+        public AbilitySystemComponent AbilitySystemComponent { get; protected set; }
+        public CharacterAttributeSet AttributeSet { get; protected set; }
+        public IAbilityCamera Camera { get; private set; }
+        public Transform CameraFocus => cameraFocus;
         public LevelUpDataSO GetLevelUpData => LevelUpData;
+
+        protected MovementComponent movementComponent;
         protected Vector3 movementVelocity = Vector3.zero;
 
-        protected override void Awake()
-        {
-            base.Awake();
+        protected MovementComponent GetMovementComponent => movementComponent;
 
+        /// <summary>Called by the spawner once the scene camera exists.</summary>
+        public void SetCamera(IAbilityCamera camera)
+        {
+            Camera = camera;
+        }
+
+        protected virtual void Awake()
+        {
             movementComponent = GetComponent<MovementComponent>();
-            var effectContextFactory = new GameplayEffectContextFactory();
-            this.AbilitySystemComponent = new AbilitySystemComponent(
+
+            AbilitySystemComponent = new AbilitySystemComponent(
                 runtimeContext: null,
-                effectContextFactory: effectContextFactory);
+                effectContextFactory: new GameplayEffectContextFactory());
             AbilitySystemComponent.InitAbilityActorInfo(this, gameObject);
+
             AttributeSet = new CharacterAttributeSet();
             AbilitySystemComponent.AddAttributeSet(AttributeSet);
+        }
+
+        protected virtual void Start()
+        {
+            AttributeSet.Health.OnCurrentValueChanged += OnHealthChanged;
+            AttributeSet.MaxHealth.OnCurrentValueChanged += OnHealthChanged;
+            AttributeSet.Stamina.OnCurrentValueChanged += OnStaminaChanged;
+            AttributeSet.MaxStamina.OnCurrentValueChanged += OnStaminaChanged;
+            AttributeSet.Experience.OnCurrentValueChanged += OnExperienceChanged;
+
+            ApplyEffect(InitialAttributes);
+
+            if (InitialPassiveEffects != null)
+            {
+                foreach (GameplayEffectSO passiveEffect in InitialPassiveEffects)
+                {
+                    ApplyEffect(passiveEffect);
+                }
+            }
+
+            if (InitialAbilities != null)
+            {
+                foreach (GameplayAbilitySO abilityAsset in InitialAbilities)
+                {
+                    if (abilityAsset != null)
+                    {
+                        AbilitySystemComponent.GrantAbility(abilityAsset.GetGameplayAbility());
+                    }
+                }
+            }
+        }
+
+        protected virtual void OnDestroy()
+        {
+            AbilitySystemComponent?.Dispose();
+        }
+
+        protected virtual void OnHealthChanged(float oldValue, float newValue)
+        {
+        }
+
+        protected virtual void OnStaminaChanged(float oldValue, float newValue)
+        {
+        }
+
+        protected virtual void OnExperienceChanged(float oldValue, float newValue)
+        {
+        }
+
+        private void ApplyEffect(GameplayEffectSO effectAsset)
+        {
+            if (effectAsset == null)
+            {
+                return;
+            }
+
+            GameplayEffectSpec spec = GameplayEffectSpec.Create(effectAsset.GetGameplayEffect(), AbilitySystemComponent);
+            AbilitySystemComponent.ApplyGameplayEffectSpecToSelf(spec);
         }
 
         public void CheckForLevelUp()

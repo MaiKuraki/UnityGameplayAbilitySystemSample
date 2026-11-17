@@ -7,7 +7,6 @@
     "com.cyclone-games.cheat": "file:../../UnityPackages/CycloneGames/CycloneGames.Cheat",
     "com.cyclone-games.deterministic-math": "file:../../UnityPackages/CycloneGames/CycloneGames.DeterministicMath",
     "com.cyclone-games.gameplay-abilities": "file:../../UnityPackages/CycloneGames/CycloneGames.GameplayAbilities",
-    "com.cyclone-games.gameplay-framework": "file:../../UnityPackages/CycloneGames/CycloneGames.GameplayFramework",
     "com.cyclone-games.gameplay-tags": "file:../../UnityPackages/CycloneGames/CycloneGames.GameplayTags",
     "com.cyclone-games.hash": "file:../../UnityPackages/CycloneGames/CycloneGames.Hash",
     "com.cyclone-games.inputsystem": "file:../../UnityPackages/CycloneGames/CycloneGames.InputSystem",

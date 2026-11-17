@@ -11,8 +11,8 @@ GameObject:
   - component: {fileID: 2788967634161109112}
   - component: {fileID: 1994838677665118371}
   - component: {fileID: 5439169721977044692}
-  - component: {fileID: 3239740349652733683}
   - component: {fileID: 5221422409540511695}
+  - component: {fileID: 6647942082243176410}
   m_Layer: 0
   m_Name: MainCamera
   m_TagString: MainCamera
@@ -94,38 +94,6 @@ AudioListener:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 6148916753603415557}
   m_Enabled: 1
---- !u!114 &3239740349652733683
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 6148916753603415557}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 72ece51f2901e7445ab60da3685d6b5f, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  ShowDebugText: 0
-  ShowCameraFrustum: 1
-  IgnoreTimeScale: 0
-  WorldUpOverride: {fileID: 0}
-  ChannelMask: -1
-  UpdateMethod: 2
-  BlendUpdateMethod: 1
-  LensModeOverride:
-    Enabled: 0
-    DefaultMode: 2
-  DefaultBlend:
-    Style: 1
-    Time: 2
-    CustomCurve:
-      serializedVersion: 2
-      m_Curve: []
-      m_PreInfinity: 2
-      m_PostInfinity: 2
-      m_RotationOrder: 4
-  CustomBlends: {fileID: 0}
 --- !u!114 &5221422409540511695
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -138,3 +106,19 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b43e75d39918e9749a186c2efcebf5b1, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+--- !u!114 &6647942082243176410
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6148916753603415557}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 42bea21405e25bc4cb1371c082a4c44b, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  followDistance: 3
+  pivotHeight: 1.6
+  lookAtHeight: 1.1
+  fieldOfView: 60

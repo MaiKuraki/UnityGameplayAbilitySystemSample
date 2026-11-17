@@ -1,7 +1,5 @@
 using System;
 using CycloneGames.GameplayAbilities.Runtime;
-using CycloneGames.GameplayFramework;
-using CycloneGames.GameplayFramework.Runtime;
 using CycloneGames.GameplayTags.Core;
 using CycloneGames.Utility.Runtime;
 using UnityEngine;
@@ -86,10 +84,10 @@ namespace GASSample.Gameplay
             }
 
             int serial = activationSerial;
-            var playerController = ResolvePlayerController(actorInfo.AvatarActor);
+            var camera = ResolveCamera(actorInfo.AvatarActor);
             float animationDuration = animCharacter != null ? animCharacter.length : 0f;
 
-            StartSkillCamera(playerController);
+            StartSkillCamera(camera);
 
             BeginComboWindow(serial, animationDuration);
 
@@ -98,13 +96,13 @@ namespace GASSample.Gameplay
                 && (cameraPolicy.stopPolicy == CameraStopPolicy.ByCameraFinished
                     || cameraPolicy.stopPolicy == CameraStopPolicy.FirstReached))
             {
-                BeginCameraAutoStop(serial, playerController);
+                BeginCameraAutoStop(serial, camera);
             }
 
             float activeDuration = ResolveActiveDuration(animationDuration);
             if (activeDuration <= 0f)
             {
-                CleanupRuntimeState(serial, playerController);
+                CleanupRuntimeState(serial, camera);
                 EndAbility();
                 return;
             }
@@ -120,10 +118,10 @@ namespace GASSample.Gameplay
                 if (cameraPolicy.stopPolicy == CameraStopPolicy.ByAbilityEnd
                     || cameraPolicy.stopPolicy == CameraStopPolicy.FirstReached)
                 {
-                    StopSkillCamera(playerController);
+                    StopSkillCamera(camera);
                 }
 
-                CleanupRuntimeState(serial, playerController);
+                CleanupRuntimeState(serial, camera);
                 EndAbility();
             };
             durationTask.Activate();
@@ -131,13 +129,13 @@ namespace GASSample.Gameplay
 
         public override void CancelAbility()
         {
-            CleanupRuntimeState(activationSerial, ResolvePlayerController(ActorInfo.AvatarActor));
+            CleanupRuntimeState(activationSerial, ResolveCamera(ActorInfo.AvatarActor));
             base.CancelAbility();
         }
 
         public override void OnRemoveAbility()
         {
-            CleanupRuntimeState(activationSerial, ResolvePlayerController(ActorInfo.AvatarActor));
+            CleanupRuntimeState(activationSerial, ResolveCamera(ActorInfo.AvatarActor));
             base.OnRemoveAbility();
         }
 
@@ -154,40 +152,40 @@ namespace GASSample.Gameplay
                 nextComboAbilityTag);
         }
 
-        private void StartSkillCamera(PlayerController playerController)
+        private void StartSkillCamera(IAbilityCamera camera)
         {
-            if (!cameraPolicy.enableCamera || isSkillCameraActive || playerController == null || animCamera == null)
+            if (!cameraPolicy.enableCamera || isSkillCameraActive || camera == null || animCamera == null)
             {
                 return;
             }
 
-            while (playerController.RemoveCameraMode(cameraModeInstance))
+            while (camera.RemoveMode(cameraModeInstance))
             {
             }
 
             float blendOutDuration = cameraPolicy.blendOutDuration > 0f ? cameraPolicy.blendOutDuration : 0.15f;
             cameraModeInstance.Setup(animCamera, blendOutDuration);
-            if (playerController.TryPushCameraMode(cameraModeInstance))
+            if (camera.TryPushMode(cameraModeInstance))
             {
                 isSkillCameraActive = true;
             }
         }
 
-        private void StopSkillCamera(PlayerController playerController)
+        private void StopSkillCamera(IAbilityCamera camera)
         {
             if (!isSkillCameraActive)
             {
                 return;
             }
 
-            if (playerController == null)
+            if (camera == null)
             {
                 isSkillCameraActive = false;
                 return;
             }
 
             bool removedAny = false;
-            while (playerController.RemoveCameraMode(cameraModeInstance))
+            while (camera.RemoveMode(cameraModeInstance))
             {
                 removedAny = true;
             }
@@ -198,7 +196,7 @@ namespace GASSample.Gameplay
             }
         }
 
-        private void BeginCameraAutoStop(int serial, PlayerController playerController)
+        private void BeginCameraAutoStop(int serial, IAbilityCamera camera)
         {
             float delay = Mathf.Max(0f, GetCameraClipDuration());
             var waitTask = AbilityTask_WaitDelay.WaitDelay(this, delay);
@@ -209,12 +207,12 @@ namespace GASSample.Gameplay
                     return;
                 }
 
-                PollCameraStop(serial, playerController, 0f);
+                PollCameraStop(serial, camera, 0f);
             };
             waitTask.Activate();
         }
 
-        private void PollCameraStop(int serial, PlayerController playerController, float elapsed)
+        private void PollCameraStop(int serial, IAbilityCamera camera, float elapsed)
         {
             if (serial != activationSerial || !isSkillCameraActive)
             {
@@ -229,14 +227,14 @@ namespace GASSample.Gameplay
 
             if (finished && settled)
             {
-                StopSkillCamera(playerController);
+                StopSkillCamera(camera);
                 return;
             }
 
             float timeout = Mathf.Max(0.01f, cameraPolicy.stopSettleTimeout);
             if (elapsed >= timeout)
             {
-                StopSkillCamera(playerController);
+                StopSkillCamera(camera);
                 return;
             }
 
@@ -249,12 +247,12 @@ namespace GASSample.Gameplay
                     return;
                 }
 
-                PollCameraStop(serial, playerController, elapsed + interval);
+                PollCameraStop(serial, camera, elapsed + interval);
             };
             waitTask.Activate();
         }
 
-        private void CleanupRuntimeState(int serial, PlayerController playerController)
+        private void CleanupRuntimeState(int serial, IAbilityCamera camera)
         {
             if (runtimeStateCleaned || serial != activationSerial)
             {
@@ -263,7 +261,7 @@ namespace GASSample.Gameplay
 
             runtimeStateCleaned = true;
             CloseComboWindow();
-            StopSkillCamera(playerController);
+            StopSkillCamera(camera);
 
             if (runtimeAnimator != null)
             {
@@ -337,41 +335,9 @@ namespace GASSample.Gameplay
             return animCamera != null ? animCamera.GetTotalDuration() : 0f;
         }
 
-        private static PlayerController ResolvePlayerController(object avatarActor)
+        private static IAbilityCamera ResolveCamera(object avatarActor)
         {
-            if (avatarActor is PlayerController pc)
-            {
-                return pc;
-            }
-
-            if (avatarActor is Pawn pawn)
-            {
-                return pawn.Controller as PlayerController;
-            }
-
-            if (avatarActor is Component component)
-            {
-                var pawnComponent = component.GetComponent<Pawn>();
-                if (pawnComponent != null)
-                {
-                    return pawnComponent.Controller as PlayerController;
-                }
-
-                return component.GetComponent<PlayerController>();
-            }
-
-            if (avatarActor is GameObject go)
-            {
-                var pawnFromGo = go.GetComponent<Pawn>();
-                if (pawnFromGo != null)
-                {
-                    return pawnFromGo.Controller as PlayerController;
-                }
-
-                return go.GetComponent<PlayerController>();
-            }
-
-            return null;
+            return avatarActor is GameObject go ? go.GetComponent<GASSampleCharacter>()?.Camera : null;
         }
     }
 

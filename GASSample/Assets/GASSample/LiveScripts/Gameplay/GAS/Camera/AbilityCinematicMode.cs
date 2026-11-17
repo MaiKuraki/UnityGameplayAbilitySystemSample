@@ -1,8 +1,8 @@
-using CycloneGames.GameplayFramework.Runtime;
 using UnityEngine;
 
 namespace GASSample.Gameplay
 {
+    /// <summary>Plays an ability camera clip on top of the follow camera.</summary>
     public sealed class AbilityCinematicMode : CameraMode
     {
         private AbilityCameraClip clip;
@@ -39,7 +39,7 @@ namespace GASSample.Gameplay
                    && Mathf.Abs(currentFov - targetFov) <= clampedFovEpsilon;
         }
 
-        public override void Tick(CameraContext context, float deltaTime)
+        public override void Tick(float deltaTime)
         {
             if (clip == null || clip.stages == null || clip.stages.Length == 0 || finished)
             {
@@ -74,7 +74,7 @@ namespace GASSample.Gameplay
             }
         }
 
-        public override CameraPose Evaluate(CameraContext context, in CameraPose basePose, float deltaTime)
+        public override CameraPose Evaluate(in CameraPose basePose)
         {
             if (clip == null || clip.stages == null || clip.stages.Length == 0)
             {

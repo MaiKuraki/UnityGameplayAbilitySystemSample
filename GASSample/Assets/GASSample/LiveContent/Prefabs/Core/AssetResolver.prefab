@@ -45,11 +45,6 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   dontDestroyAddressablePaths:
-  - DisplayName: DebugGroup
-    AddressablePath: Assets/GASSample/_CHEAT/DebugSystem.prefab
-  - DisplayName: EventSystem
-    AddressablePath: Assets/GASSample/LiveContent/Prefabs/Core/EventSystem.prefab
-  - DisplayName: MainCamera
-    AddressablePath: Assets/GASSample/LiveContent/Prefabs/Core/MainCamera.prefab
-  - DisplayName: UI
-    AddressablePath: Assets/GASSample/LiveContent/Prefabs/UI/UIFramework.prefab
+  - AddressablePath: Assets/GASSample/_CHEAT/DebugSystem.prefab
+  - AddressablePath: Assets/GASSample/LiveContent/Prefabs/Core/EventSystem.prefab
+  - AddressablePath: Assets/GASSample/LiveContent/Prefabs/Core/MainCamera.prefab

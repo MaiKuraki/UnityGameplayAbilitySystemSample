@@ -9,15 +9,20 @@ using VContainer.Unity;
 namespace GASSample.AOT
 {
     /// <summary>
-    /// Initializes the asset package and spawns the LiveContent entry prefab.
+    /// Initializes the asset package and spawns the two persistent roots of LiveContent: the UI first,
+    /// then the gameplay scope. The UI has to exist before a scope asks for <c>IUIService</c>.
     /// <para>
     /// BuiltIn holds no reference to LiveContent assets so the latter can move to a hot-update
-    /// assembly; the path below is the only link between the two layers.
+    /// assembly; the paths below are the only link between the two layers.
     /// </para>
     /// </summary>
     public class LaunchBootstrapper : IAsyncStartable
     {
-        /// <summary>Entry prefab of the LiveContent layer.</summary>
+        /// <summary>UI root of the LiveContent layer. Spawned before anything can request it.</summary>
+        private const string UiRootPrefabPath =
+            "Assets/GASSample/LiveContent/Prefabs/UI/UIFramework.prefab";
+
+        /// <summary>Gameplay scope of the LiveContent layer.</summary>
         private const string LiveContentEntryPath =
             "Assets/GASSample/LiveContent/Prefabs/Core/ProjectSharedLifetimeScope.prefab";
 
@@ -40,11 +45,18 @@ namespace GASSample.AOT
                 cancellation);
 
             IAssetPackage package = assetModule.GetPackage(DefaultPackage);
-            var prefab = package.LoadAssetAsync<GameObject>(LiveContentEntryPath);
+
+            await SpawnPersistentAsync(package, UiRootPrefabPath);
+            await SpawnPersistentAsync(package, LiveContentEntryPath);
+        }
+
+        private static async UniTask SpawnPersistentAsync(IAssetPackage package, string path)
+        {
+            var prefab = package.LoadAssetAsync<GameObject>(path);
             await prefab.Task;
 
-            GameObject liveContent = UnityEngine.Object.Instantiate(prefab.AssetObject) as GameObject;
-            UnityEngine.Object.DontDestroyOnLoad(liveContent);
+            GameObject instance = UnityEngine.Object.Instantiate(prefab.AssetObject) as GameObject;
+            UnityEngine.Object.DontDestroyOnLoad(instance);
         }
     }
 }
