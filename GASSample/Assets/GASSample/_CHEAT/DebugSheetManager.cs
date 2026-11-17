@@ -1,7 +1,7 @@
 using System;
 using System.Reflection;
 using IngameDebugConsole;
-using UnityDebugSheet.Runtime.Core.Scripts;
+using UnityDebugSheet;
 using UnityDebugSheet.Runtime.Extensions.IngameDebugConsole;
 using UnityDebugSheet.Runtime.Extensions.Unity;
 using UnityEngine;
