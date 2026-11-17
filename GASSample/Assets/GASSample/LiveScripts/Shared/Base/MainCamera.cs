@@ -23,7 +23,6 @@ namespace GASSample
         private void Awake()
         {
             CameraInst = GetComponent<Camera>();
-            CameraInst.GetUniversalAdditionalCameraData().renderType = CameraRenderType.Base;
 
             if (Instance != null && Instance != this)
             {

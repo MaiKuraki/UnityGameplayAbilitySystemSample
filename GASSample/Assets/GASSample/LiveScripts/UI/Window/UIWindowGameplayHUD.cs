@@ -1,14 +1,9 @@
 using CycloneGames.AssetManagement.Runtime;
-using CycloneGames.AssetManagement.Runtime.Integrations.Navigathena;
 using CycloneGames.UIFramework.Runtime;
 using Cysharp.Threading.Tasks;
-using GASSample.AssetManagement;
 using GASSample.Gameplay;
-using GASSample.Scene;
-using MackySoft.Navigathena.SceneManagement;
 using R3;
 using UnityEngine;
-using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using VContainer;
 
@@ -20,6 +15,7 @@ namespace GASSample.UI
     public class UIWindowGameplayHUD : UIWindow
     {
         [Inject] private readonly IAssetModule assetModule;
+        [Inject] private readonly IUIService uiService;
 
         [SerializeField] private Button Btn_Back;
         [SerializeField] private StatusBar Bar_Health;
@@ -85,11 +81,9 @@ namespace GASSample.UI
 
         private async UniTask BackToTitle()
         {
-            var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
-            var sceneLoader = (IAssetSceneLoader)pkg;
-            AssetManagementSceneIdentifier sceneTitle = new AssetManagementSceneIdentifier(sceneLoader, ScenePath.Title, LoadSceneMode.Additive, true);
-            AssetManagementSceneIdentifier sceneTransition = new AssetManagementSceneIdentifier(sceneLoader, ScenePath.Transition, LoadSceneMode.Additive, true);
-            await GlobalSceneNavigator.Instance.Push(sceneTitle, interruptOperation: new UnloadPackageAssetsOperation(pkg), transitionDirector: new SimpleTransitionDirector(assetModule, sceneTransition, new TransitionDisplayData(0.25f, 0.25f)));
+            await ScreenFade.FadeOutAsync();
+            await uiService.CloseAsync(WindowId);
+            await SceneFlow.LoadAsync(assetModule, SceneFlow.Title);
         }
     }
 }

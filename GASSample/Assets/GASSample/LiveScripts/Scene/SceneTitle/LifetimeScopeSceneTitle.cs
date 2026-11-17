@@ -1,15 +1,15 @@
 using VContainer;
-using MackySoft.Navigathena.SceneManagement.VContainer;
+using VContainer.Unity;
 
 namespace GASSample.Scene
 {
-    public class LifetimeScopeSceneTitle : SceneBaseLifetimeScope
+    public class LifetimeScopeSceneTitle : LifetimeScope
     {
         protected override void Configure(IContainerBuilder builder)
         {
             base.Configure(builder);
 
-            builder.RegisterSceneLifecycle<LifecycleSceneTitle>();
+            builder.RegisterEntryPoint<TitleEntryPoint>();
         }
     }
 }

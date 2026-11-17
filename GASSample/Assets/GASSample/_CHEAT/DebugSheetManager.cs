@@ -13,21 +13,12 @@ namespace GASSample.Cheat
         private DebugPage debugPageRoot;
 
         public static DebugSheetManager Instance { get; private set; }
-        [SerializeField] bool _singleton = true;
 
         void Awake()
         {
-            if (_singleton)
-            {
-                if (Instance != null && Instance != this)
-                {
-                    Destroy(gameObject);
-                    return;
-                }
-
-                Instance = this;
-                DontDestroyOnLoad(gameObject);
-            }
+            // The whole DebugSystem prefab is spawned by AssetResolverForDontDestroy, which already
+            // keeps it alive across scenes - no singleton or DontDestroyOnLoad needed here.
+            Instance = this;
         }
 
         void Start()

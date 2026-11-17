@@ -1,13 +1,13 @@
+using CycloneGames.AssetManagement.Runtime;
 using CycloneGames.GameplayFramework.Runtime;
 using GASSample.Gameplay;
-using MackySoft.Navigathena.SceneManagement.VContainer;
 using UnityEngine;
 using VContainer;
 using VContainer.Unity;
 
 namespace GASSample.Scene
 {
-    public class LifetimeScopeSceneGameplay : SceneBaseLifetimeScope
+    public class LifetimeScopeSceneGameplay : LifetimeScope
     {
         [SerializeField] private WorldSettings worldSettings;
 
@@ -23,12 +23,11 @@ namespace GASSample.Scene
                 resolver => new GameInstance(resolver.Resolve<IActorLifetime>(), localPlayerCount: 1),
                 Lifetime.Singleton);
 
-            builder.RegisterSceneLifecycle<LifecycleSceneGameplay>();
             builder.UseEntryPoints(Lifetime.Singleton, entryPoints =>
             {
                 // Drives the Unity PlayerLoop phases into the manually composed GameInstance.
                 entryPoints.Add<GameInstanceTickDriver>();
-                // Start Game Logic
+                // Starts the world and opens the HUD.
                 entryPoints.Add<GASSampleGameplayEntryPoint>();
             });
         }

@@ -1,7 +1,9 @@
 using System.Collections.Generic;
 using CycloneGames.AssetManagement.Runtime;
 using Cysharp.Threading.Tasks;
+using GASSample.Misc;
 using UnityEngine;
+using UnityEngine.EventSystems;
 
 namespace GASSample.AssetManagement
 {
@@ -23,7 +25,24 @@ namespace GASSample.AssetManagement
             {
                 var prefab = pkg.LoadAssetAsync<GameObject>(pathData.AddressablePath);
                 await prefab.Task;
-                await InstantiateAsync(prefab.AssetObject);
+
+                GameObject instance = Instantiate(prefab.AssetObject) as GameObject;
+
+                // The whole point of this component: these objects must survive the scene that spawned
+                // them, so the first transition does not take the camera or the UI with it.
+                DontDestroyOnLoad(instance);
+
+                // The debug console prefab ships its own EventSystem and Unity only allows one in the
+                // project. Deactivate it - destroying it would leave the console's scripts with dead
+                // references - and do it before the project's own EventSystem is spawned, otherwise
+                // both are active for a frame and Unity logs a duplicate warning.
+                if (instance.GetComponent<GASSampleEventSystem>() == null)
+                {
+                    foreach (EventSystem eventSystem in instance.GetComponentsInChildren<EventSystem>(true))
+                    {
+                        eventSystem.gameObject.SetActive(false);
+                    }
+                }
             }
         }
     }

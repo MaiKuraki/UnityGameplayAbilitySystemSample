@@ -1,12 +1,8 @@
 using CycloneGames.AssetManagement.Runtime;
-using CycloneGames.AssetManagement.Runtime.Integrations.Navigathena;
 using CycloneGames.UIFramework.Runtime;
-using GASSample.AssetManagement;
-using GASSample.Scene;
-using MackySoft.Navigathena.SceneManagement;
+using Cysharp.Threading.Tasks;
 using R3;
 using UnityEngine;
-using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using VContainer;
 
@@ -15,21 +11,24 @@ namespace GASSample.UI
     public class UIWindowTitle : UIWindow
     {
         [Inject] private readonly IAssetModule assetModule;
+        [Inject] private readonly IUIService uiService;
+
         [SerializeField] private Button buttonStart;
 
         protected override void Awake()
         {
             base.Awake();
 
-            buttonStart.OnClickAsObservable().Subscribe(_ => ClickStart());
+            buttonStart.OnClickAsObservable().Subscribe(_ => ClickStart().Forget());
         }
 
-        private void ClickStart()
+        private async UniTask ClickStart()
         {
-            var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
-            var sceneLoader = (IAssetSceneLoader)pkg;
-            var sceneGameplay = new AssetManagementSceneIdentifier(sceneLoader, ScenePath.Gameplay, LoadSceneMode.Additive, true);
-            GlobalSceneNavigator.Instance.Push(sceneGameplay);
+            // Cover the screen before the window disappears: the title scene itself is empty, so
+            // closing the window first would reveal its skybox for a frame.
+            await ScreenFade.FadeOutAsync();
+            await uiService.CloseAsync(WindowId);
+            await SceneFlow.LoadAsync(assetModule, SceneFlow.Gameplay);
         }
     }
 }

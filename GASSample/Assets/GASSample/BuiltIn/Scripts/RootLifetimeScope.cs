@@ -10,10 +10,6 @@ namespace GASSample.AOT
     /// </summary>
     public class RootLifetimeScope : LifetimeScope
     {
-        // Kept local on purpose: AOT cannot reference the HotUpdate assembly that owns
-        // GASSample.AssetManagement.AssetPackageName.
-        private const string DefaultPackage = "DefaultPackage";
-
         private static RootLifetimeScope instance;
 
         protected override void Awake()
@@ -32,16 +28,9 @@ namespace GASSample.AOT
 
         protected override void Configure(IContainerBuilder builder)
         {
+            // Only the module lives here; the default package is initialized by the boot entry point,
+            // which is the first thing that actually needs it.
             builder.Register<IAssetModule, AddressablesModule>(Lifetime.Singleton);
-
-            builder.RegisterBuildCallback(async resolver =>
-            {
-                await AssetManager.InitializeDefaultPackageAsync(
-                    resolver.Resolve<IAssetModule>(),
-                    DefaultPackage,
-                    new AssetManagementOptions(),
-                    new AssetPackageInitOptions());
-            });
         }
     }
 }

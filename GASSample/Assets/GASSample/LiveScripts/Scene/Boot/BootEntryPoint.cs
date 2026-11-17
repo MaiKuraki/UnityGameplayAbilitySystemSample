@@ -1,56 +1,50 @@
 using System;
 using System.Threading;
 using CycloneGames.AssetManagement.Runtime;
-using CycloneGames.AssetManagement.Runtime.Integrations.Navigathena;
 using CycloneGames.InputSystem.Runtime;
 using CycloneGames.IO.Unity;
 using Cysharp.Threading.Tasks;
 using GASSample.AssetManagement;
 using GASSample.Input;
-using MackySoft.Navigathena;
-using MackySoft.Navigathena.SceneManagement;
-using MackySoft.Navigathena.SceneManagement.VContainer;
 using UnityEngine;
-using UnityEngine.SceneManagement;
-using VContainer;
+using VContainer.Unity;
 
 namespace GASSample.Scene
 {
     /// <summary>
-    /// Bootstrap scene. It prepares the screen and input, spawns the objects that must survive scene
-    /// changes, then pushes the splash scene.
+    /// Runs once from the launch scene. It configures the screen, creates the objects that must outlive
+    /// every scene change (camera, UI, debug tools), initializes input, and then enters the scene flow.
     /// </summary>
-    public class LifecycleSceneInitial : ISceneLifecycle
+    public class BootEntryPoint : IAsyncStartable
     {
-        [Inject] private AssetResolverForDontDestroy assetResolver;
-        [Inject] private IAssetModule assetModule;
+        private readonly IAssetModule assetModule;
+        private readonly AssetResolverForDontDestroy assetResolver;
 
-        public UniTask OnEditorFirstPreInitialize(ISceneDataWriter writer, CancellationToken cancellationToken) => UniTask.CompletedTask;
-
-        public UniTask OnInitialize(ISceneDataReader reader, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken)
+        public BootEntryPoint(IAssetModule assetModule, AssetResolverForDontDestroy assetResolver)
         {
-            return BootstrapAsync();
+            this.assetModule = assetModule;
+            this.assetResolver = assetResolver;
         }
 
-        public UniTask OnEnter(ISceneDataReader reader, CancellationToken cancellationToken) => UniTask.CompletedTask;
-
-        public UniTask OnExit(ISceneDataWriter writer, CancellationToken cancellationToken) => UniTask.CompletedTask;
-
-        public UniTask OnFinalize(ISceneDataWriter writer, IProgress<IProgressDataStore> progress, CancellationToken cancellationToken) => UniTask.CompletedTask;
-
-        private async UniTask BootstrapAsync()
+        public async UniTask StartAsync(CancellationToken cancellation)
         {
-            var pkg = assetModule.GetPackage(AssetPackageName.DefaultPackage);
+            // The launch scene is empty, so hide it before the first frame is drawn.
+            ScreenFade.CoverNow();
 
             Screen.SetResolution(1920, 1080, Screen.fullScreen);
             Application.targetFrameRate = 60;
 
+            await AssetManager.InitializeDefaultPackageAsync(
+                assetModule,
+                AssetPackageName.DefaultPackage,
+                new AssetManagementOptions(),
+                new AssetPackageInitOptions());
+
             await assetResolver.InitializeAsync(assetModule);
+
             await InitializeInputAsync();
 
-            var sceneLoader = (IAssetSceneLoader)pkg;
-            var sceneSplash = new AssetManagementSceneIdentifier(sceneLoader, ScenePath.Splash, LoadSceneMode.Additive, true);
-            await GlobalSceneNavigator.Instance.Push(sceneSplash, interruptOperation: new UnloadPackageAssetsOperation(pkg));
+            await SceneFlow.LoadAsync(assetModule, SceneFlow.Title);
         }
 
         /// <summary>

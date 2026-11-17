@@ -39,6 +39,11 @@ namespace GASSample.Gameplay
                 cancellationToken: cancellation);
 
             await uiService.OpenAsync(UIWindowName.GameplayHUD, cancellationToken: cancellation);
+
+            // Let the camera settle on the freshly spawned pawn before the black curtain lifts,
+            // otherwise the first visible frames are empty sky.
+            await UniTask.Yield();
+            await ScreenFade.FadeInAsync();
         }
 
         public void Dispose()
