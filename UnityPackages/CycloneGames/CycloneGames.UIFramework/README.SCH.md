@@ -28,10 +28,10 @@ CycloneGames.UIFramework 负责 Unity 中 UGUI 窗口的生命周期管理。它
 
 - **`UIService`** 作为单一主线程受限的窗口会话 owner，提供支持取消的 `UniTask` 操作。
 - **显式 Binder 组合**：面向 MVP、DI、分析、无障碍或项目 policy 的事务型单窗口扩展。
-- **Provider 加载**：直接 Prefab 或 `IUIWindowAssetProvider`，附带 AssetManagement adapter 与会话持有的 Lease。
+- **Provider 加载**：直接 Prefab 或任意 `IUIWindowAssetProvider`；可选 AssetManagement adapter 与零依赖的参考 Provider 独立提供，Lease 由会话持有。
 - **因果导航**：活动窗口图，支持协调进入/离开过渡和调用方缓冲查询。
 - **生命周期状态机**：`UIWindowState` 仅由 `UIService` 持有；回滚、清理与聚合失败上报。
-- **有界动态图集**：运行时 Sprite Packing，具有显式 Lease；详见[动态图集指南](Documents~/DynamicAtlas.SCH.md)。
+- **可选运行时图集**：运行时 Sprite Packing 位于独立的 [CycloneGames.DynamicAtlas](../CycloneGames.DynamicAtlas/README.SCH.md) 包；本包不引用它。
 - **本地化布局**：按语言区分的几何与排版覆盖，由可选的 companion 模块 [CycloneGames.UIFramework.Localization](../CycloneGames.UIFramework.Localization/README.SCH.md) 提供。
 
 ## 架构
@@ -75,18 +75,22 @@ flowchart LR
 | --- | --- | --- |
 | `CycloneGames.UIFramework.Runtime` | 核心 Runtime | 始终 |
 | `CycloneGames.UIFramework.Editor` | Authoring 工具 | 仅 Editor |
-| `CycloneGames.UIFramework.Runtime.Integrations.AssetManagement` | Asset handle/lease adapter | 依赖 `CYCLONEGAMES_HAS_ASSETMANAGEMENT` define；`versionDefines` 监视 `com.cyclone-games.asset-management` UPM 包 |
+| `CycloneGames.UIFramework.Runtime.Integrations.AssetManagement` | 可选 Asset handle/lease adapter | 依赖 `CYCLONEGAMES_HAS_ASSETMANAGEMENT` define；`versionDefines` 监视 `com.cyclone-games.asset-management` UPM 包；`autoReferenced: false` 要求 composition asmdef 显式引用 |
 | `CycloneGames.UIFramework.Runtime.Integrations.VContainer` | 窗口注入 | 存在 `jp.hadashikick.vcontainer` 包 |
 | `...Integrations.LitMotion` | 窗口过渡 driver | 存在 `com.annulusgames.lit-motion` 包 |
 | `...Integrations.DOTween` | 窗口过渡 driver | 存在 `com.demigiant.dotween` 包 |
 | `...Integrations.PrimeTween` | 窗口过渡 driver | 存在 `com.kyrylokuzyk.primetween` 包 |
 | `CycloneGames.UIFramework.Samples` | 选择性示例 | `autoReferenced: false` |
 
-核心 Runtime 引用 `UniTask`、`CycloneGames.Logging.Core` 与 Unity UGUI API。可选的 DI 与 Motion Integration 通过 asmdef 的 `versionDefines` 加 `defineConstraints` 启用：当依赖以 UPM 包形式安装时自动激活。AssetManagement 集成遵循同一规则：`versionDefines` 监视 `com.cyclone-games.asset-management` UPM 包并生成 `CYCLONEGAMES_HAS_ASSETMANAGEMENT`。当 AssetManagement 只以 `Assets/` 下文件夹形式存在时，该 define 不会生效，集成程序集会被静默跳过；需要以 UPM 或 embedded 包形式安装 AssetManagement，或在 asmdef 可见的位置自行定义该宏。
+核心 Runtime 引用 `UniTask`、`CycloneGames.Logging.Core` 与 Unity UGUI API。可选的 DI 与 Motion Integration 通过 asmdef 的 `versionDefines` 加 `defineConstraints` 启用：当依赖以 UPM 包形式安装时自动激活。AssetManagement 集成遵循同一规则：`versionDefines` 监视 `com.cyclone-games.asset-management` UPM 包并生成 `CYCLONEGAMES_HAS_ASSETMANAGEMENT`，再由 `defineConstraints` 消费。
+
+三者均设置 `autoReferenced: false`，其作用是阻止预定义程序集隐式引用它们。Runtime adapter 与其聚焦测试必须由宿主 composition asmdef 显式引用，且该 asmdef 必须重复同一条 `versionDefines` 规则，因为 version-defined symbol 不会在程序集之间传播。Editor location resolver 不需要这类引用：核心 Editor 通过 `TypeCache` 发现 `IUIWindowLocationResolver` 实现，因此只要后端 UPM 包使门控命中，该 resolver 就会自动激活。关闭方式是删除 Integration 目录或收紧其 `defineConstraints`。没有 resolver 注册时，location 解析返回空字符串，authoring 回退到 Editor GUID 与资源路径。
+
+本包以 UPM 消费为目标形态（registry、git URL、local 或 embedded package）。`versionDefines` 只读取已解析的 UPM 包清单，因此 `Assets/` 下的裸目录不会触发门控，三个 Integration Assembly 会被跳过。不要把 `CYCLONEGAMES_HAS_ASSETMANAGEMENT` 加进 PlayerSettings：那样会绕过版本校验，并让宿主绑定到未必随包发布的后端布局。使用私有资源管理框架的宿主可直接实现 `IUIWindowAssetProvider`，或以 `Samples/` 中的 `DelegatedUIWindowAssetProvider` 为起点。`UIAssetLoadContext` 的字段是可选 hint，这类 Provider 可以忽略。
 
 Localization 绑定不属于本包。它位于可选的 companion 模块 [CycloneGames.UIFramework.Localization](../CycloneGames.UIFramework.Localization/README.SCH.md) 中，因此本包在没有 `CycloneGames.Localization`、也没有任何条件编译宏的情况下照样编译。
 
-这段集成之所以独立成模块、而不是放在本包内的 integration 目录，是因为 `versionDefines` 只读取已解析的 UPM 包清单。`CycloneGames.Localization` 在部分项目里是 `Assets/` 下的裸目录，在另一些项目里是 `Packages/` 下的真包，于是以 `com.cyclone-games.localization` 为键的规则会在一种布局里命中、在另一种布局里永远不命中，恰好在需要它的项目里把集成静默关掉。物理隔离是唯一在两种布局下表现一致的机制。删除模块目录即可移除集成。不要把 `CYCLONEGAMES_HAS_LOCALIZATION` 加进 PlayerSettings。
+删除模块目录即可移除集成。不要把 `CYCLONEGAMES_HAS_LOCALIZATION` 加进 PlayerSettings。
 
 TextMeshPro 是叠加在该模块之上的另一项可选 capability。`CYCLONEGAMES_HAS_TEXTMESHPRO` 由两条 `versionDefines` 规则按程序集派生，并通过 `defineConstraints` 消费；它同时覆盖 TextMeshPro 存在的两条 Unity 分支。详见 [TextMeshPro 兼容性](Documents~/TextMeshProCompatibility.SCH.md)。
 
@@ -173,7 +177,7 @@ public sealed class GameUiBootstrap : MonoBehaviour
 }
 ```
 
-当配置的 `Source` 为 `PrefabReference` 时，通过显式配置打开窗口不需要 Asset Provider。按稳定窗口 ID 通过 Provider 加载时，需提供 `IUIWindowAssetProvider`；包内 adapter 接收由应用持有的 `IAssetPackage` 与 `IAssetPathBuilder`。
+当配置的 `Source` 为 `PrefabReference` 时，通过显式配置打开窗口不需要 Asset Provider。按稳定窗口 ID 通过 Provider 加载时，由 composition root 提供任意 `IUIWindowAssetProvider`；UIFramework 不依赖特定的 Asset Backend。可选的 AssetManagement adapter 接收由应用持有的 `IAssetPackage` 与 `IAssetPathBuilder`；`Samples/` 中的 `DelegatedUIWindowAssetProvider` 是零依赖参考实现：由 composition root 注入两个加载委托。
 
 ## 核心概念
 
@@ -271,6 +275,8 @@ Prefab 根对象必须包含 `UIWindow` 派生组件。`UIAssetReference.Locatio
 `CullWhenHidden` 在两种隐藏窗口成本之间做选择。默认 `false` 时，`SetVisible(false)` 只驱动 `CanvasGroup`（alpha 归零，关闭交互与射线）：窗口仍参与 GPU 渲染与合批，但重新显示时没有布局重建成本。设为 `true` 时，隐藏会额外调用 `gameObject.SetActive(false)`，将窗口从渲染与事件处理中完全剔除（Canvas 子树停止合批）；重新显示时 GameObject 重新激活，且可见状态的 `CanvasGroup` 已一并应用。对长期隐藏的重型窗口启用该选项；对频繁切换的窗口保持默认，避免每次激活都重建布局。
 
 ### 使用 AssetManagement 加载窗口
+
+该 adapter 位于 `CycloneGames.UIFramework.Runtime.Integrations.AssetManagement`。只有后端 UPM 包满足 capability define 时它才会编译，且只有宿主 composition asmdef 显式引用该 Integration 时才会被使用。
 
 ```csharp
 using CycloneGames.AssetManagement.Runtime;
@@ -481,7 +487,7 @@ LitMotion Driver 的 fade、scale 与 slide 动画从窗口当前值（alpha、l
 
 ### 诊断与可观测性
 
-`GetPerformanceStats()` 返回 Session、生命周期阶段、Scene-bound Window、Binder、Isolated Canvas、Layer 与配置最大值等计数。`CopyLayerRuntimeStats` 和 `CopyActiveWindows` 写入调用方缓冲区。`DynamicAtlasService.GetStats()` 报告 Page、Entry、引用、估算 Texture Bytes、利用率、Copy Path、Cache Hit 与失败。`Tools > CycloneGames > UI Framework > Runtime Monitor` 从显式选择的 `UIManager` 读取这些有界 Snapshot。`Performance Auditor` 只在按下 `Scan Project` 后启动；它为 Layout Authority、Raycast、Material、Texture、Mask 与 Canvas Boundary 提供待复核项，不修改 Asset。
+`GetPerformanceStats()` 返回 Session、生命周期阶段、Scene-bound Window、Binder、Isolated Canvas、Layer 与配置最大值等计数。`CopyLayerRuntimeStats` 和 `CopyActiveWindows` 写入调用方缓冲区。`Tools > CycloneGames > UI Framework > Runtime Monitor` 从显式选择的 `UIManager` 读取这些有界 Snapshot。`Performance Auditor` 只在按下 `Scan Project` 后启动；它为 Layout Authority、Raycast、Material、Texture、Mask 与 Canvas Boundary 提供待复核项，不修改 Asset。
 
 `UIPresenterBinder.LogMissingPresenterMappings` 可以在开发阶段通过 `CycloneGames.UIFramework` 报告未映射窗口。其消息使用 deferred state formatting，因此 channel 关闭时不会构建消息。若未映射是常态或日志量会产生负担，应保持关闭。
 
@@ -542,13 +548,11 @@ Open 与 Close 是生命周期操作，不是零分配热循环。一个会话�
 
 ### 缓存与 Lease policy
 
-窗口会话 Service 不保留窗口池或已关闭窗口缓存。Provider 可以共享底层资产，但每次成功获取都会返回由会话持有的 Lease，在 Binding 清理和窗口销毁后 Dispose。动态图集 Retention 是独立且显式有界的 Cache，具有自己的 Sprite Lease 与 Trim Policy。`DynamicAtlasSpriteLease` 是引用池化记录的值类型句柄，缓存命中路径零分配；cache miss 时 `maxMissesPerFrame` 限制每帧像素工作，超出预算返回瞬态的 `DynamicAtlasInsertStatus.Throttled`，调用方在后续帧重试即可。只有 Profiling 证明实例 churn 是主要成本，并且产品可以定义容量、Reset、耗尽、陈旧引用、Scene 与 Shutdown policy 时，才应增加池。
-
-`DynamicAtlasStats` 会在当前 page、entry、reference、retained entry、estimated bytes、pending-destruction bytes 与压力 counter 之外，报告配置的 `PageCapacity`、`EntryCapacity` 和 `MemoryBudgetBytes`。达到 page、entry 或 byte ceiling 时，admission 继续通过显式 `DynamicAtlasInsertStatus` 失败；active sprite lease 永不被驱逐。`TrimUnused(maximumEntriesToRemove)` 是安全的 owner-local mitigation，只移除零引用 retained entry；参数小于等于零时 no-op。legacy 无参数调用保持源码兼容，并可能清空全部 eligible entry，但总 work 仍受已校验的 `maxEntries` 限制（hard maximum 为 65,535）；pressure orchestration 应始终传入更小的单 pump work budget。
+窗口会话 Service 不保留窗口池或已关闭窗口缓存。Provider 可以共享底层资产，但每次成功获取都会返回由会话持有的 Lease，在 Binding 清理和窗口销毁后 Dispose。运行时 Sprite Packing 不属于本包：项目使用可选的 [CycloneGames.DynamicAtlas](../CycloneGames.DynamicAtlas/README.SCH.md) 包时，其 Page、Entry 与 Lease policy 由该包负责，与窗口会话相互独立。只有 Profiling 证明实例 churn 是主要成本，并且产品可以定义容量、Reset、耗尽、陈旧引用、Scene 与 Shutdown policy 时，才应增加池。
 
 ### 线程、AOT 与 Stripping
 
-`UIService` 与 `DynamicAtlasService` 捕获 Unity Owner Thread，并拒绝其他线程调用。Binder、Presenter、生命周期回调、过渡、Hierarchy 修改、Locale Layout 应用、Texture Copy 与 Lease 消费也在该线程运行。Asset Provider 可以按自身 policy 执行后端 I/O 或解压；完成的 Unity Object 会在校验与实例化前切回主线程。不要用 Lock 包围 Unity Object 访问；应把工作调度到 Owner Thread。
+`UIService` 捕获 Unity Owner Thread，并拒绝其他线程调用。Binder、Presenter、生命周期回调、过渡、Hierarchy 修改与 Locale Layout 应用也运行在该线程。Asset Provider 可以按自身 policy 执行后端 I/O 或解压；完成的 Unity Object 会在校验与实例化前切回主线程。不要用 Lock 包围 Unity Object 访问；应把工作调度到 Owner Thread。
 
 核心避免反射发现、运行时代码生成与仅 JIT 可用的 Delegate；Presenter Mapping 与 Binder 均显式连接，因此 IL2CPP/AOT Composition 可以工作。第三方容器或内容后端仍可能需要自己的生成注册或 `link.xml`。必须用代表性 Player Build 验证 Stripping；Editor 编译不能作为证据。WebGL 不能假定存在通用托管 Worker Thread；主线程受限 API 与异步 Yield 不依赖后台线程。
 
@@ -558,7 +562,6 @@ Open 与 Close 是生命周期操作，不是零分配热循环。一个会话�
 - Binding 与 Presenter Dispose 必须幂等。
 - 不要直接 Destroy 受管窗口；调用 `CloseAsync`。
 - 不要在 Lease Owner 之外 Dispose Provider Handle。
-- `Image` 使用动态图集 Sprite 的完整期间都要持有对应 Lease，随后只 Dispose 一次。
 - 独立限制 `MaxActiveWindows` 与内容系统缓存预算。
 - 重复 Open/Close 和场景切换后检查 Retained Unity Object。
 
@@ -621,4 +624,3 @@ Open 与 Close 是生命周期操作，不是零分配热循环。一个会话�
 | `IUITransitionCoordinator` | 双窗口导航过渡 |
 | `TryGetWindow`、`CopyActiveWindows` | 活动窗口查找/快照 |
 | `GetPerformanceStats`、`CopyLayerRuntimeStats` | 有界 Runtime 诊断 |
-| `DynamicAtlasService`、`DynamicAtlasSpriteLease` | 具有显式 Ownership 的有界 Runtime Sprite Packing |
